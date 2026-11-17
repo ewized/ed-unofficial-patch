@@ -2,10 +2,16 @@
 
 ## Status
 
-- Measured rendering candidate: installed ED-UP `8fe2295`, sealed graphics/runtime
-  pair. Current work targets NVIDIA native rendering; FG optimization/backend
-  work is cancelled. [Native VRS code changes](native-vrs-code-optimization-2026-11-17.md)
-  await the full native MSVC development build; no new performance gain is claimed.
+- Current validated rendering candidate: installed clean ED-UP `52ca7b0f`.
+  Its fresh native build passed all 214 jobs, the separate NVIDIA GPU probe and
+  a docked game VRS diagnostic with 5 left / 10 right matched triples. See
+  [native VRS code changes](native-vrs-code-optimization-2026-11-17.md#clean-destination-validation).
+  Earlier timing comparisons below used sealed `8fe2295`; no FPS improvement
+  from the new code is established. FG optimization/backend work is cancelled.
+- Automated entry subsequently reached the docked tutorial in 130.33 seconds
+  from a clean stopped session; the first new-candidate run took 154.18 seconds.
+  Reusing the earlier loaded cockpit took 3.74 seconds with no launch or keys.
+  These are workflow timings with existing caches, not rendering performance.
 - Corrected-controller Start/Stop passed: Start/launcher/smoke exit 0, Frontier
   closed and MCP ready; Stop stopped_clean/exit 0. No errors, held input, driver
   lease, active receipt or game/runtime processes remained. Closure was normal.

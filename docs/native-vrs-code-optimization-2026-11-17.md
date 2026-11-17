@@ -18,10 +18,14 @@
   their incomplete-validation status.
 - The native MSVC real-owner GPU probe separately passed six offscreen cases
   with simulated gaze. This is component correctness evidence, not game FPS.
-- Development artifacts identify themselves as **64d04505-dirty**. No new
-  installation, flight or destination test is qualified. Before use, the dirty
-  binaries need receipt-based clean promotion or validation by the destination
-  owner. Source validation is complete; the 4000-square/90-Hz goal is not achieved.
+- Earlier development artifacts identify themselves as **64d04505-dirty** and
+  remain unsuitable for installation. A fresh destination build of clean
+  **52ca7b0f** subsequently passed all 214 native jobs and the separate NVIDIA
+  GPU probe, then passed installed-build verification and a docked game test.
+- The new sampler produced **5 left / 10 right matched triples** with no pending
+  queries. All 132 sample queries were valid; independent joins reproduced
+  every acceptance decision. See [destination validation](#clean-destination-validation).
+  This qualifies the tested diagnostic, not a whole-frame speedup or 90 Hz.
 - Scope is native NVIDIA rendering optimization; FG optimization is cancelled.
   No measured FPS or elapsed GPU-time gain is claimed.
 
@@ -200,10 +204,11 @@ those artifacts into the game. Independently hashed copied development outputs:
 | openvr_api.dll | a07cfa5891d90edea9a510d6ed57c81233edcc9945c5cf6087e254ec4f84a5c0 |
 | edvr-installer.exe | 5b58b83fa84d179aa63343b0869985045426f39e081897e9793a27f8e5310a18 |
 
-The dirty build must undergo receipt-based clean promotion or validation by the
-destination owner before use. The target handoff supplies no destination test,
-installation, flight or new FPS evidence. Source/build validation is complete;
-the 4000-square/90-Hz performance goal remains unachieved.
+The dirty build required receipt-based clean promotion or destination validation
+before use. At that point the handoff supplied no destination test, installation,
+flight or new FPS evidence. The subsequent clean destination qualification below
+supersedes that installation/test gap; the 4000-square/90-Hz performance goal
+remains unachieved.
 
 A separate native MSVC build of the unchanged GPU fixture also passed actual
 hardware execution. Its private proof `msvc-native-vrs-gpu-proof.txt` reports
@@ -220,3 +225,42 @@ scoped to the sealed build that produced it: selected-draw reductions were real,
 while the separate VRS On/Off/On timing comparison established no repeatable
 whole-frame benefit. That runtime evidence neither validates this new sampler
 nor supplies a measured performance gain for either code change.
+
+## Clean destination validation
+
+A fresh native Windows build of clean rendering commit **52ca7b0f** passed in
+459.361 seconds using MSVC 19.44.35228: 46 initial and 34 inner Python gates,
+206 pooled plus 8 quiet native jobs, the focus guard and installer/PE checks.
+The new full-pass receipt retains the same validated input fingerprint above.
+Its SHA-256 is `9458b6849793f0a23afaa32e0654a9a7dcaf45401e33e4ee2aed86a69b84023c`.
+Installed graphics/runtime hashes matched those fresh outputs. The separate
+RTX 5090 offscreen probe passed coarse replication, reduced PSInvocations and
+full-rate restoration; its provider/readiness remain simulated.
+
+The installed game logs matched **52ca7b0f**. At docked Mawson Dock in Pilot
+Assessment, the test used SteamVR/OpenXR, a neutral virtual HMD, synthetic
+binocular gaze, FG Off, very-narrow native foveation and configured DLSS K.
+Sampled targets were 2320x2320; native benchmark rows recorded 4000x4000 output
+per eye. During the valid-gaze window, accepted world work increased by
+2,258,220 and map updates increased by 1,800 for each eye, with no new invalid
+pairs or driver errors. Stopping gaze restored acknowledged full rate.
+
+The bounded diagnostic armed and finished/drained in **3.704 seconds**, with
+pending=0. All **132 queries** returned valid samples. Independent joins of all
+29 completed triples reproduced **15 accepted** (left 5, right 10) and **14
+rejected** solely for full-control drift beyond 1%. Accepted triples preserved
+their identities, dimensions, draw arguments, non-PS statistics, useful floor,
+phase order and frame-span limits. Median native-map PSInvocations divided by
+mean full controls were **0.4092805 left / 0.2842389 right**: 59.07% and 71.58%
+fewer invocations on those selected draws. This is sampled shading reduction,
+not an FPS gain attributable to the new code or whole-frame GPU savings.
+
+Private filtered artifact `vrs-ps-complete.txt` contains 333 lines / 144336
+bytes, SHA-256 `00b54676562d6b5837ed3cf08c905c6f23a9012e36ea441cd2814e3eb97f9843`.
+The progress collector falsely reported an observation timeout after its short
+tail dropped the earlier armed line. Complete-log analysis proves the single
+generation finished and drained; it was not rerun. Future collectors must
+retain phase observations across polls or read only the bounded phase summary.
+Original INI/mirror and controls were restored exactly. Normal Stop left no
+held input, simulator lease or game/runtime processes. Physical calibration,
+whole-frame improvement and the 4000-square/90-Hz goal remain unproved.
