@@ -122,6 +122,12 @@ bool FrameGenerationColor::normalize(ID3D11DeviceContext* context, unsigned eye,
     if (!fg_color::descriptor(d)) { failure_ = FrameGenerationColorFailure::Descriptor; return false; }
     const auto format = fg_color::canonical(d.Format);
     if (format == DXGI_FORMAT_UNKNOWN) { failure_ = FrameGenerationColorFailure::Format; return false; }
+    // The caller immediately copies this borrowed image into immutable interop
+    // storage. Exact canonical input needs no intermediate image or GPU copy.
+    if (d.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        if (FAILED(impl_->device->GetDeviceRemovedReason())) { failure_ = FrameGenerationColorFailure::Device; return false; }
+        *output = source; failure_ = FrameGenerationColorFailure::None; return true;
+    }
     auto& e = impl_->eyes[eye];
     bool colorChanged = false;
     if (!impl_->texture(e.color, d.Width, d.Height, format, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &colorChanged)) {
@@ -164,11 +170,16 @@ bool FrameGenerationColor::emptyUi(ID3D11DeviceContext* context, unsigned eye, u
         failure_ = FrameGenerationColorFailure::Allocation; return false;
     }
     if (changed) e.emptyView[index].Reset();
-    if (!e.emptyView[index] && FAILED(impl_->device->CreateRenderTargetView(e.empty[index].Get(), nullptr, &e.emptyView[index]))) {
-        failure_ = FrameGenerationColorFailure::Allocation; return false;
+    if (!e.emptyView[index]) {
+        if (FAILED(impl_->device->CreateRenderTargetView(e.empty[index].Get(), nullptr, &e.emptyView[index]))) {
+            failure_ = FrameGenerationColorFailure::Allocation; return false;
+        }
+        // These private identity images are read-only after initialization.
+        // A missing view also covers retry after failed view creation.
+        const float clear[4] = {multiply ? 1.f : 0.f, multiply ? 1.f : 0.f, multiply ? 1.f : 0.f, 1.f};
+        context->ClearRenderTargetView(e.emptyView[index].Get(), clear);
     }
-    const float clear[4] = {multiply ? 1.f : 0.f, multiply ? 1.f : 0.f, multiply ? 1.f : 0.f, 1.f};
-    context->ClearRenderTargetView(e.emptyView[index].Get(), clear);
+    if (FAILED(impl_->device->GetDeviceRemovedReason())) { failure_ = FrameGenerationColorFailure::Device; return false; }
     *output = e.empty[index].Get(); failure_ = FrameGenerationColorFailure::None; return true;
 }
 }

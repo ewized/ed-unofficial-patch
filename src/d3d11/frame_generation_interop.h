@@ -68,8 +68,13 @@ public:
     bool begin(ID3D11DeviceContext*, std::uint64_t sequence, std::uint64_t historyGeneration) noexcept;
     // Copy immediately at the authoritative temporal/sharp-eye callback, before
     // mutable source reuse. sourceIdentity is an audit tag, not content proof.
+    // A pooled source must supply its immutable owner. The transport retains it
+    // until this slot's producer/consumer GPU work and external leases retire,
+    // including partial captures sealed by abort(). An empty owner preserves
+    // the ordinary independently owned COM-texture contract.
     bool capture(ID3D11DeviceContext*, std::uint64_t sequence, std::uint64_t historyGeneration,
-        unsigned eye, FrameGenerationPlane, ID3D11Texture2D*, std::uint64_t sourceIdentity) noexcept;
+        unsigned eye, FrameGenerationPlane, ID3D11Texture2D*, std::uint64_t sourceIdentity,
+        std::shared_ptr<const void> sourceOwner = {}) noexcept;
     // Both eyes must contain exactly the coordinator's explicit required mask.
     // One Signal+Flush follows all copies. Null UI never implicitly means empty.
     std::shared_ptr<FrameGenerationInteropLease> publish(ID3D11DeviceContext*,

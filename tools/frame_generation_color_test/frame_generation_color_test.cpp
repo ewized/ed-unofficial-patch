@@ -107,6 +107,67 @@ void cpu() {
           "CPU OFF/refusal path loaded neither D3D11 nor shader compiler");
 }
 
+// Observe the real production GPU calls on this private fixture context.
+// The per-object table is restored before its storage leaves scope.
+struct ColorCommandSpy {
+    using Copy = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+    using Clear = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT*);
+    inline static ColorCommandSpy* active = nullptr;
+    ID3D11DeviceContext* context;
+    void** original;
+    std::array<void*, 115> table{};
+    unsigned copies = 0, clears = 0;
+    static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* c, ID3D11Resource* target, ID3D11Resource* source) {
+        ++active->copies;
+        reinterpret_cast<Copy>(active->original[47])(c, target, source);
+    }
+    static void STDMETHODCALLTYPE clear(ID3D11DeviceContext* c, ID3D11RenderTargetView* view, const FLOAT* color) {
+        ++active->clears;
+        reinterpret_cast<Clear>(active->original[50])(c, view, color);
+    }
+    void install(void** replacement) {
+        DWORD previous = 0, ignored = 0;
+        check(VirtualProtect(context, sizeof(void*), PAGE_READWRITE, &previous) != 0, "color spy context writable");
+        *reinterpret_cast<void***>(context) = replacement;
+        check(VirtualProtect(context, sizeof(void*), previous, &ignored) != 0, "color spy context protection restored");
+    }
+    explicit ColorCommandSpy(ID3D11DeviceContext* c) : context(c), original(*reinterpret_cast<void***>(c)) {
+        check(!active, "one color command spy owner");
+        std::memcpy(table.data(), original, sizeof(table));
+        table[47] = reinterpret_cast<void*>(&copy); table[50] = reinterpret_cast<void*>(&clear);
+        active = this; install(table.data());
+    }
+    ~ColorCommandSpy() { install(original); active = nullptr; }
+};
+
+// Fail one real view creation, leaving allocation successful. A subsequent
+// call must initialize the retained texture instead of publishing undefined pixels.
+struct ViewFailure {
+    using Create = HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*, ID3D11Resource*, const D3D11_RENDER_TARGET_VIEW_DESC*, ID3D11RenderTargetView**);
+    inline static ViewFailure* active = nullptr;
+    ID3D11Device* device;
+    void** original;
+    std::array<void*, 43> table{};
+    bool fail = true;
+    static HRESULT STDMETHODCALLTYPE create(ID3D11Device* d, ID3D11Resource* resource,
+        const D3D11_RENDER_TARGET_VIEW_DESC* desc, ID3D11RenderTargetView** output) {
+        if (active->fail) { active->fail = false; if (output) *output = nullptr; return E_OUTOFMEMORY; }
+        return reinterpret_cast<Create>(active->original[9])(d, resource, desc, output);
+    }
+    void install(void** replacement) {
+        DWORD previous = 0, ignored = 0;
+        check(VirtualProtect(device, sizeof(void*), PAGE_READWRITE, &previous) != 0, "view failure device writable");
+        *reinterpret_cast<void***>(device) = replacement;
+        check(VirtualProtect(device, sizeof(void*), previous, &ignored) != 0, "view failure protection restored");
+    }
+    explicit ViewFailure(ID3D11Device* d) : device(d), original(*reinterpret_cast<void***>(d)) {
+        check(!active, "one view failure owner");
+        std::memcpy(table.data(), original, sizeof(table)); table[9] = reinterpret_cast<void*>(&create);
+        active = this; install(table.data());
+    }
+    ~ViewFailure() { install(original); active = nullptr; }
+};
+
 struct Device {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
@@ -301,8 +362,15 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
         sentinels.bind(device);
         ComputeSnapshot before(device.context.Get());
         ID3D11Texture2D* output = nullptr;
-        check(adapter.normalize(device.context.Get(), eye, source.Get(), &output) && output && output != source.Get(),
-              "production adapter returns a distinct typed color image");
+        {
+            ColorCommandSpy calls(device.context.Get());
+            check(adapter.normalize(device.context.Get(), eye, source.Get(), &output) && output,
+                  "production adapter returns a typed color image");
+            check(calls.copies == (format == DXGI_FORMAT_R8G8B8A8_UNORM ? 0u : 1u),
+                  "exact canonical color skips normalization copy; fallback preserves one copy");
+        }
+        check((output == source.Get()) == (format == DXGI_FORMAT_R8G8B8A8_UNORM),
+              "only exact canonical RGBA8 borrows the original source");
         before.equal(ComputeSnapshot(device.context.Get()));
         D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
         check(desc.Width == width && desc.Height == height && desc.Format == edvr::fg_color::canonical(format),
@@ -311,11 +379,11 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
         check(read(device, source.Get()) == original, "production conversion leaves source image unchanged");
         auto* firstOutput = output;
         check(adapter.normalize(device.context.Get(), eye, source.Get(), &output) && output == firstOutput,
-              "same eye and descriptor reuses private output resource");
+              "same eye and descriptor reuses the canonical source or private output");
         before.equal(ComputeSnapshot(device.context.Get()));
     }
-    auto original = pattern(DXGI_FORMAT_R8G8B8A8_UNORM, 7, 3);
-    auto source = texture(device.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 7, 3, 0, &original);
+    auto original = pattern(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 7, 3);
+    auto source = texture(device.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 7, 3, 0, &original);
     ID3D11Texture2D* output = nullptr;
     check(adapter.normalize(device.context.Get(), 0, source.Get(), &output) && read(device, output) == original,
           "descriptor change recreates correctly sized output without stale conversion views");
@@ -369,6 +437,8 @@ void refusals(Device& device, FrameGenerationColor& adapter) {
     check(!adapter.initialize(false, poison<ID3D11Device>(), poison<ID3D11DeviceContext>(), 0) &&
           adapter.failure() == Failure::Owner, "reinitializing live adapter OFF cannot alter its ownership");
     check(adapter.normalize(device.context.Get(), 0, source.Get(), &output), "live adapter remains usable after rejected reinitialization");
+    auto scratchSource = texture(device.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 13, 9, 0);
+    check(adapter.normalize(device.context.Get(), 0, scratchSource.Get(), &output), "noncanonical input obtains private scratch");
     ID3D11Texture2D* ownColor = output;
     check(!adapter.normalize(device.context.Get(), 0, ownColor, &output) && !output,
           "same-eye output cannot alias a normalization source");
@@ -406,8 +476,54 @@ void emptyUi(Device& device, FrameGenerationColor& adapter) {
           "invalid-eye empty UI refused");
 }
 
-void gpu() {
+// Alternate both identities and eyes through reuse, resize, and failed view
+// creation. Pixels and observed clear calls qualify each cache transition.
+void emptyUiReuse(Device& device) {
+    FrameGenerationColor adapter;
+    check(adapter.initialize(true, device.device.Get(), device.context.Get(), GetCurrentThreadId()), "empty UI cache owner");
+    ColorCommandSpy calls(device.context.Get());
+    std::array<ComPtr<ID3D11Texture2D>, 4> originals;
+    for (unsigned pass = 0; pass < 3; ++pass) for (unsigned eye = 0; eye < 2; ++eye) for (bool multiply : {false, true}) {
+        const unsigned index = eye * 2 + unsigned(multiply);
+        ID3D11Texture2D* output = nullptr;
+        const auto previous = calls.clears;
+        check(adapter.emptyUi(device.context.Get(), eye, 13, 9, multiply, true, &output), "cached empty identity admitted");
+        check(calls.clears - previous == (pass == 0 ? 1u : 0u), "empty UI clears once per eye and identity, never on reuse");
+        if (!pass) originals[index] = output;
+        check(output == originals[index].Get(), "alternating empty identities retain their own immutable image");
+        std::vector<unsigned char> expected(13 * 9 * 4, multiply ? 255 : 0);
+        for (size_t i = 3; i < expected.size(); i += 4) expected[i] = 255;
+        check(read(device, output) == expected, "reused empty identity preserves every pixel");
+    }
+    for (unsigned eye = 0; eye < 2; ++eye) for (bool multiply : {false, true}) {
+        ID3D11Texture2D* output = poison<ID3D11Texture2D>();
+        const auto previous = calls.clears;
+        {
+            ViewFailure failure(device.device.Get());
+            check(!adapter.emptyUi(device.context.Get(), eye, 7, 3, multiply, true, &output) && !output &&
+                  adapter.failure() == Failure::Allocation, "failed resized view creation exposes no uninitialized plane");
+            check(calls.clears == previous, "failed view creation does not issue a clear");
+            check(adapter.emptyUi(device.context.Get(), eye, 7, 3, multiply, true, &output) && output,
+                  "retry initializes allocated empty plane after view creation failure");
+        }
+        check(calls.clears == previous + 1, "resized identity clears exactly once after successful retry");
+        check(output != originals[eye * 2 + unsigned(multiply)].Get(), "resize replaces only selected cached identity");
+        std::vector<unsigned char> expected(7 * 3 * 4, multiply ? 255 : 0);
+        for (size_t i = 3; i < expected.size(); i += 4) expected[i] = 255;
+        check(read(device, output) == expected, "resized identity has correct initialized pixels");
+        check(adapter.emptyUi(device.context.Get(), eye, 7, 3, multiply, true, &output) && calls.clears == previous + 1,
+              "resized identity remains read-only on reuse");
+        std::vector<unsigned char> oldExpected(13 * 9 * 4, multiply ? 255 : 0);
+        for (size_t i = 3; i < oldExpected.size(); i += 4) oldExpected[i] = 255;
+        check(read(device, originals[eye * 2 + unsigned(multiply)].Get()) == oldExpected,
+              "retained former identity survives resize and failure unchanged");
+    }
+    std::printf("empty_ui_cache initialized_planes=8 production_clears=%u repeated_clears=0 failed_views=4\n", calls.clears);
+}
+
+void gpu(bool emptyOnly) {
     Device device;
+    if (emptyOnly) { emptyUiReuse(device); device.noErrors(); return; }
     {
         FrameGenerationColor adapter;
         check(adapter.initialize(true, device.device.Get(), device.context.Get(), GetCurrentThreadId()),
@@ -416,6 +532,7 @@ void gpu() {
         pixels(device, adapter, sentinels);
         refusals(device, adapter);
         emptyUi(device, adapter);
+        emptyUiReuse(device);
         device.context->ClearState();
         device.context->Flush();
         device.noErrors();
@@ -425,17 +542,18 @@ void gpu() {
 }
 
 int main(int argc, char** argv) {
-    bool runGpu = false;
+    bool runGpu = false, emptyOnly = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--gpu")) runGpu = true;
+        else if (!std::strcmp(argv[i], "--gpu-empty-ui")) { runGpu = true; emptyOnly = true; }
         else if (std::strcmp(argv[i], "--self-test")) {
-            std::fprintf(stderr, "Usage: frame_generation_color_test [--self-test] [--gpu]\n");
+            std::fprintf(stderr, "Usage: frame_generation_color_test [--self-test] [--gpu | --gpu-empty-ui]\n");
             return 2;
         }
     }
     try {
         cpu();
-        if (runGpu) gpu();
+        if (runGpu) gpu(emptyOnly);
         std::printf("PASS FG production color adapter checks=%u mode=%s game_calls=0 ngx_calls=0\n",
             checks, runGpu ? "WARP" : "CPU-no-D3D11-or-compiler-load");
         return 0;

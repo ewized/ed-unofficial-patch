@@ -1058,7 +1058,7 @@ template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,D
 void nativeBeforeOriginal(ID3D11DeviceContext* context) {
     if(!nativeVrsLive())return;
     const auto* d=g_nativeWorldDecision;
-    if(d&&d->context==context&&d->eye<2){
+    if(d&&d->context==context&&d->eye<2&&nativeVrsCoarseRequested()){
         struct ProjectionCache {NativeVrsProjection value{};bool valid=false;};
         static thread_local ProjectionCache cache[2];
         const uint64_t sequence=nativeTemporalFrameSequence();auto& p=cache[d->eye];
@@ -4690,7 +4690,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
         VrsCoverageDraw vrsDraw{};
         uint64_t vrsVs=0,vrsPs=0;bool vrsEye=false,vrsNotUi=false,vrsClass=false;int vrsEyeId=-1;
         const bool native=nativeVrsLive();NativeWorldDecision nativeDecision{self};
-        if (vrsCoverageEnabled()||native) {
+        if (vrsCoverageEnabled()||(native&&nativeVrsCoarseRequested())) {
             int eye=-1,target=-1;
             vrsVs=bindingShaderHash(BindSlot::Vs);
             if(vrsVs==vrs_coverage::kWorldVs)vrsPs=bindingShaderHash(BindSlot::Ps);

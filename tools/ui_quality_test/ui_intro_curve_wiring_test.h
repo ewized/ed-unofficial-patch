@@ -51,7 +51,7 @@ const char* const kLambda =
     "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
     "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}VrsCoverageDrawvrsDraw{};"
     "uint64_tvrsVs=0,vrsPs=0;boolvrsEye=false,vrsNotUi=false,vrsClass=false;intvrsEyeId=-1;"
-    "constboolnative=nativeVrsLive();NativeWorldDecisionnativeDecision{self};if(vrsCoverageEnabled()||native){"
+    "constboolnative=nativeVrsLive();NativeWorldDecisionnativeDecision{self};if(vrsCoverageEnabled()||(native&&nativeVrsCoarseRequested())){"
     "inteye=-1,target=-1;vrsVs=bindingShaderHash(BindSlot::Vs);if(vrsVs==vrs_coverage::kWorldVs)vrsPs=bindingShaderHash(BindSlot::Ps);"
     "vrsEye=g_state->rtv0Eye;vrsNotUi=!uiLayerRedirecting();vrsClass=altered.cls==AlteredDrawClass::None||altered.cls==AlteredDrawClass::PoolFamily;"
     "constboolworld=owner&&vrsEye&&vrsNotUi&&vrsClass&&vrs_coverage::knownWorldFamily(vrsVs,vrsPs);"

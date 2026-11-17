@@ -1,6 +1,7 @@
 // No D3D imports or runtime calls on the default CPU path. --gpu explicitly
 // opts into a standalone NVIDIA same-adapter D3D11/D3D12 correctness fixture.
 #include "../../src/d3d11/frame_generation_interop.h"
+#include "../../src/d3d11/frame_generation_color.h"
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <array>
@@ -35,6 +36,12 @@ void cpu() {
     check(!adapter.initialize(config) && adapter.status().failure == FrameGenerationInteropFailure::Off,
           "actual adapter OFF does not dereference poison COM pointers");
     check(!adapter.begin(config.context, 1, 1) && !adapter.device12(), "OFF cannot start an interop transaction");
+    FrameGenerationColor color;
+    ID3D11Texture2D* normalized = reinterpret_cast<ID3D11Texture2D*>(std::uintptr_t{3});
+    check(!color.initialize(false, config.device11, config.context, 1) &&
+          !color.normalize(config.context, 0, normalized, &normalized) && !normalized,
+          "production color OFF and uninitialized normalization do not query poison COM pointers");
+    check(!GetModuleHandleW(L"d3dcompiler_47.dll"), "CPU color path does not load shader compiler");
     check(!GetModuleHandleW(L"d3d11.dll") && !GetModuleHandleW(L"d3d12.dll") && !GetModuleHandleW(L"dxgi.dll"),
           "CPU actual-adapter path loaded no graphics runtime or driver");
 }
@@ -142,12 +149,56 @@ struct Job {
     std::vector<Copy> copies;
     std::uint64_t completion = 0;
 };
+// Interop uses Context4 while normalization uses the base interface. Hook
+// both per-object tables when QI returns distinct interface pointers.
+struct CaptureCopySpy {
+    using Copy = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+    struct Table { ID3D11DeviceContext* context = nullptr; void** original = nullptr; std::vector<void*> slots; };
+    inline static CaptureCopySpy* active = nullptr;
+    ComPtr<ID3D11DeviceContext4> context4;
+    std::array<Table, 2> tables;
+    unsigned copies = 0;
+    static void STDMETHODCALLTYPE copy(ID3D11DeviceContext* c, ID3D11Resource* target, ID3D11Resource* source) {
+        ++active->copies;
+        for (const auto& table : active->tables) if (table.context == c) {
+            reinterpret_cast<Copy>(table.original[47])(c, target, source); return;
+        }
+        std::terminate();
+    }
+    static void install(Table& table, void** slots) {
+        DWORD previous = 0, ignored = 0;
+        check(VirtualProtect(table.context, sizeof(void*), PAGE_READWRITE, &previous) != 0, "capture spy context writable");
+        *reinterpret_cast<void***>(table.context) = slots;
+        check(VirtualProtect(table.context, sizeof(void*), previous, &ignored) != 0, "capture spy protection restored");
+    }
+    void attach(unsigned index, ID3D11DeviceContext* context, size_t count) {
+        auto& table = tables[index]; table.context = context; table.original = *reinterpret_cast<void***>(context);
+        table.slots.assign(table.original, table.original + count); table.slots[47] = reinterpret_cast<void*>(&copy);
+        install(table, table.slots.data());
+    }
+    explicit CaptureCopySpy(ID3D11DeviceContext* context) {
+        check(!active, "one capture copy spy owner");
+        hr(context->QueryInterface(IID_PPV_ARGS(&context4)), "capture spy queries actual Context4");
+        active = this;
+        // Context4 has 149 methods, including Signal and Wait. A distinct base
+        // interface needs only its own 115 methods; never truncate Context4.
+        if (context == static_cast<ID3D11DeviceContext*>(context4.Get())) attach(0, context, 149);
+        else { attach(0, context, 115); attach(1, context4.Get(), 149); }
+    }
+    ~CaptureCopySpy() {
+        for (auto& table : tables) if (table.context) install(table, table.original);
+        active = nullptr;
+    }
+};
+
 struct Gpu {
     Runtime runtime;
     std::unique_ptr<FrameGenerationInterop> adapter;
+    FrameGenerationColor normalizer;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
-    ComPtr<ID3D12Fence> completion, gate;
+    ComPtr<ID3D12Fence> completion, gate, producerGate;
+    ComPtr<ID3D11Fence> producerGate11;
     HANDLE event = nullptr;
     std::uint64_t serial = 0;
     // Every submission retains its command storage and resources until a
@@ -166,6 +217,8 @@ struct Gpu {
     void initialize() {
         adapter = std::make_unique<FrameGenerationInterop>();
         check(adapter->initialize(config()), "actual adapter initializes NVIDIA same-adapter shared fences/device");
+        check(normalizer.initialize(true, runtime.device.Get(), runtime.context.Get(), GetCurrentThreadId()),
+              "production color normalizer shares the authoritative render owner");
         device = adapter->device12();
         D3D12_COMMAND_QUEUE_DESC desc{}; desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         hr(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue)), "standalone consumer queue");
@@ -176,12 +229,28 @@ struct Gpu {
     bool drain() noexcept {
         // Always release the private queue first, including every exception,
         // allocation failure and failed assertion after Queue::Wait.
+        if (producerGate && FAILED(producerGate->Signal(1))) return false;
         if (gate && FAILED(gate->Signal(1))) return false;
         if (runtime.context) runtime.context->Flush();
         if (!queue) return true;
         if (!completion || !event) return false;
         const auto target = ++serial;
         return SUCCEEDED(queue->Signal(completion.Get(), target)) && waitFence(completion.Get(), target, event);
+    }
+    // Private shared fence blocks producer GPU execution without a CPU wait.
+    // drain() always releases it before attempting any bounded cleanup.
+    void blockProducer() {
+        hr(device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&producerGate)), "private producer gate fence");
+        ComPtr<ID3D11Device5> device5;
+        hr(runtime.device.As(&device5), "private producer gate Device5");
+        HANDLE shared = nullptr;
+        hr(device->CreateSharedHandle(producerGate.Get(), nullptr, GENERIC_ALL, nullptr, &shared), "share private producer gate");
+        const HRESULT opened = device5->OpenSharedFence(shared, IID_PPV_ARGS(&producerGate11));
+        CloseHandle(shared);
+        hr(opened, "import private producer gate into D3D11");
+        ComPtr<ID3D11DeviceContext4> context4;
+        hr(runtime.context.As(&context4), "private producer gate Context4");
+        hr(context4->Wait(producerGate11.Get(), 1), "enqueue private producer GPU wait");
     }
     void begin(std::uint64_t sequence) {
         const auto deadline = GetTickCount64() + 5000;
@@ -191,7 +260,8 @@ struct Gpu {
             Sleep(1);
         }
     }
-    Captured capture(DXGI_FORMAT color, DXGI_FORMAT ui) {
+    Captured capture(DXGI_FORMAT color, DXGI_FORMAT ui, bool normalizeColor = false,
+        std::shared_ptr<const void> sourceOwner = {}) {
         Captured captured;
         const auto sequence = nextSequence++;
         begin(sequence);
@@ -203,14 +273,31 @@ struct Gpu {
             const auto tag = sequence * 32 + eye * 8 + role + 1;
             const auto original = pattern(width, height, format, tag);
             auto source = texture(runtime.device.Get(), format, width, height, original);
-            check(adapter->capture(runtime.context.Get(), sequence, 1, eye, plane, source.Get(), tag),
-                  "actual capture copies every authoritative plane immediately");
+            if (normalizeColor && !role) {
+                CaptureCopySpy calls(runtime.context.Get());
+                ID3D11Texture2D* normalized = nullptr;
+                check(normalizer.normalize(runtime.context.Get(), eye, source.Get(), &normalized),
+                      "production normalization prepares authoritative color");
+                check(adapter->capture(runtime.context.Get(), sequence, 1, eye, plane, normalized, tag),
+                      "production immutable capture immediately follows normalization");
+                check(calls.copies == (format == DXGI_FORMAT_R8G8B8A8_UNORM ? 1u : 2u),
+                      "canonical normalize plus interop enqueues one copy; conversion fallback enqueues two");
+                std::printf("color_capture format=%u eye=%u normalization_and_interop_copies=%u\n",
+                    unsigned(format), eye, calls.copies);
+            } else {
+                check(adapter->capture(runtime.context.Get(), sequence, 1, eye, plane, source.Get(), tag,
+                      role >= 3 ? sourceOwner : std::shared_ptr<const void>{}),
+                      "actual capture copies every authoritative plane immediately");
+            }
             // Same immediate context: the source update follows its snapshot
             // copy and precedes the one producer Signal/Flush in publish().
             const auto changed = pattern(width, height, format, tag + 77);
             check(changed != original, "source mutation is discriminating");
             runtime.context->UpdateSubresource(source.Get(), 0, nullptr, changed.data(), width * bytesPerPixel(format), 0);
-            captured.expected[eye * 5 + role] = original;
+            auto expected = original;
+            if (normalizeColor && !role && fg_color::bgra(format))
+                for (size_t i = 0; i < expected.size(); i += 4) std::swap(expected[i], expected[i + 2]);
+            captured.expected[eye * 5 + role] = std::move(expected);
             sources.push_back(source);
         }
         check(!adapter->publish(runtime.context.Get(), sequence, 1, frameGenerationRequiredPlanes),
@@ -335,6 +422,23 @@ void pixelCases(Gpu& gpu) {
     check(captured.lease->retire(gpu.completion.Get(), job.completion), "UI F16 retirement");
     gpu.verify(job);
 }
+// Exercise the exact coordinator order with real conversion and immutable
+// interop copies. Gpu::capture mutates each original before publication.
+void normalizedPixelCases(Gpu& gpu) {
+    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_TYPELESS,
+        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+    for (auto format : formats) {
+        auto captured = gpu.capture(format, DXGI_FORMAT_R8G8B8A8_UNORM, true);
+        auto& job = gpu.copy(captured);
+        check(captured.lease->retire(gpu.completion.Get(), job.completion), "normalized snapshot retirement");
+        gpu.verify(job);
+        for (unsigned eye = 0; eye < 2; ++eye)
+            check(captured.lease->plane(eye, FrameGenerationPlane::Color)->sourceDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
+                  "all SDR normalization routes retain canonical encoded-color format");
+    }
+}
+
 void ringCases(Gpu& gpu) {
     std::array<Captured, 3> held;
     for (auto& item : held) {
@@ -367,6 +471,88 @@ void ringCases(Gpu& gpu) {
     gpu.begin(blockedSequence);
     check(gpu.adapter->abort(gpu.runtime.context.Get(), blockedSequence, 1), "completed consumer fence releases ring slot");
 }
+// A copied pooled source still has producer work that may read it. Its owner
+// must follow the transport slot through publication, cancellation, retirement,
+// and partial abort, even after the caller drops its Work-equivalent reference.
+void sourceOwnerCases(Gpu& gpu) {
+    gpu.blockProducer();
+    auto pendingOwner = std::make_shared<unsigned>(99);
+    std::weak_ptr<unsigned> pendingWeak = pendingOwner;
+    auto pending = gpu.capture(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false, pendingOwner);
+    pendingOwner.reset();
+    const auto producerCompleted = pending.lease->producerFence()->GetCompletedValue();
+    check(producerCompleted != UINT64_MAX && producerCompleted < pending.lease->producerValue(),
+          "private GPU gate proves source copies still pending");
+    check(!pendingWeak.expired(), "pending producer copies retain pooled source owner after caller release");
+    check(pending.lease->cancel(), "pending owned source cancellation still requires producer retirement");
+    check(!pendingWeak.expired(), "cancel cannot release source owner while producer GPU is gated");
+    hr(gpu.producerGate->Signal(1), "release private producer gate before completion wait");
+    gpu.producerComplete(pending.lease); pending.lease.reset();
+    std::array<Captured, 3> held;
+    std::array<std::weak_ptr<unsigned>, 3> owners;
+    for (unsigned index = 0; index < held.size(); ++index) {
+        auto owner = std::make_shared<unsigned>(index);
+        owners[index] = owner;
+        held[index] = gpu.capture(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false, owner);
+        owner.reset();
+        check(!owners[index].expired(), "published UI capture retains source owner before producer completion proof");
+        gpu.producerComplete(held[index].lease);
+        check(held[index].lease->cancel(), "owned source no-consumer cancellation");
+        check(!owners[index].expired(), "canceled but externally held lease retains immutable source owner");
+    }
+    check(pendingWeak.expired(), "pending producer source owner releases only after completed slot reuse");
+    held[0].lease.reset();
+    const auto reuse = gpu.nextSequence++;
+    gpu.begin(reuse);
+    check(owners[0].expired() && !owners[1].expired() && !owners[2].expired(),
+          "only producer-complete lease-exclusive recycled slot releases source owner");
+    check(gpu.adapter->abort(gpu.runtime.context.Get(), reuse, 1), "owned source empty reuse abort");
+    for (auto& captured : held) captured.lease.reset();
+
+    ComPtr<ID3D12Fence> unsignaled;
+    hr(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&unsignaled)), "owned source unsignaled consumer fence");
+    for (unsigned index = 0; index < held.size(); ++index) {
+        auto owner = std::make_shared<unsigned>(index + 3);
+        owners[index] = owner;
+        auto captured = gpu.capture(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, false, owner);
+        owner.reset(); gpu.producerComplete(captured.lease);
+        check(captured.lease->retire(unsignaled.Get(), 7), "owned source attaches pending consumer retirement");
+        captured.lease.reset();
+        check(!owners[index].expired(), "unreferenced lease retains source owner until consumer completion");
+    }
+    const auto blocked = gpu.nextSequence++;
+    check(!gpu.adapter->begin(gpu.runtime.context.Get(), blocked, 1) &&
+          gpu.adapter->status().failure == FrameGenerationInteropFailure::Busy, "source-owned pending consumer slots remain busy");
+    for (const auto& owner : owners) check(!owner.expired(), "busy ring cannot release pending source owners");
+    hr(unsignaled->Signal(7), "complete source-owned no-GPU-consumer retirement");
+    // Retain each newly recycled slot so all three old owners must be released.
+    for (auto& captured : held) {
+        captured = gpu.capture(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM);
+        gpu.producerComplete(captured.lease); check(captured.lease->cancel(), "hold recycled source owner slot");
+    }
+    for (const auto& owner : owners) check(owner.expired(), "consumer-complete recycled slots release all former source owners");
+    for (auto& captured : held) captured.lease.reset();
+
+    const auto partial = gpu.nextSequence++;
+    gpu.begin(partial);
+    auto owner = std::make_shared<unsigned>(9);
+    std::weak_ptr<unsigned> abortedOwner = owner;
+    const auto pixels = pattern(13, 9, DXGI_FORMAT_R8G8B8A8_UNORM, partial);
+    auto source = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, 13, 9, pixels);
+    check(gpu.adapter->capture(gpu.runtime.context.Get(), partial, 1, 0, FrameGenerationPlane::UiColorTransmittance,
+          source.Get(), partial, owner), "partial UI capture retains pooled source owner");
+    owner.reset();
+    check(gpu.adapter->abort(gpu.runtime.context.Get(), partial, 1), "owned partial UI abort seals producer copies");
+    check(!abortedOwner.expired(), "partial abort retains source owner through producer retirement");
+    gpu.sources.push_back(source);
+    for (auto& captured : held) {
+        captured = gpu.capture(DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM);
+        gpu.producerComplete(captured.lease); check(captured.lease->cancel(), "hold slot after partial owner abort");
+    }
+    check(abortedOwner.expired(), "partial aborted source owner releases after producer-complete slot reuse");
+    for (auto& captured : held) captured.lease.reset();
+}
+
 void blockedQueueCase(Gpu& gpu) {
     auto captured = gpu.capture(DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto& job = gpu.copy(captured, true);
@@ -393,7 +579,9 @@ void runGpu(Gpu& gpu) {
     gpu.initialize();
     rejectionCases(gpu);
     pixelCases(gpu);
+    normalizedPixelCases(gpu);
     ringCases(gpu);
+    sourceOwnerCases(gpu);
     blockedQueueCase(gpu);
     lifetimeCase(gpu);
     check(SUCCEEDED(gpu.device->GetDeviceRemovedReason()) && SUCCEEDED(gpu.runtime.device->GetDeviceRemovedReason()),

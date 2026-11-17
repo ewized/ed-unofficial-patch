@@ -42,6 +42,14 @@ int main(){
     milestone.succeeded(11,0);check(milestone.pairReady&&milestone.pairSequence==11,"same-frame successful stereo outputs open the milestone");
     milestone.reset(2);check(!milestone.pairReady&&!milestone.successfulEyes&&milestone.epoch==2,"invalidate/close/new acquisition reset successful-eye evidence");
     check(!edvr::nativeVrsLive(),"default OFF draw gate");
+    check(!edvr::nativeVrsCoarseRequested(),"cold OFF does not request coarse preparation");
+    edvr::nativeVrsConfigure(true);
+    check(edvr::nativeVrsCoarseRequested()&&edvr::nativeVrsLive(),"ON requests coarse preparation before owning-frame admission");
+    edvr::nativeVrsConfigure(false);
+    check(!edvr::nativeVrsCoarseRequested()&&!edvr::nativeVrsLive(),"cold ON then OFF without an initialized driver closes both gates");
+    edvr::nativeVrsConfigure(true,.5f,.1f);
+    check(!edvr::nativeVrsCoarseRequested(),"invalid radii do not request coarse preparation");
+    edvr::nativeVrsConfigure(false);
     const auto shape=mapShape(2144,2144);check(shape.width==134&&shape.height==134&&shape.bytes==17956,"134x134 world map");
     check(mapShape(17,17).bytes==4,"partial edge tiles use ceil");
     check(!mapShape(0,1).bytes&&!mapShape(UINT_MAX,1).bytes,"invalid and overflow dimensions refuse");
@@ -120,6 +128,12 @@ int main(){
     r=run({DriverOp::Full,DriverOp::Full});
     check(r.count==2&&r.fullKnown&&!r.coarseKnown,"repeated full reset skips setters only after acknowledgement");
     check(r.calls[0].rates&&r.calls[0].version==0x10010&&r.calls[0].count==0&&!r.calls[0].enabled&&!r.calls[1].resource,"actual production disabled descriptor and null resource");
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::Off,DriverOp::Full});
+    check(!r.coarseRequested&&!r.configured&&r.live&&r.fullKnown&&!r.coarseKnown&&r.count==6,
+          "initialized ON then OFF closes preparation gate while full-rate boundary restores driver state");
+    r=run({DriverOp::Full,DriverOp::Off,DriverOp::Reconfigure});
+    check(r.coarseRequested&&r.configured&&r.live&&r.fullKnown&&!r.coarseKnown&&r.count==2,
+          "re-enable requests preparation but does not activate coarse state without fresh admission");
     r=run({DriverOp::Full,DriverOp::Left,DriverOp::Left,DriverOp::Right});
     check(r.count==5&&r.coarseKnown&&!r.refused,"same eye skips setters and eye switch binds only resource");
     check(r.calls[3].rates&&r.calls[3].version==0x10010&&r.calls[3].count==1&&r.calls[3].enabled,"actual production enabled descriptor");
@@ -139,12 +153,12 @@ int main(){
     check(r.refused&&r.failure==edvr::NativeVrsFailure::DriverCall,"reconfigure preserves latched refusal reason");
     r=run({DriverOp::FailRate,DriverOp::Full,DriverOp::Off,DriverOp::TickCurrent,DriverOp::TickZero,
            DriverOp::TickRegressed,DriverOp::TickForeignContext,DriverOp::TickForeignThread});
-    check(r.count==2&&!r.fullKnown&&r.frameOrdinal==1&&!r.configured&&r.live&&r.providerPolls==0,
+    check(r.count==2&&!r.fullKnown&&r.frameOrdinal==1&&!r.configured&&r.live&&!r.coarseRequested&&r.providerPolls==0,
         "OFF invalid duplicate and foreign ticks neither advance retry cadence nor poll gaze");
     r=run({DriverOp::FailRate,DriverOp::Full,DriverOp::Off,DriverOp::TickCurrent,DriverOp::TickZero,
            DriverOp::TickRegressed,DriverOp::TickForeignContext,DriverOp::TickForeignThread,DriverOp::TickNext});
     check(r.count==3&&r.fullKnown&&!r.coarseKnown&&r.frameOrdinal==2&&r.refused&&
-          r.failure==edvr::NativeVrsFailure::DriverCall&&!r.configured&&r.live&&r.providerPolls==0,
+          r.failure==edvr::NativeVrsFailure::DriverCall&&!r.configured&&r.live&&!r.coarseRequested&&r.providerPolls==0,
         "actual OFF Tick retries failed full-rate reset on the next owning ordinal without gaze polling");
     r=run({DriverOp::FailRate,DriverOp::Full,DriverOp::Off,DriverOp::FailRate,DriverOp::TickNext,
            DriverOp::TickCurrent,DriverOp::TickZero,DriverOp::TickRegressed,DriverOp::TickNext});

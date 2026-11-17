@@ -4058,7 +4058,7 @@ echo [edvr] === frame_generation_interop_gpu_test.exe (CPU by default) ===
 if not exist "%OBJ%\fginteropgpu" mkdir "%OBJ%\fginteropgpu"
 %CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\fginteropgpu\\" /Fe"%OBJ%\fginteropgpu\frame_generation_interop_gpu_test.exe" ^
-    "tools\frame_generation_interop_test\gpu_test.cpp" "src\d3d11\frame_generation_interop.cpp" ^
+    "tools\frame_generation_interop_test\gpu_test.cpp" "src\d3d11\frame_generation_interop.cpp" "src\d3d11\frame_generation_color.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 exit /b 1
 REM Hardware sharing is a separate explicit root-controlled run, never automatic.

@@ -34,6 +34,10 @@ void nativeVrsConfigureFocus(bool enabled,const char* profile) noexcept;
 // full-rate/reset boundaries remain reachable.
 extern std::atomic<bool> g_nativeVrsLive;
 inline bool nativeVrsLive() noexcept {return g_nativeVrsLive.load(std::memory_order_relaxed);}
+// Coarse-preparation hint only. OFF skips native classification/projection
+// work, but nativeVrsLive still owns full-rate/reset boundaries.
+// nativeVrsBeforeWorld performs authoritative config/frame/provider admission.
+bool nativeVrsCoarseRequested() noexcept;
 // Exactly one new positive ordinal from the owning immediate Present boundary.
 // Duplicate, regressed, zero, foreign-context and foreign-thread calls do not
 // poll gaze or advance the frame. No DllMain call is permitted.
@@ -88,7 +92,7 @@ struct DriverResult {
     size_t publicationCount=0;
     size_t count=0;
     bool fullKnown=false,coarseKnown=false,refused=false;
-    bool configured=false,live=false;
+    bool configured=false,live=false,coarseRequested=false;
     uint64_t frameOrdinal=0,providerPolls=0;
     NativeVrsFailure failure=NativeVrsFailure::None;
 };

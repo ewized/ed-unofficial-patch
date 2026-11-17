@@ -684,8 +684,8 @@ void nativeFgCaptureDoor(uint64_t sequence, unsigned eye, ID3D11Texture2D* sourc
         if (!planes.useMult && !c->producer->color.emptyUi(context, eye, info.width, info.height, true, true, &multiplyPlane)) {abortCapture(*c, Ui); return;}
         const auto identity = (sequence << 3) | (uint64_t(eye) << 2) | 1;
         if (!layer || !multiplyPlane || !c->producer->interop.capture(context, sequence, c->captureHistory, eye,
-            FrameGenerationPlane::UiColorTransmittance, layer, identity) || !c->producer->interop.capture(context, sequence, c->captureHistory, eye,
-            FrameGenerationPlane::UiMultiply, multiplyPlane, identity + 1)) {abortCapture(*c, Interop); return;}
+            FrameGenerationPlane::UiColorTransmittance, layer, identity, snapshot) || !c->producer->interop.capture(context, sequence, c->captureHistory, eye,
+            FrameGenerationPlane::UiMultiply, multiplyPlane, identity + 1, snapshot)) {abortCapture(*c, Interop); return;}
         c->uiMask |= 1u << eye;
     } catch (...) {abortCapture(*c, Ui);}
 }
@@ -701,6 +701,8 @@ void nativeFgCaptureWorld(uint64_t sequence, unsigned eye, ID3D11Texture2D* sour
         }
         ID3D11Texture2D* normalized = nullptr;
         auto* context = c->producer->context.Get();
+        // Exact canonical color may borrow source directly. Enqueue the
+        // immutable interop copy now, before its caller can reuse that source.
         if (!c->producer->color.normalize(context, eye, source, &normalized) || !c->producer->interop.capture(context,
             sequence, c->captureHistory, eye, FrameGenerationPlane::Color, normalized, (sequence << 3) | (uint64_t(eye) << 2) | 3)) {
             abortCapture(*c, Interop); return;

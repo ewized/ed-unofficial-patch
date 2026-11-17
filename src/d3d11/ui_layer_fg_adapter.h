@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <utility>
 
 namespace edvr::ui_layer_fg {
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
@@ -56,6 +57,14 @@ public:
         context_->CSSetSamplers(0, 2, samplers);
     }
 };
+
+struct Plane {
+    Ptr<ID3D11Texture2D> texture;
+    Ptr<ID3D11ShaderResourceView> view;
+    D3D11_TEXTURE2D_DESC description{};
+    D3D11_SHADER_RESOURCE_VIEW_DESC viewDescription{};
+};
+struct PlaneStorage { Plane layer, multiply; };
 } // namespace edvr::ui_layer_fg
 
 namespace edvr {
@@ -66,6 +75,9 @@ public:
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> layer, multiply;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> layerSrv, multiplySrv;
+    // Separate publication metadata from reusable pixels. Retaining this
+    // snapshot keeps its slot immutable through every consumer's GPU fence.
+    std::shared_ptr<ui_layer_fg::PlaneStorage> storage;
     float uv[4] = {0, 0, 1, 1};
     bool useMult = false, smooth = false;
 };
@@ -80,9 +92,11 @@ class CaptureCache {
     Ptr<ID3D11Device> device_;
     Ptr<ID3D11DeviceContext> context_;
     unsigned eye_ = 2;
+    std::array<std::shared_ptr<PlaneStorage>, 3> planes_;
 public:
     UiLayerSmaa smaa;
     uint64_t builderCalls = 0, reused = 0, resets = 0;
+    uint64_t textureAllocations = 0, viewAllocations = 0, planeReuses = 0, poolMisses = 0;
     CaptureCache() = default;
     CaptureCache(const CaptureCache&) = delete;
     CaptureCache& operator=(const CaptureCache&) = delete;
@@ -95,6 +109,18 @@ public:
         } else if (owner && owner != caller) return false;
         if (!context_ && !device_) { context_ = context; device_ = device; eye_ = eye; }
         return context_.Get() == context && device_.Get() == device && eye_ == eye;
+    }
+    // Only cache-exclusive storage may be rewritten. Every GPU reader must
+    // retain its snapshot until completion; interop capture carries that owner
+    // through its existing fence retirement. Exhaustion keeps native fallback.
+    std::shared_ptr<PlaneStorage> acquire() {
+        if (thread_.load(std::memory_order_acquire) != GetCurrentThreadId()) return {};
+        for (auto& plane : planes_) {
+            if (!plane) plane = std::make_shared<PlaneStorage>();
+            if (plane.use_count() == 1) return plane;
+        }
+        ++poolMisses;
+        return {};
     }
     bool ensure(unsigned width, unsigned height, UiLayerSmaaFail* failure) {
         if (thread_.load(std::memory_order_acquire) != GetCurrentThreadId()) return false;
@@ -109,7 +135,7 @@ public:
     bool resetOwned() noexcept {
         const DWORD owner = thread_.load(std::memory_order_acquire);
         if (owner && owner != GetCurrentThreadId()) return false;
-        smaa.releaseAll(); context_.Reset(); device_.Reset(); eye_ = 2; ++resets;
+        smaa.releaseAll(); planes_ = {}; context_.Reset(); device_.Reset(); eye_ = 2; ++resets;
         thread_.store(0, std::memory_order_release);
         return true;
     }
@@ -140,17 +166,43 @@ inline bool planeMatches(ID3D11Device* device, ID3D11Texture2D* source,
     return sourceDevice.Get() == device && viewed.Get() == static_cast<ID3D11Resource*>(source);
 }
 
+// Deep-copy into a cache slot acquired exclusively by this publication. Reuse
+// its texture/view only for matching descriptors; allocation failure never
+// replaces the old complete pair. All GPU work stays on the producer context.
 inline bool copyPlane(ID3D11DeviceContext* context, ID3D11Device* device,
     ID3D11Texture2D* source, ID3D11ShaderResourceView* sourceView,
-    Ptr<ID3D11Texture2D>& texture, Ptr<ID3D11ShaderResourceView>& view) {
+    Plane& retained, Ptr<ID3D11Texture2D>& texture, Ptr<ID3D11ShaderResourceView>& view, CaptureCache& cache) {
     if (!source) return false;
     D3D11_TEXTURE2D_DESC desc{}; source->GetDesc(&desc);
     if (!planeMatches(device, source, sourceView, desc.Width, desc.Height)) return false;
     desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = desc.MiscFlags = 0;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sourceView->GetDesc(&sd);
-    if (FAILED(device->CreateTexture2D(&desc, nullptr, &texture)) ||
-        FAILED(device->CreateShaderResourceView(texture.Get(), &sd, &view))) return false;
+    const auto& old = retained.description;
+    const auto& oldView = retained.viewDescription;
+    // Admission fixes one mip, slice and sample; all other output flags above
+    // are canonical. Compare the legal single-slice SRV interpretations too.
+    bool sameView = oldView.Format == sd.Format && oldView.ViewDimension == sd.ViewDimension;
+    if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D) {
+        sameView = sameView && oldView.Texture2D.MostDetailedMip == sd.Texture2D.MostDetailedMip &&
+            oldView.Texture2D.MipLevels == sd.Texture2D.MipLevels;
+    } else if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY) {
+        sameView = sameView && oldView.Texture2DArray.MostDetailedMip == sd.Texture2DArray.MostDetailedMip &&
+            oldView.Texture2DArray.MipLevels == sd.Texture2DArray.MipLevels &&
+            oldView.Texture2DArray.FirstArraySlice == sd.Texture2DArray.FirstArraySlice &&
+            oldView.Texture2DArray.ArraySize == sd.Texture2DArray.ArraySize;
+    } else sameView = false;
+    if (!retained.texture || !retained.view || old.Width != desc.Width || old.Height != desc.Height ||
+        old.Format != desc.Format || old.SampleDesc.Quality != desc.SampleDesc.Quality || !sameView) {
+        Ptr<ID3D11Texture2D> created; Ptr<ID3D11ShaderResourceView> createdView;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &created))) return false;
+        ++cache.textureAllocations;
+        if (FAILED(device->CreateShaderResourceView(created.Get(), &sd, &createdView))) return false;
+        ++cache.viewAllocations;
+        retained.texture = std::move(created); retained.view = std::move(createdView);
+        retained.description = desc; retained.viewDescription = sd;
+    } else ++cache.planeReuses;
+    texture = retained.texture; view = retained.view;
     // The cross-API fence is signalled by the caller AFTER capture returns.
     context->CopyResource(texture.Get(), source);
     return SUCCEEDED(device->GetDeviceRemovedReason());
@@ -191,18 +243,23 @@ inline std::shared_ptr<const UiLayerFgSnapshot> capture(ID3D11DeviceContext* con
                     return fail(UiLayerFgRefusal::SizeMismatch);
             }
         } else if (source.useMult) return fail(UiLayerFgRefusal::IncompletePublication);
-        // Includes success, ordinary failure and exception exits of SMAA. Its
-        // caller contract leaves CS/CB/SRV/UAV changed; it restores samplers only.
-        ComputeStateGuard restoreCompute(context);
         auto snapshot = std::make_shared<UiLayerFgSnapshot>();
         snapshot->device = device; snapshot->context = context; snapshot->useMult = source.useMult;
         std::memcpy(snapshot->uv, source.uv, sizeof(snapshot->uv));
+        if (facts.hasUi) {
+            snapshot->storage = cache.acquire();
+            if (!snapshot->storage) return fail(UiLayerFgRefusal::CopyFailed);
+        }
         if (facts.hasUi && source.useMult &&
-            !copyPlane(context, device.Get(), source.multiply, source.multiplyView, snapshot->multiply, snapshot->multiplySrv))
+            !copyPlane(context, device.Get(), source.multiply, source.multiplyView, snapshot->storage->multiply,
+                snapshot->multiply, snapshot->multiplySrv, cache))
             return fail(UiLayerFgRefusal::CopyFailed);
         if (facts.hasUi && source.smooth) {
             UiLayerSmaaFail failure;
             if (!cache.ensure(fd.Width, fd.Height, &failure)) return fail(UiLayerFgRefusal::CopyFailed);
+            // Only SMAA changes compute bindings. Its guard also covers failure
+            // and exception exits; raw and empty copies leave bindings alone.
+            ComputeStateGuard restoreCompute(context);
             // The live source is read before its next ordered clear/write on
             // this same producer context. Only the FINAL smoothed plane needs
             // a deep copy; no redundant raw-layer snapshot is allocated.
@@ -210,11 +267,13 @@ inline std::shared_ptr<const UiLayerFgSnapshot> capture(ID3D11DeviceContext* con
             Ptr<ID3D11Resource> resource; Ptr<ID3D11Texture2D> texture;
             if (smoothed) smoothed->GetResource(&resource);
             if (!resource || FAILED(resource.As(&texture)) ||
-                !copyPlane(context, device.Get(), texture.Get(), smoothed, snapshot->layer, snapshot->layerSrv))
+                !copyPlane(context, device.Get(), texture.Get(), smoothed, snapshot->storage->layer,
+                    snapshot->layer, snapshot->layerSrv, cache))
                 return fail(UiLayerFgRefusal::CopyFailed);
             result.smoothingApplied = true;
         } else if (facts.hasUi &&
-            !copyPlane(context, device.Get(), source.layer, source.layerView, snapshot->layer, snapshot->layerSrv)) {
+            !copyPlane(context, device.Get(), source.layer, source.layerView, snapshot->storage->layer,
+                snapshot->layer, snapshot->layerSrv, cache)) {
             return fail(UiLayerFgRefusal::CopyFailed);
         }
         result.empty = !facts.hasUi; result.fullSupported = true; result.refusal = UiLayerFgRefusal::None;

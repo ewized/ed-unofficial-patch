@@ -298,6 +298,9 @@ bool receiptFresh(const State& s) noexcept {
 }
 } // namespace
 
+bool nativeVrsCoarseRequested() noexcept {
+    return shared().enabled.load(std::memory_order_acquire);
+}
 void nativeVrsConfigure(bool enabled,float hqRadius,float midRadius) noexcept {
     try {
         auto& a=shared();std::lock_guard<std::mutex> lock(a.configMutex);
@@ -584,7 +587,8 @@ DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
     }
     c.result.fullKnown=s.cache.fullRateKnown();c.result.coarseKnown=s.cache.ratesKnown&&s.cache.enabled&&s.cache.bindingKnown&&s.cache.binding;
     c.result.refused=a.refused.load();c.result.failure=a.failure.load();c.result.configured=a.enabled.load();
-    c.result.live=nativeVrsLive();c.result.frameOrdinal=s.frame;c.result.providerPolls=a.polls.load();
+    c.result.live=nativeVrsLive();c.result.coarseRequested=nativeVrsCoarseRequested();
+    c.result.frameOrdinal=s.frame;c.result.providerPolls=a.polls.load();
     a.enabled.store(false);a.driverReady.store(false);a.owner.store(nullptr);a.thread.store(0);s=State{};
     g_nativeVrsLive.store(false);
     publicationCapture=nullptr;capture=nullptr;return c.result;

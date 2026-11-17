@@ -24,6 +24,7 @@ bool sameObject(IUnknown* left, IUnknown* right) noexcept {
 struct Image {
     ComPtr<ID3D11Texture2D> alias11, source11;
     ComPtr<ID3D12Resource> resource12;
+    std::shared_ptr<const void> sourceOwner;
     FrameGenerationInteropPlane view{};
     unsigned width{}, height{};
     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
@@ -233,7 +234,9 @@ bool FrameGenerationInterop::begin(ID3D11DeviceContext* context, std::uint64_t s
         data.transaction = {sequence, generation, {0, 0}};
         data.producer = data.consumerValue = 0; data.consumerFence.Reset();
         data.published = false; data.consumer.store(Unsubmitted, std::memory_order_release);
-        for (auto& image : data.images) { image.view = {}; image.source11.Reset(); }
+        // usable() proved GPU retirement before any pooled source can return
+        // to its producer. A COM reference alone cannot prevent pixel reuse.
+        for (auto& image : data.images) { image.view = {}; image.source11.Reset(); image.sourceOwner.reset(); }
         impl_->active = static_cast<int>(index); impl_->lastSequence = sequence;
         impl_->status.failure = FrameGenerationInteropFailure::None;
         return true;
@@ -242,7 +245,8 @@ bool FrameGenerationInterop::begin(ID3D11DeviceContext* context, std::uint64_t s
     return impl_->reject(FrameGenerationInteropFailure::Busy);
 }
 bool FrameGenerationInterop::capture(ID3D11DeviceContext* context, std::uint64_t sequence, std::uint64_t generation,
-    unsigned eye, FrameGenerationPlane role, ID3D11Texture2D* source, std::uint64_t identity) noexcept {
+    unsigned eye, FrameGenerationPlane role, ID3D11Texture2D* source, std::uint64_t identity,
+    std::shared_ptr<const void> sourceOwner) noexcept {
     if (!impl_ || !impl_->owner(context)) return false;
     if (impl_->active < 0) return impl_->reject(FrameGenerationInteropFailure::InvalidSequence);
     auto& data = *impl_->slots[impl_->active].storage;
@@ -265,6 +269,7 @@ bool FrameGenerationInterop::capture(ID3D11DeviceContext* context, std::uint64_t
     const HRESULT hr = source->QueryInterface(IID_PPV_ARGS(&sourceIdentity));
     if (FAILED(hr)) return impl_->reject(FrameGenerationInteropFailure::WrongDevice, hr);
     image.source11 = source;
+    image.sourceOwner = std::move(sourceOwner);
     image.view = {image.alias11.Get(), image.resource12.Get(), desc, identity,
         static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(sourceIdentity.Get())), D3D12_RESOURCE_STATE_COMMON};
     impl_->context4->CopyResource(image.alias11.Get(), source);
