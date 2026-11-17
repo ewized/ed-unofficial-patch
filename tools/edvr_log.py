@@ -526,6 +526,13 @@ def expected_version(ref, root):
 
 
 def _describe(ref, root):
+    # A complete describe label already names its commit. Git accepts these as
+    # object names and can re-describe them with a different hash abbreviation
+    # or tag set. Preserve copied labels; resolve HEAD, branches and bare tags.
+    if isinstance(ref, str) and re.fullmatch(
+            r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+            r"-\d+-g[0-9a-f]{7,}(?:-dirty)?", ref):
+        return ref
     import subprocess
     try:
         out = subprocess.run(describe_cmd(ref, root), capture_output=True,
@@ -26256,6 +26263,34 @@ def self_test():
     if "--dirty" in named or named[-1] != "v0.14.0":
         print("describe_cmd(v0.14.0) -> %r" % named)
         ok = False
+
+    # Git can resolve a describe label to the right commit but return a bare
+    # hash whose abbreviation depends on repository size or core.abbrev.
+    import subprocess
+    from unittest.mock import patch
+    rewritten = subprocess.CompletedProcess([], 0, "f78eba4e3e6c\n", "")
+    literals = ("0.14.1-93-gf78eba4", "v0.14.1-93-gf78eba4-dirty",
+                "1.2.3-rc.1-4-gabcdef012345", "v1.2.3-beta-2.1-0-gabcdef012345-dirty")
+    with patch("subprocess.run", return_value=rewritten) as git_run:
+        for literal in literals:
+            if _describe(literal, ".") != literal:
+                print("_describe rewrote literal build label %r" % literal)
+                ok = False
+        if git_run.called:
+            print("_describe invoked Git for a complete literal build label")
+            ok = False
+        wrong = _describe("0.14.1-40-gc468661", ".")
+        if version_matches("0.14.1-93-gf78eba4", wrong):
+            print("literal build handling accepted a different commit")
+            ok = False
+        git_run.assert_not_called()
+    for ref in ("HEAD", "feature/build-audit", "v0.14.0", "v1.2.3-rc.1", "f78eba4"):
+        with patch("subprocess.run", return_value=rewritten) as git_run:
+            if _describe(ref, ".") != rewritten.stdout.strip():
+                print("_describe stopped resolving named ref %r" % ref)
+                ok = False
+            git_run.assert_called_once_with(describe_cmd(ref, "."), capture_output=True,
+                                            text=True, timeout=10)
 
     for a, e, want in (
             ("0.14.1-93-gf78eba4", "0.14.1-93-gf78eba4", True),
