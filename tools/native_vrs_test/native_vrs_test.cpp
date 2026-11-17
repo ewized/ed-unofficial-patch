@@ -25,6 +25,7 @@ unsigned checks=0,failures=0;
 void check(bool pass,const char* name){++checks;if(!pass){++failures;std::printf("FAIL: %s\n",name);}}
 DriverResult run(std::initializer_list<DriverOp> ops){return runDriverFixture(ops.begin(),ops.size());}
 #include "ps_measure_cases.h"
+#include "ps_draw_scope_cases.h"
 int main(){
     // Poison COM pointers would crash if OFF or a foreign owner touched D3D.
     auto* poison=reinterpret_cast<ID3D11DeviceContext*>(uintptr_t(1));
@@ -170,6 +171,7 @@ int main(){
     r=run({DriverOp::TickNext});
     check(r.frameOrdinal==2&&r.providerPolls==0&&r.fullKnown&&!r.coarseKnown&&
           r.failure==edvr::NativeVrsFailure::GazeNotReady,"actual enabled Tick before stereo readiness never discovers or polls gaze and stays full rate");
+    ps_draw_scope_fixture::run();
     ps_fixture::run();
     std::printf("native VRS fixtures: checks=%u failures=%u PS_query=WARP NVAPI=mock OpenVR=0\n",checks,failures);
     return failures?1:0;

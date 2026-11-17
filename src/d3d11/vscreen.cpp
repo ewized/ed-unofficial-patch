@@ -1080,19 +1080,7 @@ void nativeBeforeOriginal(ID3D11DeviceContext* context) {
 void nativeBeforeReissue(ID3D11DeviceContext* context) {
     if(nativeVrsLive()&&g_state&&context==g_state->ownerCtx)nativeVrsFullRate(context);
 }
-struct NativePsDrawScope {
-    ID3D11DeviceContext* context;NativeVrsPsToken token{};
-    NativePsDrawScope(ID3D11DeviceContext* c,char kind,uint32_t count,uint32_t instances,
-        uint32_t start,int32_t base=0,uint32_t startInstance=0):context(c) {
-        if(!nativeVrsPsMeasureLive())return;
-        if(vrsCoverageEnabled()||vrsWorkReferenceEnabled())return;
-        const auto* d=g_nativeWorldDecision;
-        if(!d||d->context!=c||d->eye>=2)return;
-        token=nativeVrsPsBefore(c,{bindingShaderHash(BindSlot::Vs),bindingShaderHash(BindSlot::Ps),d->eye,
-            count,instances,start,startInstance,base,kind,d->rtv,d->dsv});
-    }
-    ~NativePsDrawScope(){if(token.active)nativeVrsPsAfter(context,token);}
-};
+#include "native_vrs_draw_scope.h"
 void nativePsMeasureLog(const char* line){Log::get().note("%s",line);}
 struct NativeMutationScope {
     ID3D11DeviceContext* context;bool live;
