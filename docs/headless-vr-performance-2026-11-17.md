@@ -2,41 +2,41 @@
 
 ## Status
 
-- Rendering candidate: installed ED-UP `8fe2295`, with its sealed graphics/runtime
-  pair. No rendering C++ changes accompany this investigation.
-- A complete corrected-controller cycle passed: Start running/exit 0, launcher
-  exit 0, Frontier closed, smoke exit 0 and MCP ready; then Stop stopped_clean/
-  exit 0. No errors, held input, owned driver lease or active receipt remained;
-  game/runtime process counts were zero. All closure was normal, without force.
-- First Pilot Assessment is verified at Mawson Dock. A fresh start now confirms
-  2320x2320 input to 4000x4000 output, DLSS Balanced/model-K configuration, using
+- Measured rendering candidate: installed ED-UP `8fe2295`, sealed graphics/runtime
+  pair. Current work targets NVIDIA native rendering; FG optimization/backend
+  work is cancelled. [Native VRS code changes](native-vrs-code-optimization-2026-11-17.md)
+  await the full native MSVC development build; no new performance gain is claimed.
+- Corrected-controller Start/Stop passed: Start/launcher/smoke exit 0, Frontier
+  closed and MCP ready; Stop stopped_clean/exit 0. No errors, held input, driver
+  lease, active receipt or game/runtime processes remained. Closure was normal.
+- First Pilot Assessment is verified at Mawson Dock. Fresh start confirmed
+  2320x2320 input to 4000x4000 output, DLSS Balanced/model-K configuration and
   `nvngx_dlss.dll` 310.9.1.0. Internal evaluated model identity is not inferred.
-- The earlier full-input DLAA run had mismatched High/Custom preset evidence.
-  No Settings.xml correction was written: the compare-and-swap check found the
-  game had saved Custom itself during normal exit. Restart with persisted Custom
-  resolved dimensions; a PresetName change is not proved to be the root cause.
-- Windowless 30-second Turbo Off/On/Off collection passed timing qualification
-  and 302/302 foreground samples matched the game in each window. GPU-span
-  medians were 37.7614 / 33.2240 / 33.3864 ms. The return-Off result nearly matched
-  On; return-Off native 28.767 Hz also matched On 28.885 Hz. No repeatable Turbo
-  advantage is established. Earlier console runs are excluded.
+- Earlier full-input DLAA had High/Custom preset mismatch evidence. No
+  Settings.xml correction was written: compare-and-swap found the game itself
+  saved Custom on normal exit. Restart resolved dimensions; preset causality
+  remains unproved.
+- Qualified windowless Turbo Off/On/Off windows had 302/302 game-focus samples
+  each and GPU-span medians 37.7614/33.2240/33.3864 ms. Return-Off native 28.767 Hz
+  matched On 28.885 Hz: no repeatable Turbo advantage. Console runs are excluded.
 - AA-Off GPU median/p95 was 6.2547/7.4081 ms with native cadence about 32 Hz.
-  Requested FSR used own-history TAA because EDVR_HAVE_FSR3 is absent. TAA fallback
-  Off/On medians were 8.7047/8.5024 ms; native Off/On was 31.467/31.700–31.717 Hz.
-  No equal-quality, major Turbo boost or 90 Hz result is established.
-- The virtual driver declares 90 Hz, but 950/950 sampled
-  `GetTimeSinceLastVsync` queries returned false. Actual 90 Hz remains unverified.
-- Enabling existing application-GPU timing allowed Auto to admit 2x. Initial
-  camera refusal 0x31 concerned invalid/zero camera rows, not projection shift.
-  After undocking, NGX capability initialization failed (failure 5/stage 2,
+  Requested FSR used own-history TAA because EDVR_HAVE_FSR3 is absent. Its Off/On
+  medians were 8.7047/8.5024 ms; native Off/On was 31.467/31.700–31.717 Hz.
+  TAA fallback reconstructs at 2320x2320; DLSS produces 4000x4000. Matching final
+  XR size does not make the SDK comparison equal reconstruction work or pure
+  NGX cost. No equal-quality, major Turbo boost or 90 Hz result is established.
+- The driver declares 90 Hz, but 950/950 GetTimeSinceLastVsync samples returned
+  false. Actual 90 Hz remains unverified.
+- Historical FG diagnostic: application-GPU timing enabled Auto 2x admission.
+  Initial camera refusal 0x31 concerned invalid/zero rows, not projection shift.
+  After undocking, NGX failed capability initialization (failure 5/stage 2,
   available=0, maximum_generated=1, ngx=0xbad00010); Auto returned to native 1x
-  with generation fault. No frames were generated. NVIDIA's support table excludes
-  RTX 30 from DLSS FG: this backend cannot meet the FG target on the RTX 3080 Ti.
-  DLSS SR/DLAA remain supported; another compatible FG backend needs different code.
-- Saved pre-benchmark INI/mirror were restored: Auto, Turbo Off, DLSS K, GPU diagnostic
-  Off, private keyboard. Simulator stop confirmed owned=true/stopped=true.
-- A later [VRS probe](headless-vrs-shader-work-2026-11-17.md) found matched shader-work
-  reductions in both eyes. Whole-frame GPU benefit remains unverified.
+  with generation fault. No frames were generated. NVIDIA's table excludes
+  RTX 30 from this DLSS FG backend; SR/DLAA remain supported.
+- Saved pre-benchmark INI/mirror were restored: Auto, Turbo Off, DLSS K, GPU
+  diagnostic Off, private keyboard. Simulator stop confirmed owned/stopped=true.
+- Later [VRS measurements](headless-vrs-shader-work-2026-11-17.md) found matched
+  shading reduction in both eyes, but no repeatable whole-frame timing benefit.
 - See the [testing contract](headless-vr-testing.md),
   [source audit](performance-audit-beyond-2026-11-16.md) and
   [physical Beyond evidence](beyond-vrs-verification.md) for their own scopes.

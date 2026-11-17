@@ -99,7 +99,25 @@ int main(){
     check(frameDecision(1,2,7,7,3,4)==FrameDecision::ForeignContext&&frameDecision(1,1,7,8,3,4)==FrameDecision::ForeignThread,"foreign ownership refuses");
     check(fullViewport(1,0,0,2144,2144,2144,2144),"full-eye viewport accepts");
     check(!fullViewport(1,1,0,2144,2144,2144,2144)&&!fullViewport(1,0,0,1072,2144,2144,2144)&&!fullViewport(2,0,0,2144,2144,2144,2144),"offset cropped and multiple viewports refuse");
-    auto r=run({DriverOp::Full,DriverOp::Full});
+    std::vector<DriverOp> repeatedFull(256,DriverOp::Full);
+    auto r=runDriverFixture(repeatedFull.data(),repeatedFull.size());
+    check(r.count==2&&r.publicationCount==1&&r.publications[0].vendorKnown&&
+          r.publications[0].fullKnown&&!r.publications[0].coarseKnown,
+          "256 acknowledged full calls publish once and retain full-rate status");
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::Full,DriverOp::Full});
+    check(r.publicationCount==3&&r.publications[0].fullKnown&&
+          r.publications[1].vendorKnown&&r.publications[1].coarseKnown&&!r.publications[1].fullKnown&&
+          r.publications[2].vendorKnown&&r.publications[2].fullKnown&&!r.publications[2].coarseKnown,
+          "real full/coarse/full transitions publish each acknowledgement, repeated full does not");
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::Invalidate,DriverOp::Full});
+    check(r.publicationCount==3&&r.count==6&&r.publications[2].fullKnown&&!r.publications[2].coarseKnown,
+          "invalidation resets and republishes actual full-rate acknowledgement once");
+    r=run({DriverOp::FailRate,DriverOp::Full,DriverOp::Full,DriverOp::NextFrame,DriverOp::Full,DriverOp::Full});
+    check(r.publicationCount==3&&!r.publications[0].vendorKnown&&!r.publications[0].fullKnown&&
+          !r.publications[1].vendorKnown&&!r.publications[1].fullKnown&&
+          r.publications[2].vendorKnown&&r.publications[2].fullKnown&&r.refused,
+          "failed reset and bounded retry publish unknown until the next-frame reset succeeds");
+    r=run({DriverOp::Full,DriverOp::Full});
     check(r.count==2&&r.fullKnown&&!r.coarseKnown,"repeated full reset skips setters only after acknowledgement");
     check(r.calls[0].rates&&r.calls[0].version==0x10010&&r.calls[0].count==0&&!r.calls[0].enabled&&!r.calls[1].resource,"actual production disabled descriptor and null resource");
     r=run({DriverOp::Full,DriverOp::Left,DriverOp::Left,DriverOp::Right});

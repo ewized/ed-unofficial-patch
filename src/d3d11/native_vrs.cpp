@@ -95,11 +95,20 @@ struct MeasureState {
 };
 MeasureState& measureState(){static MeasureState* const p=new MeasureState;return *p;}
 
+#ifdef EDVR_NATIVE_VRS_TEST
+thread_local native_vrs::testing::DriverResult* publicationCapture=nullptr;
+#endif
 void publish(const State& s) noexcept {
     auto& a=shared();
     a.vendorKnown.store(s.cache.ratesKnown&&s.cache.bindingKnown,std::memory_order_relaxed);
     a.fullKnown.store(s.cache.fullRateKnown(),std::memory_order_relaxed);
     a.coarseKnown.store(s.cache.ratesKnown&&s.cache.enabled&&s.cache.bindingKnown&&s.cache.binding!=0,std::memory_order_relaxed);
+#ifdef EDVR_NATIVE_VRS_TEST
+    if(publicationCapture){
+        auto& result=*publicationCapture;const size_t index=result.publicationCount++;
+        if(index<64)result.publications[index]={a.vendorKnown.load(),a.fullKnown.load(),a.coarseKnown.load()};
+    }
+#endif
 }
 bool owner(ID3D11DeviceContext* context) noexcept {
     auto& a=shared();
@@ -134,7 +143,9 @@ int setResource(State& s,uintptr_t view) {
 }
 bool fullRate(State& s) {
     if(!s.rates||!s.resource)return false;
-    if(s.cache.fullRateKnown()){publish(s);return true;}
+    // Cache changes publish at the acknowledged transition or invalidation;
+    // this owner-only no-op cannot change the three vendor-state snapshots.
+    if(s.cache.fullRateKnown())return true;
     // A failing driver is not hammered once per draw. Refusal never reports
     // full rate unless both reset calls were actually acknowledged.
     if(s.failed&&s.lastRecovery==s.frame){publish(s);return false;}
@@ -544,7 +555,7 @@ int __cdecl mockResource(IUnknown* context,NvRateView* view) {
 }
 }
 DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
-    Capture c;capture=&c;State& s=state();s=State{};s.rates=&mockRates;s.resource=&mockResource;s.frame=1;
+    Capture c;capture=&c;publicationCapture=&c.result;State& s=state();s=State{};s.rates=&mockRates;s.resource=&mockResource;s.frame=1;
     auto* context=reinterpret_cast<ID3D11DeviceContext*>(uintptr_t(0x101));
     uint64_t emittedOrdinal=1;
     auto& a=shared();a.refused.store(false);a.failure.store(NativeVrsFailure::None);a.lastDriver.store(0);
@@ -576,7 +587,7 @@ DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
     c.result.live=nativeVrsLive();c.result.frameOrdinal=s.frame;c.result.providerPolls=a.polls.load();
     a.enabled.store(false);a.driverReady.store(false);a.owner.store(nullptr);a.thread.store(0);s=State{};
     g_nativeVrsLive.store(false);
-    capture=nullptr;return c.result;
+    publicationCapture=nullptr;capture=nullptr;return c.result;
 }
 }
 #endif

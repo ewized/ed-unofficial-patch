@@ -21,15 +21,18 @@ inline constexpr uint64_t kMatchFrames=12;
 // Rotate discovery beyond the first draw prefix. Counting is CPU-only, even
 // after this eye has issued its single query; metadata reads remain capped.
 class Discovery {
-    struct Eye {uint64_t frame=0;unsigned calls=0,base=0,attempts=0;};
+    struct Eye {uint64_t frame=0;unsigned calls=0,base=0,next=0,attempts=0;};
     std::array<Eye,2> eyes_{};
 public:
     bool admit(unsigned eye,uint64_t frame,bool priority,bool canSample)noexcept {
         if(eye>=2||!frame)return false;auto& e=eyes_[eye];
-        if(e.frame!=frame){if(e.frame)e.base=e.calls?(e.base+16)%e.calls:0;e.frame=frame;e.calls=e.attempts=0;}
+        if(e.frame!=frame){e.base=e.calls?e.next%e.calls:0;e.frame=frame;e.calls=e.attempts=0;}
         const unsigned ordinal=e.calls++;
         if(!canSample||e.attempts>=16||(!priority&&(ordinal<e.base||ordinal-e.base>=16)))return false;
-        ++e.attempts;return true;
+        // Continue after the last metadata read, not a fixed frame stride:
+        // an issued query stops this frame after its first successful read.
+        // Frames blocked on pending queries leave the cursor untouched.
+        ++e.attempts;e.next=ordinal+1;return true;
     }
 };
 struct Receipt {
@@ -134,8 +137,15 @@ public:
                 k.vs==cheap.vs&&k.ps==cheap.ps&&k.kind==cheap.kind&&k.count==cheap.count&&k.instances==cheap.instances&&
                 k.start==cheap.start&&k.base==cheap.base&&k.startInstance==cheap.startInstance);
         }
-        return discovery_.admit(receipt.eye,receipt.frame,priority,requested_&&!finished_&&receipt.qualified&&
-            receipt.eye<2&&issuedFrame_[receipt.eye]!=receipt.frame&&(priority||!tracking));
+        bool canSample=requested_&&!finished_&&receipt.qualified&&receipt.eye<2&&
+            issuedFrame_[receipt.eye]!=receipt.frame&&(priority||!tracking);
+        if(canSample){
+            // Do not rotate through draw identities while no query can own
+            // their result; completion cadence must not alias discovery.
+            canSample=false;
+            for(const auto& slot:slots_)if(!slot.active){canSample=true;break;}
+        }
+        return discovery_.admit(receipt.eye,receipt.frame,priority,canSample);
     }
     Plan plan(const Key& key,const Receipt& receipt) {
         Plan p{};

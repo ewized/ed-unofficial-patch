@@ -79,8 +79,13 @@ struct DriverCall {
     uintptr_t context=0,resource=0;
     int result=0;
 };
+struct DriverPublication {
+    bool vendorKnown=false,fullKnown=false,coarseKnown=false;
+};
 struct DriverResult {
     DriverCall calls[64]{};
+    DriverPublication publications[64]{};
+    size_t publicationCount=0;
     size_t count=0;
     bool fullKnown=false,coarseKnown=false,refused=false;
     bool configured=false,live=false;
