@@ -134,6 +134,7 @@ bool waitFence(ID3D12Fence* fence, std::uint64_t target, HANDLE event, DWORD tim
 struct Captured {
     Lease lease;
     std::array<std::vector<unsigned char>, 10> expected;
+    std::array<std::uint64_t, 10> sourceIdentities{};
 };
 struct Copy {
     ComPtr<ID3D12Resource> source, readback;
@@ -261,7 +262,7 @@ struct Gpu {
         }
     }
     Captured capture(DXGI_FORMAT color, DXGI_FORMAT ui, bool normalizeColor = false,
-        std::shared_ptr<const void> sourceOwner = {}) {
+        std::shared_ptr<const void> sourceOwner = {}, DXGI_FORMAT rightColor = DXGI_FORMAT_UNKNOWN) {
         Captured captured;
         const auto sequence = nextSequence++;
         begin(sequence);
@@ -269,10 +270,11 @@ struct Gpu {
             const auto plane = static_cast<FrameGenerationPlane>(role);
             const bool guide = role == 1 || role == 2;
             const unsigned width = guide ? 7 : 13, height = guide ? 5 : 9;
-            const DXGI_FORMAT format = role == 1 ? DXGI_FORMAT_R32_FLOAT : role == 2 ? DXGI_FORMAT_R16G16_FLOAT : role ? ui : color;
+            const DXGI_FORMAT format = role == 1 ? DXGI_FORMAT_R32_FLOAT : role == 2 ? DXGI_FORMAT_R16G16_FLOAT : role ? ui : eye && rightColor != DXGI_FORMAT_UNKNOWN ? rightColor : color;
             const auto tag = sequence * 32 + eye * 8 + role + 1;
             const auto original = pattern(width, height, format, tag);
             auto source = texture(runtime.device.Get(), format, width, height, original);
+            ID3D11Texture2D* prepared = source.Get();
             if (normalizeColor && !role) {
                 CaptureCopySpy calls(runtime.context.Get());
                 ID3D11Texture2D* normalized = nullptr;
@@ -280,8 +282,11 @@ struct Gpu {
                       "production normalization prepares authoritative color");
                 check(adapter->capture(runtime.context.Get(), sequence, 1, eye, plane, normalized, tag),
                       "production immutable capture immediately follows normalization");
-                check(calls.copies == (format == DXGI_FORMAT_R8G8B8A8_UNORM ? 1u : 2u),
-                      "canonical normalize plus interop enqueues one copy; conversion fallback enqueues two");
+                const bool borrowed = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_TYPELESS;
+                check(calls.copies == (borrowed ? 1u : 2u),
+                      "UNORM/typeless normalize plus interop enqueues one copy; fallback enqueues two");
+                check((normalized == source.Get()) == borrowed, "compatible RGBA8 retains original source identity through preparation");
+                prepared = normalized;
                 std::printf("color_capture format=%u eye=%u normalization_and_interop_copies=%u\n",
                     unsigned(format), eye, calls.copies);
             } else {
@@ -289,6 +294,9 @@ struct Gpu {
                       role >= 3 ? sourceOwner : std::shared_ptr<const void>{}),
                       "actual capture copies every authoritative plane immediately");
             }
+            ComPtr<IUnknown> preparedIdentity;
+            hr(prepared->QueryInterface(IID_PPV_ARGS(&preparedIdentity)), "prepared Color/guide/UI COM identity");
+            captured.sourceIdentities[eye * 5 + role] = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(preparedIdentity.Get()));
             // Same immediate context: the source update follows its snapshot
             // copy and precedes the one producer Signal/Flush in publish().
             const auto changed = pattern(width, height, format, tag + 77);
@@ -313,6 +321,17 @@ struct Gpu {
                 item->state == D3D12_RESOURCE_STATE_COMMON && item->sourceTextureIdentity &&
                 item->sourceIdentity == sequence * 32 + eye * 8 + role + 1,
                 "stereo planes retain distinct immutable identities and COMMON import state");
+            check(item->sourceTextureIdentity == captured.sourceIdentities[eye * 5 + role],
+                  "immutable plane preserves actual prepared source COM identity");
+            if (!role) {
+                const auto sourceFormat = eye && rightColor != DXGI_FORMAT_UNKNOWN ? rightColor : color;
+                const auto preparedFormat = normalizeColor ? fg_color::canonical(sourceFormat) : sourceFormat;
+                const auto capturedFormat = fg_interop::captureFormat(FrameGenerationPlane::Color, preparedFormat);
+                D3D11_TEXTURE2D_DESC aliasDesc{}; item->alias11->GetDesc(&aliasDesc);
+                check(item->sourceDesc.Format == capturedFormat && aliasDesc.Format == capturedFormat &&
+                      item->resource12->GetDesc().Format == capturedFormat,
+                      "Color metadata, actual D3D11 alias and D3D12 import share exact typed capture format");
+            }
         }
         check(!captured.lease->plane(2, FrameGenerationPlane::Color) &&
               !captured.lease->plane(0, FrameGenerationPlane::Count), "invalid eye/role cannot expose a plane");
@@ -437,6 +456,83 @@ void normalizedPixelCases(Gpu& gpu) {
             check(captured.lease->plane(eye, FrameGenerationPlane::Color)->sourceDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
                   "all SDR normalization routes retain canonical encoded-color format");
     }
+}
+
+// TYPELESS admission belongs only to Color. Every rejection below calls the
+// real adapter and must happen before any GPU copy or shared allocation use.
+void typelessAdmissionCases(Gpu& gpu) {
+    const auto sequence = gpu.nextSequence++;
+    gpu.begin(sequence);
+    auto full = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_TYPELESS, 13, 9,
+        pattern(13, 9, DXGI_FORMAT_R8G8B8A8_TYPELESS, sequence));
+    auto guide = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_TYPELESS, 7, 5,
+        pattern(7, 5, DXGI_FORMAT_R8G8B8A8_TYPELESS, sequence));
+    ComPtr<ID3D11Device> foreignDevice; ComPtr<ID3D11DeviceContext> foreignContext;
+    gpu.runtime.makeDevice(foreignDevice, foreignContext);
+    auto foreign = texture(foreignDevice.Get(), DXGI_FORMAT_R8G8B8A8_TYPELESS, 13, 9,
+        pattern(13, 9, DXGI_FORMAT_R8G8B8A8_TYPELESS, sequence));
+    D3D11_TEXTURE2D_DESC arrayDesc{}; full->GetDesc(&arrayDesc); arrayDesc.ArraySize = 2;
+    ComPtr<ID3D11Texture2D> array;
+    hr(gpu.runtime.device->CreateTexture2D(&arrayDesc, nullptr, &array), "typeless array descriptor falsifier");
+    {
+        CaptureCopySpy calls(gpu.runtime.context.Get());
+        for (auto role : {FrameGenerationPlane::Depth, FrameGenerationPlane::Motion,
+                FrameGenerationPlane::UiColorTransmittance, FrameGenerationPlane::UiMultiply}) {
+            auto* source = role == FrameGenerationPlane::Depth || role == FrameGenerationPlane::Motion ? guide.Get() : full.Get();
+            check(!gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 0, role, source, sequence) &&
+                  gpu.adapter->status().failure == FrameGenerationInteropFailure::InvalidFormat,
+                  "actual non-Color plane refuses typeless RGBA8 before copy");
+        }
+        check(!gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 0, FrameGenerationPlane::Color, guide.Get(), sequence) &&
+              gpu.adapter->status().failure == FrameGenerationInteropFailure::InvalidDescriptor,
+              "typeless Color still requires exact configured dimensions");
+        check(!gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 0, FrameGenerationPlane::Color, array.Get(), sequence) &&
+              gpu.adapter->status().failure == FrameGenerationInteropFailure::InvalidDescriptor,
+              "typeless Color still refuses texture arrays");
+        check(!gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 0, FrameGenerationPlane::Color, foreign.Get(), sequence) &&
+              gpu.adapter->status().failure == FrameGenerationInteropFailure::WrongDevice,
+              "typeless Color still refuses foreign devices");
+        check(calls.copies == 0, "all typeless plane/device/descriptor refusals enqueue zero copies");
+        check(gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 0, FrameGenerationPlane::Color, full.Get(), sequence),
+              "actual Color accepts single-image typeless RGBA8");
+        auto srgb = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 13, 9,
+            pattern(13, 9, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, sequence));
+        check(!gpu.adapter->capture(gpu.runtime.context.Get(), sequence, 1, 1, FrameGenerationPlane::Color, srgb.Get(), sequence) &&
+              gpu.adapter->status().failure == FrameGenerationInteropFailure::InvalidFormat && calls.copies == 1,
+              "typeless Color cannot pair with incompatible captured sRGB interpretation");
+    }
+    check(gpu.adapter->abort(gpu.runtime.context.Get(), sequence, 1), "typeless partial Color capture abort");
+    gpu.sources.push_back(full); gpu.sources.push_back(guide);
+}
+
+// Return to the same completed ring slot across source-format transitions.
+// Compatible 27/28 sources share private 28 storage; sRGB retains its own
+// existing interpretation. Mutation/readback verifies bits on every transition.
+void typelessTransitionCases(Gpu& gpu) {
+    const DXGI_FORMAT formats[] = {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM};
+    ComPtr<ID3D11Texture2D> previous[2];
+    DXGI_FORMAT previousFormat = DXGI_FORMAT_UNKNOWN;
+    for (auto format : formats) {
+        auto captured = gpu.capture(format, DXGI_FORMAT_R8G8B8A8_UNORM);
+        const auto expected = fg_interop::captureFormat(FrameGenerationPlane::Color, format);
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            auto* alias = captured.lease->plane(eye, FrameGenerationPlane::Color)->alias11;
+            if (previous[eye]) check((alias == previous[eye].Get()) == (expected == previousFormat),
+                "completed Color storage reuses compatible format and rebuilds on interpretation change");
+            previous[eye] = alias;
+        }
+        previousFormat = expected;
+        auto& job = gpu.copy(captured);
+        check(captured.lease->retire(gpu.completion.Get(), job.completion), "format-transition snapshot retirement");
+        gpu.verify(job);
+    }
+    auto mixed = gpu.capture(DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM,
+        false, {}, DXGI_FORMAT_R8G8B8A8_UNORM);
+    auto& job = gpu.copy(mixed);
+    check(mixed.lease->retire(gpu.completion.Get(), job.completion), "compatible mixed-source stereo retirement");
+    gpu.verify(job);
 }
 
 void ringCases(Gpu& gpu) {
@@ -580,6 +676,8 @@ void runGpu(Gpu& gpu) {
     rejectionCases(gpu);
     pixelCases(gpu);
     normalizedPixelCases(gpu);
+    typelessTransitionCases(gpu);
+    typelessAdmissionCases(gpu);
     ringCases(gpu);
     sourceOwnerCases(gpu);
     blockedQueueCase(gpu);

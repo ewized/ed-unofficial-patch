@@ -23,6 +23,8 @@ struct FrameGenerationInteropInit {
 struct FrameGenerationInteropPlane {
     ID3D11Texture2D* alias11{};
     ID3D12Resource* resource12{};
+    // Captured image descriptor; Color TYPELESS input becomes typed UNORM.
+    // Original object provenance remains in sourceIdentity/sourceTextureIdentity.
     D3D11_TEXTURE2D_DESC sourceDesc{};
     std::uint64_t sourceIdentity{}, sourceTextureIdentity{};
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
@@ -104,11 +106,17 @@ inline bool reusable(unsigned owners, std::uint64_t producerActual, std::uint64_
         (!producerTarget || complete(producerActual, producerTarget)) &&
         (canceled || (consumerAttached && complete(consumerActual, consumerTarget)));
 }
+// Only Color can type a compatible RGBA8 source during its immutable copy.
+// Other roles and typed formats retain their existing descriptor interpretation.
+inline DXGI_FORMAT captureFormat(FrameGenerationPlane role, DXGI_FORMAT value) noexcept {
+    return role == FrameGenerationPlane::Color && value == DXGI_FORMAT_R8G8B8A8_TYPELESS
+        ? DXGI_FORMAT_R8G8B8A8_UNORM : value;
+}
 inline bool format(FrameGenerationPlane role, DXGI_FORMAT value) noexcept {
     const bool color = value == DXGI_FORMAT_R8G8B8A8_UNORM || value == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
         value == DXGI_FORMAT_B8G8R8A8_UNORM || value == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     switch (role) {
-    case FrameGenerationPlane::Color: return color;
+    case FrameGenerationPlane::Color: return color || value == DXGI_FORMAT_R8G8B8A8_TYPELESS;
     case FrameGenerationPlane::Depth: return value == DXGI_FORMAT_R32_FLOAT;
     case FrameGenerationPlane::Motion: return value == DXGI_FORMAT_R16G16_FLOAT;
     case FrameGenerationPlane::UiColorTransmittance:

@@ -260,17 +260,21 @@ bool FrameGenerationInterop::capture(ID3D11DeviceContext* context, std::uint64_t
     if (!fg_interop::format(role, desc.Format)) return impl_->reject(FrameGenerationInteropFailure::InvalidFormat);
     ComPtr<ID3D11Device> sourceDevice; source->GetDevice(&sourceDevice);
     if (!sameObject(sourceDevice.Get(), impl_->device11.Get())) return impl_->reject(FrameGenerationInteropFailure::WrongDevice);
+    auto capturedDesc = desc;
+    capturedDesc.Format = fg_interop::captureFormat(role, desc.Format);
     const auto& other = data.images[(1 - eye) * fg_interop::planes + unsigned(role)];
-    if ((data.transaction.captured[1 - eye] & frameGenerationPlaneBit(role)) && other.view.sourceDesc.Format != desc.Format)
+    // Both eyes must expose the same immutable format. Compatible Color
+    // TYPELESS/UNORM inputs therefore form the same canonical UNORM pair.
+    if ((data.transaction.captured[1 - eye] & frameGenerationPlaneBit(role)) && other.view.sourceDesc.Format != capturedDesc.Format)
         return impl_->reject(FrameGenerationInteropFailure::InvalidFormat);
     auto& image = data.images[eye * fg_interop::planes + unsigned(role)];
-    if (!impl_->image(image, desc)) return false;
+    if (!impl_->image(image, capturedDesc)) return false;
     ComPtr<IUnknown> sourceIdentity;
     const HRESULT hr = source->QueryInterface(IID_PPV_ARGS(&sourceIdentity));
     if (FAILED(hr)) return impl_->reject(FrameGenerationInteropFailure::WrongDevice, hr);
     image.source11 = source;
     image.sourceOwner = std::move(sourceOwner);
-    image.view = {image.alias11.Get(), image.resource12.Get(), desc, identity,
+    image.view = {image.alias11.Get(), image.resource12.Get(), capturedDesc, identity,
         static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(sourceIdentity.Get())), D3D12_RESOURCE_STATE_COMMON};
     impl_->context4->CopyResource(image.alias11.Get(), source);
     data.transaction.captured[eye] |= frameGenerationPlaneBit(role);

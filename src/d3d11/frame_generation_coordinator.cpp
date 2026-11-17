@@ -151,6 +151,7 @@ struct Producer {
     ComPtr<ID3D11DeviceContext> context;
     unsigned width = 0, height = 0, guideWidth = 0, guideHeight = 0;
     uint64_t config = 0;
+    bool colorCaptureNoted[2]{};
 };
 struct Work {
     std::shared_ptr<Producer> producer;
@@ -701,11 +702,20 @@ void nativeFgCaptureWorld(uint64_t sequence, unsigned eye, ID3D11Texture2D* sour
         }
         ID3D11Texture2D* normalized = nullptr;
         auto* context = c->producer->context.Get();
-        // Exact canonical color may borrow source directly. Enqueue the
+        // Compatible RGBA8 color may borrow source directly. Enqueue the
         // immutable interop copy now, before its caller can reuse that source.
         if (!c->producer->color.normalize(context, eye, source, &normalized) || !c->producer->interop.capture(context,
             sequence, c->captureHistory, eye, FrameGenerationPlane::Color, normalized, (sequence << 3) | (uint64_t(eye) << 2) | 3)) {
             abortCapture(*c, Interop); return;
+        }
+        if (!c->producer->colorCaptureNoted[eye]) {
+            D3D11_TEXTURE2D_DESC prepared{}; normalized->GetDesc(&prepared);
+            const char* path = desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? "borrowed-typeless" :
+                desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ? "borrowed-unorm" : "converted";
+            Log::get().note("native fg: color capture eye=%u source_format=%u normalization=%s prepared_format=%u immutable_format=%u size=%ux%u.",
+                eye, unsigned(desc.Format), path, unsigned(prepared.Format),
+                unsigned(fg_interop::captureFormat(FrameGenerationPlane::Color, prepared.Format)), desc.Width, desc.Height);
+            c->producer->colorCaptureNoted[eye] = true;
         }
         c->worldMask |= 1u << eye;
         if (c->worldMask != 3 || c->uiMask != 3 || c->guideMask != 3 || c->temporalMask != 3) return;

@@ -50,6 +50,17 @@ int main() {
             format(FrameGenerationPlane::UiColorTransmittance, color) &&
             format(FrameGenerationPlane::UiMultiply, color), "preserve supported color/UI formats");
     }
+    check(format(FrameGenerationPlane::Color, DXGI_FORMAT_R8G8B8A8_TYPELESS) &&
+        captureFormat(FrameGenerationPlane::Color, DXGI_FORMAT_R8G8B8A8_TYPELESS) == DXGI_FORMAT_R8G8B8A8_UNORM,
+        "typeless RGBA8 Color is copied into canonical typed UNORM storage");
+    for (auto role : {FrameGenerationPlane::Depth, FrameGenerationPlane::Motion,
+            FrameGenerationPlane::UiColorTransmittance, FrameGenerationPlane::UiMultiply, FrameGenerationPlane::Count})
+        check(!format(role, DXGI_FORMAT_R8G8B8A8_TYPELESS) &&
+            captureFormat(role, DXGI_FORMAT_R8G8B8A8_TYPELESS) == DXGI_FORMAT_R8G8B8A8_TYPELESS,
+            "Color typeless admission cannot widen any other plane");
+    for (auto value : {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT})
+        check(captureFormat(FrameGenerationPlane::Color, value) == value, "typed capture formats preserve existing interpretation");
     check(format(FrameGenerationPlane::Depth, DXGI_FORMAT_R32_FLOAT) &&
         format(FrameGenerationPlane::Motion, DXGI_FORMAT_R16G16_FLOAT), "support actual depth and motion guide formats");
     check(format(FrameGenerationPlane::UiMultiply, DXGI_FORMAT_R16G16B16A16_FLOAT) &&

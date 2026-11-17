@@ -39,7 +39,8 @@ public:
     FrameGenerationColor& operator=(const FrameGenerationColor&) = delete;
     // OFF has no allocation, COM, compiler or GPU side effects.
     bool initialize(bool enabled, ID3D11Device*, ID3D11DeviceContext*, DWORD ownerThread);
-    // Owner thread only. Exact RGBA8 returns the borrowed source; other formats
+    // Owner thread only. RGBA8 UNORM/TYPELESS return the borrowed source;
+    // interop capture supplies the canonical typed UNORM image. Other formats
     // return private scratch valid until the next operation for that eye.
     // Immediately enqueue the immutable interop copy before source/scratch reuse.
     bool normalize(ID3D11DeviceContext*, unsigned eye, ID3D11Texture2D*, ID3D11Texture2D** output);

@@ -360,6 +360,7 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
         std::printf("color_pixels format=%u eye=%u phase=begin\n", unsigned(format), eye);
         // Non-multiples of the 8x8 conversion group exercise edge coverage.
         const unsigned width = 13, height = 9;
+        const bool borrowed = format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_TYPELESS;
         const auto original = pattern(format, width, height);
         auto expected = original;
         if (edvr::fg_color::bgra(format))
@@ -372,18 +373,18 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
             ColorCommandSpy calls(device.context.Get());
             std::puts("color_pixels phase=spy-installed");
             check(adapter.normalize(device.context.Get(), eye, source.Get(), &output) && output,
-                  "production adapter returns a typed color image");
+                  "production adapter prepares a color image");
             std::printf("color_pixels phase=normalized copies=%u\n", calls.copies);
-            check(calls.copies == (format == DXGI_FORMAT_R8G8B8A8_UNORM ? 0u : 1u),
-                  "exact canonical color skips normalization copy; fallback preserves one copy");
+            check(calls.copies == (borrowed ? 0u : 1u),
+                  "compatible RGBA8 skips normalization copy; fallback preserves one copy");
         }
         std::puts("color_pixels phase=spy-restored");
-        check((output == source.Get()) == (format == DXGI_FORMAT_R8G8B8A8_UNORM),
-              "only exact canonical RGBA8 borrows the original source");
+        check((output == source.Get()) == borrowed,
+              "only UNORM and typeless RGBA8 borrow the original source");
         before.equal(ComputeSnapshot(device.context.Get()));
         D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
-        check(desc.Width == width && desc.Height == height && desc.Format == edvr::fg_color::canonical(format),
-              "production output dimensions and exact canonical format");
+        check(desc.Width == width && desc.Height == height && desc.Format == (borrowed ? format : edvr::fg_color::canonical(format)),
+              "prepared format is borrowed input or converted canonical output");
         check(read(device, output) == expected, "production conversion preserves every encoded channel or F16 bit");
         check(read(device, source.Get()) == original, "production conversion leaves source image unchanged");
         auto* firstOutput = output;

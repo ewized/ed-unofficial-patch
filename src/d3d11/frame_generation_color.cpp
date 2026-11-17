@@ -123,8 +123,9 @@ bool FrameGenerationColor::normalize(ID3D11DeviceContext* context, unsigned eye,
     const auto format = fg_color::canonical(d.Format);
     if (format == DXGI_FORMAT_UNKNOWN) { failure_ = FrameGenerationColorFailure::Format; return false; }
     // The caller immediately copies this borrowed image into immutable interop
-    // storage. Exact canonical input needs no intermediate image or GPU copy.
-    if (d.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+    // storage. The interop copy types RGBA8 typeless input as UNORM without
+    // changing any bits; neither compatible input needs an intermediate copy.
+    if (d.Format == DXGI_FORMAT_R8G8B8A8_UNORM || d.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS) {
         if (FAILED(impl_->device->GetDeviceRemovedReason())) { failure_ = FrameGenerationColorFailure::Device; return false; }
         *output = source; failure_ = FrameGenerationColorFailure::None; return true;
     }
