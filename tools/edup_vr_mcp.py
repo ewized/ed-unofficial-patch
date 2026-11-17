@@ -443,9 +443,30 @@ class Windows:
         return self.u.SendInput(1,ct.byref(packet),ct.sizeof(Input)) == 1
 
 
+def settle_input(windows,pid,verify,milliseconds,clock=None,pause=None):
+    """Wait after helper preflight/focus, refusing any change of focused game window.
+
+    No helper is launched during this interval. Identity and interactive-desktop
+    checks belong to verify; focused_client checks the exact restored foreground
+    HWND. Clock injection keeps offline deadline/focus-loss tests deterministic.
+    """
+    clock,pause = clock or time.monotonic,pause or time.sleep
+    client = windows.focused_client(pid,verify)
+    deadline = clock()+milliseconds/1000
+    while True:
+        verify()
+        require(windows.focused_client(pid,verify)['hwnd'] == client['hwnd'],
+                'Game foreground window changed during input settle')
+        remaining = deadline-clock()
+        if remaining <= 0:
+            return
+        pause(min(.02,remaining))
+
+
 class Keyboard:
-    def __init__(self,windows,pid,verify):
+    def __init__(self,windows,pid,verify,settle_ms=1500):
         self.windows,self.pid,self.verify = windows,pid,verify
+        self.settle_ms = settle_ms
         self.held = []
 
     def release(self):
@@ -469,9 +490,12 @@ class Keyboard:
         require(not self.release() and not self.held,'Retained keyboard input could not be released')
         deliveries = 0
         try:
+            self.verify()
+            self.windows.focus(self.pid,self.verify)
+            settle_input(self.windows,self.pid,self.verify,self.settle_ms)
             for step in steps:
                 self.verify()
-                self.windows.focus(self.pid,self.verify)
+                self.windows.focused_client(self.pid,self.verify)
                 for key in step['keys']:
                     self.verify()
                     require(self.windows.foreground_pid() == self.pid, 'Game lost foreground focus')
@@ -508,8 +532,9 @@ class Helper:
 
 
 class Mouse:
-    def __init__(self,windows,pid,verify):
+    def __init__(self,windows,pid,verify,settle_ms=1500):
         self.windows,self.pid,self.verify = windows,pid,verify
+        self.settle_ms = settle_ms
         self.held = False
 
     def release(self):
@@ -521,6 +546,7 @@ class Mouse:
         self.release()
         require(not self.held,'Retained mouse input could not be released')
         self.windows.focus(self.pid,self.verify)
+        settle_input(self.windows,self.pid,self.verify,self.settle_ms)
         client = self.windows.focused_client(self.pid,self.verify)
         dx,dy = client_point(x,y,client['width'],client['height'])
         screen = (client['screen_left']+dx,client['screen_top']+dy)
@@ -557,12 +583,12 @@ class Mouse:
 
 
 class Host:
-    def __init__(self,windows,helper,identity):
+    def __init__(self,windows,helper,identity,input_settle_ms=1500):
         self.windows,self.helper,self.identity = windows,helper,identity
         self.activated = False
         self.completion_unknown_count = 0
-        self.keyboard = Keyboard(windows,identity['pid'],self.verify)
-        self.mouse = Mouse(windows,identity['pid'],self.verify)
+        self.keyboard = Keyboard(windows,identity['pid'],self.verify,input_settle_ms)
+        self.mouse = Mouse(windows,identity['pid'],self.verify,input_settle_ms)
 
     def verify(self):
         require(self.windows.identity(self.identity['pid']) == self.identity, 'Game exited or PID identity changed')
@@ -622,6 +648,7 @@ class Host:
                     'foreground_pid':self.windows.foreground_pid(),'driver_owned':self.activated,
                     'held_keys':list(self.keyboard.held),'mouse_held':self.mouse.held,
                     'completion_unknown_count':self.completion_unknown_count,
+                    'input_settle_ms':self.keyboard.settle_ms,
                     'windows':self.windows.describe(self.identity['pid'])}
         if name == 'mouse_click':
             fields(args,('x','y','duration_ms'),('x','y'))
@@ -768,6 +795,8 @@ def main(argv=None):
         parser.add_argument('--'+name,type=Path)
     parser.add_argument('--expect-scene-pid',type=int)
     parser.add_argument('--session-id',type=int,help='Optional expected interactive session; defaults to current session')
+    parser.add_argument('--input-settle-ms',type=int,default=1500,
+                        help='Guarded focus settle after runtime preflight, once per input request (0..2000 ms)')
     parser.add_argument('--dry-run',action='store_true')
     parser.add_argument('--self-test',action='store_true')
     args = parser.parse_args(argv)
@@ -779,6 +808,7 @@ def main(argv=None):
         require(args.game_dir is not None and args.game_dir.is_absolute() and
                 (args.game_dir/'EliteDangerous64.exe').is_file(),'Absolute Elite product folder required')
         integer(args.expect_scene_pid,1,2**32-1)
+        integer(args.input_settle_ms,0,2000)
         if args.session_id is not None:
             integer(args.session_id,1,2**32-1)
         require(args.output is not None and args.output.is_absolute() and args.output.parent.is_dir()
@@ -795,7 +825,7 @@ def main(argv=None):
         require(identity is not None and identity['session'] == current_session and
                 os.path.normcase(identity['image']) == os.path.normcase(str(args.game_dir/'EliteDangerous64.exe')),
                 'PID is not the expected Elite image in the host interactive session')
-        host = Host(windows,Helper(args.client),identity)
+        host = Host(windows,Helper(args.client),identity,args.input_settle_ms)
         observed = host.runtime()
         require(observed['driver']['response']['status'].get('active') is False,'Existing simulator control lease refused')
         args.output.mkdir()
@@ -808,6 +838,7 @@ def main(argv=None):
                  'helper_sha256':hashlib.sha256(args.client.read_bytes()).hexdigest(),
                  'transport_sha256':hashlib.sha256(args.transport_dll.read_bytes()).hexdigest(),
                  'endpoint':'http://127.0.0.1:17832/mcp','initial_runtime':observed,
+                 'input_settle_ms':args.input_settle_ms,
                  'scope':'External queued tools; no game injection; SendInput acceptance is not gameplay proof'})
             print('http://127.0.0.1:17832/mcp',flush=True)
             serve(transport,host,args.stop_file,events)
@@ -884,6 +915,7 @@ class Tests(unittest.TestCase):
         windows = mock.Mock()
         windows.identity.return_value,windows.foreground_pid.return_value = identity,42
         windows.describe.return_value = {}
+        windows.focused_client.return_value = {'hwnd':100}
         windows.send.return_value = True
         helper = mock.Mock()
         def call(request):
@@ -895,7 +927,79 @@ class Tests(unittest.TestCase):
             return {'images':[{'eye':'left','png_base64':'real-png'}]}
         helper.side_effect = call
         helper.driver.return_value = {'response':{'ok':True,'status':{'mode':'virtual_hmd','active':False}}}
-        return Host(windows,helper,identity),windows,helper
+        return Host(windows,helper,identity,0),windows,helper
+
+    def test_input_settle_deadline_and_runtime_order(self):
+        host,windows,helper = self.fixture()
+        host.keyboard.settle_ms = 1500
+        ticks = [0.0]
+        downs = []
+        def pause(seconds):
+            self.assertFalse(downs)
+            self.assertEqual(len(helper.call_args_list),2)  # Status and poses precede settling.
+            ticks[0] += seconds
+        windows.send.side_effect = lambda key,up: downs.append(ticks[0]) is None if not up else True
+        original = settle_input
+        with mock.patch.object(sys.modules[__name__],'settle_input',side_effect=lambda w,p,v,m:
+                               original(w,p,v,m,lambda:ticks[0],pause)), \
+             mock.patch.object(host.keyboard,'hold'):
+            host.dispatch('keyboard_sequence',{'steps':[{'keys':['ENTER'],'duration_ms':1},
+                                                       {'keys':['RIGHT'],'duration_ms':1}]})
+        self.assertEqual(downs,[1.5,1.5])  # Once per request, not another settle for each step.
+        self.assertGreater(windows.focused_client.call_count,50)
+        self.assertEqual(host.keyboard.held,[])
+
+    def test_settle_focus_loss_refuses_down_and_can_recover(self):
+        host,windows,_ = self.fixture()
+        host.keyboard.settle_ms = 1500
+        ticks,fail = [0.0],[True]
+        def client(pid,verify):
+            verify()
+            require(not (fail[0] and ticks[0] >= .5),'Game lost foreground focus')
+            return {'hwnd':100}
+        windows.focused_client.side_effect = client
+        def pause(seconds): ticks[0] += seconds
+        original = settle_input
+        with mock.patch.object(sys.modules[__name__],'settle_input',side_effect=lambda w,p,v,m:
+                               original(w,p,v,m,lambda:ticks[0],pause)), \
+             mock.patch.object(host.keyboard,'hold'):
+            with self.assertRaisesRegex(ValueError,'foreground'):
+                host.dispatch('keyboard_input',{'keys':['ENTER'],'duration_ms':1})
+            windows.send.assert_not_called()
+            self.assertEqual(host.keyboard.held,[])
+            fail[0] = False
+            host.dispatch('keyboard_input',{'keys':['ENTER'],'duration_ms':1})
+        self.assertGreaterEqual(ticks[0],2)
+        self.assertEqual(windows.send.call_args_list,[mock.call('ENTER',False),mock.call('ENTER',True)])
+
+    def test_mouse_settle_precedes_geometry_cursor_and_button(self):
+        windows = mock.Mock()
+        ticks,fail = [0.0],[False]
+        client = {'hwnd':100,'width':101,'height':81,'screen_left':10,'screen_top':20}
+        def focused(pid,verify):
+            verify()
+            require(not (fail[0] and ticks[0] >= .5),'Game lost foreground focus')
+            return client
+        windows.focused_client.side_effect = focused
+        windows.cursor.side_effect = [(9,9),(60,60),(60,60)]
+        windows.window_pid.return_value = windows.foreground_pid.return_value = 42
+        windows.u.WindowFromPoint.return_value = 100
+        downs = []
+        windows.u.SetCursorPos.side_effect = lambda *args: self.assertGreaterEqual(ticks[0],1.5) is None
+        windows.mouse_button.side_effect = lambda up: downs.append(ticks[0]) is None if not up else True
+        def pause(seconds): ticks[0] += seconds
+        mouse = Mouse(windows,42,mock.Mock(),1500)
+        with mock.patch.object(time,'monotonic',side_effect=lambda:ticks[0]), \
+             mock.patch.object(time,'sleep',side_effect=pause):
+            mouse.click(.5,.5,1)
+            self.assertEqual(downs,[1.5])
+            self.assertFalse(mouse.held)
+            ticks[0],fail[0] = 0,True
+            windows.u.SetCursorPos.reset_mock()
+            with self.assertRaisesRegex(ValueError,'foreground'):
+                mouse.click(.5,.5,1)
+            windows.u.SetCursorPos.assert_not_called()
+            self.assertEqual(downs,[1.5])
 
     def test_abi_and_keys(self):
         self.assertEqual((ct.sizeof(Input),Input.data.offset),(40,8))
@@ -919,7 +1023,11 @@ class Tests(unittest.TestCase):
 
     def test_dispatch_and_capture(self):
         host,windows,helper = self.fixture()
-        self.assertEqual(host.dispatch('xr_sim_capture',{'eye':'left','max_edge':1024})['images'][0]['png_base64'],'real-png')
+        with mock.patch.object(sys.modules[__name__],'settle_input',side_effect=AssertionError('Read-only tool settled')):
+            self.assertTrue(host.dispatch('get_state',{})['alive'])
+            host.dispatch('xr_sim_status',{})
+            host.dispatch('capture_window',{})
+            self.assertEqual(host.dispatch('xr_sim_capture',{'eye':'left','max_edge':1024})['images'][0]['png_base64'],'real-png')
         for name in ('eval','shell','compile_csharp','launch_game'):
             with self.assertRaises(ValueError): host.dispatch(name,{})
         with self.assertRaises(ValueError): host.dispatch('xr_sim_capture',{'output_directory':'C:/foreign'})
@@ -997,7 +1105,7 @@ class Tests(unittest.TestCase):
         windows.window_pid.return_value = 42
         windows.foreground_pid.return_value = 77
         windows.mouse_button.return_value = True
-        mouse = Mouse(windows,42,mock.Mock())
+        mouse = Mouse(windows,42,mock.Mock(),0)
         with self.assertRaisesRegex(ValueError,'foreground'):
             mouse.click(.5,.5,50)
         windows.u.SetCursorPos.assert_called_once_with(60,60)
@@ -1037,8 +1145,8 @@ class Tests(unittest.TestCase):
                 windows.mouse_button = mock.Mock(return_value=True)
                 # A foreign 1x1 thumbnail elsewhere must not invoke the full-frame capture gate.
                 windows.top_windows = mock.Mock(side_effect=AssertionError('Mouse must not use full-client overlap guard'))
-                mouse = Mouse(windows,42,mock.Mock())
-                with mock.patch.object(time,'monotonic',side_effect=[0,1]):
+                mouse = Mouse(windows,42,mock.Mock(),0)
+                with mock.patch.object(time,'monotonic',side_effect=[0,0,0,1]):
                     if allowed:
                         self.assertTrue(mouse.click(.5,.5,1)['delivery_queued'])
                     else:
@@ -1127,7 +1235,10 @@ class Tests(unittest.TestCase):
                     '--game-dir',str(root),'--expect-scene-pid','42','--output',str(root/'new'),'--dry-run']
             before = sorted(p.name for p in root.iterdir())
             with mock.patch.object(Windows,'__init__',side_effect=AssertionError('must not initialize')):
-                self.assertEqual(main(args),0)
+                for value in ('0','1500','2000'):
+                    self.assertEqual(main(args+['--input-settle-ms',value]),0)
+                for value in ('-1','2001'):
+                    self.assertEqual(main(args+['--input-settle-ms',value]),2)
                 self.assertEqual(sorted(p.name for p in root.iterdir()),before)
                 (root/'new').mkdir()
                 self.assertEqual(main(args),2)

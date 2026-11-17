@@ -50,12 +50,12 @@
   768x432 PNGs. This does not qualify the requested 4000x4000-per-eye, 90 Hz
   game configuration. A separate square-resolution driver build and ABI probe
   do not establish the game's effective eye dimensions or cadence.
-- No matched live game benchmark at 4000x4000 per eye and 90 Hz has been
-  qualified. Auto FG state, valid gaze/VRS operation, effective shader-work
-  reduction and Turbo On/Off comparisons remain unverified in this virtual
-  session. Native source cadence and generated presentation cadence must be
-  measured separately. Neither smoke success nor the verified tutorial/input subset
-  qualifies the complete install/account/startup/control/recovery flow.
+- Actual 4000x4000 output and tutorial loading now have live evidence; see the
+  [performance investigation](headless-vr-performance-2026-11-17.md).
+  Auto FG refused initialization; synthetic gaze reached eligible world draws,
+  but effective shading savings, Turbo comparison and 90 Hz remain unqualified.
+  Native source cadence and generated presentation cadence must be measured
+  separately. The verified startup/input subset does not qualify the full target.
 - [Performance audit](performance-audit-beyond-2026-11-16.md) records source
   findings and discriminating experiments. No FPS improvement is claimed.
 
@@ -71,6 +71,15 @@ its helper SHA-256 was
 The SDK provenance is Valve OpenVR commit
 `0924064316de3effbcd1acf1e309182a2deb1c05`; retain its BSD notice. No driver,
 helper binary, vendor library, or first-party Mod Linker source is vendored here.
+
+The MCP host accepts `--input-settle-ms` (default 1500, range 0–2000).
+After runtime preflight and game focus recovery, each keyboard request or mouse
+click waits once with process identity, interactive desktop and exact restored
+foreground window checks throughout. A lost window refuses new presses. Mouse
+coordinates and point ownership are checked after this wait; keyboard sequences
+retain their existing 10-second action bound. Read-only tools do not settle.
+`get_state` and readiness JSON record the configured interval. This is an input
+reliability measure, not evidence that the game consumed queued events.
 
 Provisioning, interactive-session startup, game launch, normal runtime shutdown,
 and receipt restoration belong to an external supervisor. Keep host names,
