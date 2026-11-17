@@ -531,6 +531,11 @@ struct UiLayerFgPlanes {
 };
 bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
                         UiLayerFgPlanes* planes) noexcept;
+// New FG producer only, before its first capture. Retire the cache's references
+// to old leased pixels while their snapshots/fences retain them; keep unleased
+// planes, SMAA and the established render-owner binding. Ordinary frames do not
+// call this. A foreign owner/context refuses without changing either eye.
+bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept;
 // Capture frame must be this eye/sequence's exact temporal output, before RCAS
 // and before uiLayerComposite. Unknown post-sharpen identity is refused. The
 // coordinator may separately bind later RCAS world color to this immutable lease.

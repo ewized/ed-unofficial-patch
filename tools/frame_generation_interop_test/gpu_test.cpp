@@ -2,6 +2,7 @@
 // opts into a standalone NVIDIA same-adapter D3D11/D3D12 correctness fixture.
 #include "../../src/d3d11/frame_generation_interop.h"
 #include "../../src/d3d11/frame_generation_color.h"
+#include "../../src/d3d11/ui_layer_fg_adapter.h"
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <array>
@@ -103,10 +104,10 @@ std::vector<unsigned char> pattern(unsigned width, unsigned height, DXGI_FORMAT 
     return out;
 }
 ComPtr<ID3D11Texture2D> texture(ID3D11Device* device, DXGI_FORMAT format, unsigned width, unsigned height,
-    const std::vector<unsigned char>& bytes) {
+    const std::vector<unsigned char>& bytes, UINT bind = 0) {
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = width; desc.Height = height; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-    desc.Format = format; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.Format = format; desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = bind;
     D3D11_SUBRESOURCE_DATA initial{bytes.data(), width * bytesPerPixel(format), 0};
     ComPtr<ID3D11Texture2D> out;
     hr(device->CreateTexture2D(&desc, &initial, &out), "source texture");
@@ -397,6 +398,167 @@ struct Gpu {
     }
 };
 
+// Compatibility overload lets this regression run against the preceding pool
+// implementation: its missing retirement operation becomes a no-op, and the
+// first replacement capture must then fail at runtime rather than compilation.
+template<class Cache>
+auto retireUiStorage(Cache (&caches)[2], ID3D11DeviceContext* context, ID3D11Device* device, int)
+    -> decltype(retireStorage(caches, context, device)) { return retireStorage(caches, context, device); }
+template<class Cache>
+bool retireUiStorage(Cache (&)[2], ID3D11DeviceContext*, ID3D11Device*, long) { return true; }
+
+struct UiGenerationFrame {
+    Lease lease;
+    std::weak_ptr<const UiLayerFgSnapshot> snapshots[2];
+    std::vector<unsigned char> pixels[2][2];
+};
+std::vector<unsigned char> readUi(Gpu& gpu, ID3D11Texture2D* source) {
+    D3D11_TEXTURE2D_DESC desc{}; source->GetDesc(&desc);
+    check(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM, "generation UI readback format");
+    desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = desc.MiscFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    hr(gpu.runtime.device->CreateTexture2D(&desc, nullptr, &staging), "generation UI staging texture");
+    gpu.runtime.context->CopyResource(staging.Get(), source);
+    std::vector<unsigned char> bytes(static_cast<size_t>(desc.Width) * desc.Height * 4);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr(gpu.runtime.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "generation UI full readback");
+    for (unsigned y = 0; y < desc.Height; ++y)
+        std::memcpy(bytes.data() + static_cast<size_t>(y) * desc.Width * 4,
+            static_cast<const unsigned char*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch,
+            static_cast<size_t>(desc.Width) * 4);
+    gpu.runtime.context->Unmap(staging.Get(), 0); return bytes;
+}
+// Real production UI capture feeds a real interop ring. The shared ring owner
+// models the worker's configured Producer reference independently of its leases.
+UiGenerationFrame captureUiGeneration(Gpu& gpu, FrameGenerationInterop& interop,
+    ui_layer_fg::CaptureCache (&caches)[2], unsigned width, unsigned height) {
+    const auto sequence = gpu.nextSequence++;
+    check(interop.begin(gpu.runtime.context.Get(), sequence, 1), "generation producer begins its own interop slot");
+    UiGenerationFrame frame;
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        auto world = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, width, height,
+            pattern(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, sequence));
+        for (auto role : {FrameGenerationPlane::Depth, FrameGenerationPlane::Motion}) {
+            const auto format = role == FrameGenerationPlane::Depth ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R16G16_FLOAT;
+            auto guide = texture(gpu.runtime.device.Get(), format, 7, 5, pattern(7, 5, format, sequence));
+            check(interop.capture(gpu.runtime.context.Get(), sequence, 1, eye, role, guide.Get(), sequence), "generation captures authoritative guides");
+            gpu.sources.push_back(guide);
+        }
+        ComPtr<ID3D11Texture2D> live[2]; ComPtr<ID3D11ShaderResourceView> views[2];
+        for (unsigned plane = 0; plane < 2; ++plane) {
+            frame.pixels[eye][plane] = pattern(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, sequence * 17 + eye * 3 + plane);
+            live[plane] = texture(gpu.runtime.device.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, width, height,
+                frame.pixels[eye][plane], D3D11_BIND_SHADER_RESOURCE);
+            hr(gpu.runtime.device->CreateShaderResourceView(live[plane].Get(), nullptr, &views[plane]), "generation live UI view");
+            gpu.sources.push_back(live[plane]);
+        }
+        ui_layer_fg::Source source;
+        source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
+        source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
+        source.info.sequence = sequence; source.info.eye = eye; source.expectedFrame = world.Get(); source.useMult = true;
+        source.layer = live[0].Get(); source.layerView = views[0].Get();
+        source.multiply = live[1].Get(); source.multiplyView = views[1].Get();
+        auto snapshot = ui_layer_fg::capture(gpu.runtime.context.Get(), world.Get(), source, caches[eye], nullptr);
+        if (!snapshot) {
+            check(interop.abort(gpu.runtime.context.Get(), sequence, 1), "generation refuses safely after UI pool exhaustion");
+            return frame;
+        }
+        frame.snapshots[eye] = snapshot;
+        check(interop.capture(gpu.runtime.context.Get(), sequence, 1, eye, FrameGenerationPlane::UiColorTransmittance,
+            snapshot->layer.Get(), sequence, snapshot) &&
+            interop.capture(gpu.runtime.context.Get(), sequence, 1, eye, FrameGenerationPlane::UiMultiply,
+                snapshot->multiply.Get(), sequence, snapshot), "generation interop retains real immutable UI snapshot owners");
+        for (auto& plane : live) {
+            const auto changed = pattern(width, height, DXGI_FORMAT_R8G8B8A8_UNORM, sequence + 199);
+            gpu.runtime.context->UpdateSubresource(plane.Get(), 0, nullptr, changed.data(), width * 4, 0);
+        }
+        check(interop.capture(gpu.runtime.context.Get(), sequence, 1, eye, FrameGenerationPlane::Color,
+            world.Get(), sequence), "generation captures world after immutable UI");
+        gpu.sources.push_back(world);
+    }
+    frame.lease = interop.publish(gpu.runtime.context.Get(), sequence, 1, fg_interop::allPlanes);
+    check(frame.lease && frame.lease->cancel(), "generation publishes a real paired lease with no consumer GPU submissions");
+    return frame;
+}
+void verifyUiSnapshotPixels(Gpu& gpu, const UiGenerationFrame& frame) {
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        auto snapshot = frame.snapshots[eye].lock();
+        check(snapshot && readUi(gpu, snapshot->layer.Get()) == frame.pixels[eye][0] &&
+            readUi(gpu, snapshot->multiply.Get()) == frame.pixels[eye][1], "old generation snapshot retains every original UI pixel");
+    }
+}
+void verifyUiGeneration(Gpu& gpu, const UiGenerationFrame& frame) {
+    gpu.producerComplete(frame.lease); verifyUiSnapshotPixels(gpu, frame);
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        for (unsigned plane = 0; plane < 2; ++plane) {
+            const auto role = plane ? FrameGenerationPlane::UiMultiply : FrameGenerationPlane::UiColorTransmittance;
+            check(readUi(gpu, frame.lease->plane(eye, role)->alias11) == frame.pixels[eye][plane],
+                "old generation interop lease retains every copied UI pixel");
+        }
+    }
+}
+void uiProducerReplacementCases(Gpu& gpu) {
+    ui_layer_fg::CaptureCache caches[2];
+    const auto makeProducer = [&](unsigned width, unsigned height) {
+        auto made = std::make_shared<FrameGenerationInterop>(); auto init = gpu.config();
+        init.colorWidth = width; init.colorHeight = height;
+        check(made->initialize(init), "new generation owns independent production interop ring"); return made;
+    };
+    auto configured = makeProducer(13, 9);
+    auto producer = configured;
+    gpu.blockProducer();
+    std::array<UiGenerationFrame, 3> older;
+    for (auto& frame : older) frame = captureUiGeneration(gpu, *producer, caches, 13, 9);
+    for (const auto& frame : older) check(frame.lease && frame.lease->producerFence()->GetCompletedValue() < frame.lease->producerValue(),
+        "old generation fills all three UI slots with pending producer copies");
+    producer = makeProducer(13, 9);
+    check(retireUiStorage(caches, gpu.runtime.context.Get(), gpu.runtime.device.Get(), 0), "new producer retires only cache references to old leased storage");
+    std::array<UiGenerationFrame, 3> current;
+    current[0] = captureUiGeneration(gpu, *producer, caches, 13, 9);
+    check(current[0].lease && configured != producer, "first replacement UI capture progresses before worker configured owner switches");
+    for (const auto& frame : older) for (const auto& snapshot : frame.snapshots)
+        check(!snapshot.expired(), "pool retirement leaves all old fence-owned snapshot storage alive");
+    hr(gpu.producerGate->Signal(1), "release producer gate before any generation readback");
+    for (const auto& frame : older) verifyUiGeneration(gpu, frame);
+    verifyUiGeneration(gpu, current[0]);
+    for (auto& frame : older) frame.lease.reset();
+    configured.reset();
+    for (const auto& frame : older) for (const auto& snapshot : frame.snapshots)
+        check(snapshot.expired(), "old storage retires only after completed leases and configured owner release");
+    configured = producer;
+    for (unsigned slot = 1; slot < current.size(); ++slot) {
+        current[slot] = captureUiGeneration(gpu, *producer, caches, 13, 9);
+        check(bool(current[slot].lease), "replacement generation fills all three active slots");
+    }
+    for (const auto& frame : current) verifyUiGeneration(gpu, frame);
+    for (auto& cache : caches) check(!cache.acquire(), "replacement generation retains the same three-slot pool bound");
+    ComPtr<ID3D11Texture2D> remembered[2]; uint64_t allocations[2]{};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        remembered[eye] = current[0].snapshots[eye].lock()->layer; allocations[eye] = caches[eye].textureAllocations;
+    }
+    current[0].lease.reset();
+    current[0] = captureUiGeneration(gpu, *producer, caches, 13, 9);
+    check(bool(current[0].lease), "ordinary capture progresses after completed slot retirement");
+    for (unsigned eye = 0; eye < 2; ++eye)
+        check(current[0].snapshots[eye].lock()->layer.Get() == remembered[eye].Get() && caches[eye].textureAllocations == allocations[eye],
+            "ordinary frames reuse retired storage without invoking generation retirement or allocation");
+    for (const auto& frame : current) verifyUiGeneration(gpu, frame);
+    for (auto& frame : current) frame.lease.reset();
+    for (const auto& frame : current) for (const auto& snapshot : frame.snapshots)
+        check(!snapshot.expired(), "completed old ring alone retains UI storage after every external lease retires");
+    producer = makeProducer(17, 11);
+    check(retireUiStorage(caches, gpu.runtime.context.Get(), gpu.runtime.device.Get(), 0), "second producer handoff retires current generation cache references");
+    auto resized = captureUiGeneration(gpu, *producer, caches, 17, 11);
+    check(resized.lease && configured != producer, "resized producer also captures before worker owner switches");
+    for (const auto& frame : current) verifyUiSnapshotPixels(gpu, frame);
+    verifyUiGeneration(gpu, resized);
+    configured.reset();
+    for (const auto& frame : current) for (const auto& snapshot : frame.snapshots)
+        check(snapshot.expired(), "second old generation releases after its final completed owner");
+    resized.lease.reset(); producer.reset();
+    std::puts("ui_producer_replacement generations=3 old_slots=3 steady_slots=3 old_pixels=exact blocked_gpu_preserved=1");
+}
+
 void rejectionCases(Gpu& gpu) {
     auto* context = gpu.runtime.context.Get();
     bool wrongOwner = true;
@@ -676,6 +838,7 @@ void runGpu(Gpu& gpu) {
     rejectionCases(gpu);
     pixelCases(gpu);
     normalizedPixelCases(gpu);
+    uiProducerReplacementCases(gpu);
     typelessTransitionCases(gpu);
     typelessAdmissionCases(gpu);
     ringCases(gpu);

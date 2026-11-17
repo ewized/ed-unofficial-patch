@@ -74,6 +74,7 @@ static void contracts() {
         "captured.useMult, false, &why, false, false)",
         "facts.world = g_screenHeld == 1",
         "return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info)",
+        "return ui_layer_fg::retireStorage(g_fgCaptureCache, context, device.Get())",
         "return ui_layer_fg::replay(context, snapshot, generatedWorld",
     };
     for (const char* pin : pins) {
@@ -83,6 +84,21 @@ static void contracts() {
         if (at != std::string::npos) deleted.erase(at, std::strlen(pin));
         check(deleted.find(pin) == std::string::npos, "wiring deletion control detects removal");
     }
+    std::ifstream coordinator("src/d3d11/frame_generation_coordinator.cpp", std::ios::binary);
+    check(bool(coordinator), "coordinator source available for producer handoff wiring");
+    const std::string body((std::istreambuf_iterator<char>(coordinator)), {});
+    const auto handoff = [](const std::string& code) {
+        const auto init = code.find("if (!made->interop.initialize(init)");
+        const auto retire = code.find("uiLayerFgRetireStorage(context)");
+        const auto assign = code.find("c->producer = std::move(made)");
+        const auto begin = code.find("c->producer->interop.begin(context");
+        return init < retire && retire < assign && assign < begin &&
+            code.find("uiLayerFgRetireStorage(context)", retire + 1) == std::string::npos;
+    };
+    check(handoff(body), "storage retirement occurs once in new-producer creation before assignment and first begin");
+    auto missing = body; const auto call = missing.find("uiLayerFgRetireStorage(context)");
+    if (call != std::string::npos) missing.erase(call, std::strlen("uiLayerFgRetireStorage(context)"));
+    check(!handoff(missing), "handoff wiring regression detects omitted generation retirement");
 }
 
 using Pixel = std::array<unsigned char, 4>;
@@ -144,6 +160,78 @@ static void write(ID3D11DeviceContext* context, ID3D11Texture2D* texture, const 
     D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
     check(value.size() == static_cast<size_t>(desc.Width) * desc.Height, "full source update dimensions");
     context->UpdateSubresource(texture, 0, nullptr, value.data(), desc.Width * static_cast<UINT>(sizeof(Pixel)), 0);
+}
+// The preceding pool has no handoff operation. A no-op fallback lets this same
+// pixel regression demonstrate its runtime failure against that source.
+template<class Cache>
+static auto retireUiStorage(Cache (&caches)[2], ID3D11DeviceContext* context, ID3D11Device* device, int)
+    -> decltype(retireStorage(caches, context, device)) { return retireStorage(caches, context, device); }
+template<class Cache>
+static bool retireUiStorage(Cache (&)[2], ID3D11DeviceContext*, ID3D11Device*, long) { return true; }
+static void retirementCases(ID3D11Device* device, ID3D11DeviceContext* context) {
+    namespace adapter = edvr::ui_layer_fg;
+    adapter::CaptureCache caches[2];
+    auto scene = image(device, {}), layer = image(device, {}), multiply = image(device, {});
+    adapter::Source source;
+    source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
+    source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
+    source.info.sequence = 1; source.expectedFrame = scene.tex.Get(); source.useMult = true;
+    source.layer = layer.tex.Get(); source.layerView = layer.srv.Get();
+    source.multiply = multiply.tex.Get(); source.multiplyView = multiply.srv.Get();
+    std::shared_ptr<const edvr::UiLayerFgSnapshot> old[2][3], current[2][3];
+    std::vector<Pixel> expected[2][3];
+    check(retireUiStorage(caches, context, device, 0), "initial producer retirement accepts empty unbound caches");
+    for (unsigned eye = 0; eye < 2; ++eye) for (unsigned slot = 0; slot < 3; ++slot) {
+        source.info.eye = eye; ++source.info.sequence; expected[eye][slot] = pixels(8, 8, eye * 51 + slot * 17);
+        write(context, layer.tex.Get(), expected[eye][slot]); write(context, multiply.tex.Get(), expected[eye][slot]);
+        old[eye][slot] = adapter::capture(context, scene.tex.Get(), source, caches[eye], nullptr);
+        check(bool(old[eye][slot]), "old generation fills three UI snapshots per eye");
+    }
+    edvr::UiLayerSmaaFail failure;
+    check(caches[0].ensure(8, 8, &failure), "generation fixture warms actual SMAA cache");
+    const auto smaaOutput = caches[0].smaa.out, smaaLookup = caches[0].smaa.area;
+    const auto smaaShader = caches[0].smaa.edgesCs;
+    check(retireUiStorage(caches, context, device, 0), "producer handoff retires both old shared cache references");
+    check(caches[0].smaa.out.Get() == smaaOutput.Get() && caches[0].smaa.area.Get() == smaaLookup.Get() &&
+        caches[0].smaa.edgesCs.Get() == smaaShader.Get() && caches[0].builderCalls == 1,
+        "producer handoff preserves actual SMAA targets lookup tables shaders and builder state");
+    for (unsigned eye = 0; eye < 2; ++eye) for (unsigned slot = 0; slot < 3; ++slot) {
+        source.info.eye = eye; ++source.info.sequence;
+        current[eye][slot] = adapter::capture(context, scene.tex.Get(), source, caches[eye], nullptr);
+        check(bool(current[eye][slot]), "new generation captures while every old snapshot remains held");
+        check(readAll(device, context, old[eye][slot]->layer.Get()) == expected[eye][slot] &&
+            readAll(device, context, old[eye][slot]->multiply.Get()) == expected[eye][slot], "old generation exact pixels survive shared cache retirement");
+    }
+    bool foreign = true;
+    std::thread otherThread([&] { foreign = retireUiStorage(caches, context, device, 0); }); otherThread.join();
+    check(!foreign, "foreign-thread handoff cannot retire either eye");
+    ComPtr<ID3D11Device> otherDevice; ComPtr<ID3D11DeviceContext> otherContext;
+    hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &otherDevice, nullptr, &otherContext), "retirement foreign device");
+    check(!retireUiStorage(caches, otherContext.Get(), otherDevice.Get(), 0) &&
+        !retireUiStorage(caches, context, otherDevice.Get(), 0), "foreign context and device cannot retire either eye");
+    for (auto& cache : caches) check(!cache.acquire(), "refused handoffs preserve both full three-slot bounds");
+    adapter::CaptureCache mismatch[2];
+    check(mismatch[0].bind(context, device, 0) && mismatch[1].bind(context, device, 0), "second-eye ownership mismatch fixture");
+    auto firstHeld = mismatch[0].acquire();
+    check(!retireUiStorage(mismatch, context, device, 0) && firstHeld.use_count() == 2,
+        "second-eye preflight refusal leaves first-eye leased cache reference intact");
+    check(mismatch[0].resetOwned(), "clear first preflight fixture binding");
+    check(!retireUiStorage(mismatch, context, device, 0) && mismatch[0].bind(otherContext.Get(), otherDevice.Get(), 0),
+        "failed pair preflight cannot claim an initially unbound eye");
+    for (auto& cache : mismatch) check(cache.resetOwned(), "owned preflight fixture cleanup");
+    ComPtr<ID3D11Texture2D> remembered[2]; uint64_t allocations[2]{};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        remembered[eye] = current[eye][0]->layer; allocations[eye] = caches[eye].textureAllocations;
+        for (auto& snapshot : current[eye]) snapshot.reset();
+    }
+    check(retireUiStorage(caches, context, device, 0), "handoff keeps cache-exclusive complete storage");
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        source.info.eye = eye;
+        auto reused = adapter::capture(context, scene.tex.Get(), source, caches[eye], nullptr);
+        check(reused && reused->layer.Get() == remembered[eye].Get() && caches[eye].textureAllocations == allocations[eye],
+            "exclusive matching planes survive handoff and ordinary capture without new allocation");
+    }
 }
 static void poolCases(ID3D11Device* device, ID3D11DeviceContext* context) {
     namespace adapter = edvr::ui_layer_fg;
@@ -275,6 +363,7 @@ static void gpu() {
     hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
         D3D11_SDK_VERSION, &device, nullptr, &context), "WARP device");
     poolCases(device.Get(), context.Get());
+    retirementCases(device.Get(), context.Get());
     ComPtr<ID3D11ComputeShader> shader, sentinelShader;
     hr(device->CreateComputeShader(edvr::kUiLayerCompositeBytecode, sizeof(edvr::kUiLayerCompositeBytecode),
         nullptr, &shader), "production composite shader");

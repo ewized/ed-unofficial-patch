@@ -29,6 +29,7 @@ FrameGenerationNgxCompletion FrameGenerationNgxTicket::poll() const noexcept {st
 std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(ID3D11DeviceContext*, uint64_t, uint32_t,
     ID3D11Texture2D*, const uint32_t[4], const float[4], UiLayerFgInfo*) noexcept {std::abort();}
 bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>&, UiLayerFgPlanes*) noexcept {std::abort();}
+bool uiLayerFgRetireStorage(ID3D11DeviceContext*) noexcept {std::abort();}
 }
 unsigned testProjectionCapture(unsigned& checks) {
     unsigned failures=0;

@@ -7800,6 +7800,14 @@ bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot
     return true;
 }
 
+bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept {
+    if (!context || g_fgRenderThread.load(std::memory_order_acquire) != GetCurrentThreadId() ||
+        g_fgRenderContext.load(std::memory_order_acquire) != context) return false;
+    Ptr<ID3D11Device> device; context->GetDevice(&device);
+    if (!fgOwner(context, device.Get())) return false;
+    return ui_layer_fg::retireStorage(g_fgCaptureCache, context, device.Get());
+}
+
 std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
     ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
     ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],

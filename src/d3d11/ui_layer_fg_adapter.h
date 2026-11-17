@@ -122,6 +122,25 @@ public:
         ++poolMisses;
         return {};
     }
+    // Preflight without claiming an unbound cache. A producer handoff checks
+    // both eyes before either cache can release its storage references.
+    bool canRetireStorage(ID3D11DeviceContext* context, ID3D11Device* device, unsigned eye) const noexcept {
+        if (!context || !device || eye > 1) return false;
+        const DWORD owner = thread_.load(std::memory_order_acquire);
+        if (!owner) return true;
+        if (owner != GetCurrentThreadId()) return false;
+        return context_.Get() == context && device_.Get() == device && eye_ == eye;
+    }
+    // Drop only the cache references to leased pixels. Existing snapshots and
+    // interop fences retain the old storage independently. Unleased planes and
+    // SMAA remain reusable on this same producer context/device/thread.
+    bool retireSharedStorage() noexcept {
+        const DWORD owner = thread_.load(std::memory_order_acquire);
+        if (!owner) return true;
+        if (owner != GetCurrentThreadId()) return false;
+        for (auto& plane : planes_) if (plane && plane.use_count() > 1) plane.reset();
+        return true;
+    }
     bool ensure(unsigned width, unsigned height, UiLayerSmaaFail* failure) {
         if (thread_.load(std::memory_order_acquire) != GetCurrentThreadId()) return false;
         if (smaa.ready() && smaa.w == width && smaa.h == height) { ++reused; return true; }
@@ -140,6 +159,15 @@ public:
         return true;
     }
 };
+
+// Successful new-producer handoff only: preflight both eyes without claiming
+// unbound caches, then detach old leased storage without waiting on its GPU.
+inline bool retireStorage(CaptureCache (&caches)[2], ID3D11DeviceContext* context, ID3D11Device* device) noexcept {
+    for (unsigned eye = 0; eye < 2; ++eye)
+        if (!caches[eye].canRetireStorage(context, device, eye)) return false;
+    for (auto& cache : caches) if (!cache.retireSharedStorage()) return false;
+    return true;
+}
 
 struct Source {
     UiLayerFgFacts facts;

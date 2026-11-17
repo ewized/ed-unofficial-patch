@@ -638,6 +638,10 @@ void nativeFgCaptureGuides(ID3D11DeviceContext* context, const NativeFgGuides& g
             if (!made->interop.initialize(init) || !made->color.initialize(true, c->device, context, c->renderThread) || !startWorker(*c)) {
                 abortCapture(*c, Interop); return;
             }
+            // The worker may retain the previous producer until new work is
+            // queued. Its retired ring still owns UI snapshots, so release only
+            // the global cache's references before this producer's first capture.
+            if (!uiLayerFgRetireStorage(context)) {abortCapture(*c, Ui); return;}
             c->producer = std::move(made);
         }
         if (!c->transaction) {
