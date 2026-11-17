@@ -9,10 +9,11 @@
   for input-profile, focus and configuration recovery evidence.
 - A dedicated keyboard preset removed seven stock Mouse bindings; DirectInput
   found a usable keyboard but no mouse. Stock files and preimages are preserved.
-- No headless 4000x4000-per-eye, 90 Hz performance result, Auto FG/gaze/VRS
-  qualification or Turbo comparison exists yet. Native and generated cadence
-  remain distinct. The physical-headset evidence below does not transfer to
-  the virtual display. [Source audit](performance-audit-beyond-2026-11-16.md)
+- Headless 4000x4000 output and focused Turbo comparisons are recorded in the
+  [headless performance report](headless-vr-performance-2026-11-17.md). Neither
+  actual 90 Hz nor generated cadence is qualified. A [bounded VRS probe](headless-vrs-shader-work-2026-11-17.md)
+  proved sampled world shader-work reduction, without a frame-time claim. The physical-headset
+  evidence below does not transfer to the virtual display. [Source audit](performance-audit-beyond-2026-11-16.md)
   opportunities remain unmeasured.
 - Installed and visually reviewed candidate: `8fe2295` (v0.22.1-21-g8fe2295).
   User reported the doubled orange HUD gone in the final fixed-2x cockpit
@@ -30,8 +31,8 @@
   resolution and composite after full-frame DLSS and world FG. Candidate8fe
   uses one final XR projection, with rotation-mapped native HUD coverage.
   It supplies neither guessed UI depth nor positional reprojection.
-- VRS driver bindings and admitted world draws are observed. Effective shading
-  reduction and repeatable performance improvement in the world remain unproved.
+- Physical-headset VRS bindings and admitted world draws are observed. Effective
+  shading reduction and repeatable frame-time improvement there remain unproved.
   Latest bounded 600-frame PS query selected draws with negligible pixel work: no matched
   triple in either eye. Instrumentation is Off and both INIs restored exactly.
 - Historical 3200 gameplay sample: about 89.98 native fps over three 30-second

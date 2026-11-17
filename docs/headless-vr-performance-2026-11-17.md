@@ -35,9 +35,8 @@
   DLSS SR/DLAA remain supported; another compatible FG backend needs different code.
 - Saved pre-benchmark INI/mirror were restored: Auto, Turbo Off, DLSS K, GPU diagnostic
   Off, private keyboard. Simulator stop confirmed owned=true/stopped=true.
-- Synthetic-eye diagnostics raised VRS valid/admitted-world counters, but
-  effective shading reduction, projection mapping and GPU benefit are unverified.
-  Native source cadence remains distinct from generated presentation cadence.
+- A later [VRS probe](headless-vrs-shader-work-2026-11-17.md) found matched shader-work
+  reductions in both eyes. Whole-frame GPU benefit remains unverified.
 - See the [testing contract](headless-vr-testing.md),
   [source audit](performance-audit-beyond-2026-11-16.md) and
   [physical Beyond evidence](beyond-vrs-verification.md) for their own scopes.
@@ -211,8 +210,9 @@ head replay produced `valid_pairs=179` and `world_accepted=1284`, versus zero
 baseline values. Map updates were 1/1 with `map_bytes=125000`; stale refusals were
 237480, `coarse_ack=0` and `projection_mapping_verified=0`. These establish changed
 provider/world-admission activity, not effective shading coverage. `coarse_ack`
-is a last-state snapshot. Projection mapping, shader-work reduction and repeatable
-GPU benefit remain unverified; physical gaze latency is outside this test.
+is a last-state snapshot. A later [bounded probe](headless-vrs-shader-work-2026-11-17.md)
+proved sampled shader-work reduction. Whole-frame benefit and physical gaze latency
+remain outside that evidence.
 
 ## Memory and retained-resource investigation
 
@@ -236,7 +236,7 @@ recoverable warmup/backpressure. No C++ changes were made.
 
 Partition the roughly 32 Hz ceiling independently of GPU work and declared refresh.
 No repeatable Turbo preference is established. Real FSR needs its backend built
-and execution confirmed; VRS projection/shader benefit remains unproved. The tested
+and execution confirmed; whole-frame VRS benefit remains unproved. The tested
 controller cycle is clean. Next scope awaits the FG-backend choice; preserve exact
 restoration receipts and existing HUD/native fallback behavior.
 

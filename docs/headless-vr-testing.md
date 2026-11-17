@@ -53,7 +53,8 @@
 - Actual 4000x4000 output and tutorial loading now have live evidence; see the
   [performance investigation](headless-vr-performance-2026-11-17.md).
   Auto FG refused initialization; synthetic gaze reached eligible world draws,
-  but effective shading savings, Turbo comparison and 90 Hz remain unqualified.
+  but whole-frame VRS savings and 90 Hz remain unqualified. See the
+  [sampled shader-work evidence](headless-vrs-shader-work-2026-11-17.md).
   Native source cadence and generated presentation cadence must be measured
   separately. The verified startup/input subset does not qualify the full target.
 - [Performance audit](performance-audit-beyond-2026-11-16.md) records source
@@ -158,8 +159,8 @@ did not launch or navigate Elite.
    compositor times. Missing timestamps mean the corresponding result is unknown.
 5. If measuring VRS, require meaningful matched full/native-map/full shader-work
    samples from both eyes. Runtime acceptance and world-admission counters alone
-   do not establish shading reduction. The audit's discovery-bias finding must
-   be tested before repeating the previously inconclusive sampling experiment.
+   do not establish shading reduction. A later tutorial probe obtained meaningful
+   triples; the audit's discovery-bias finding remains a sampler limitation.
 
 The helper's capture warm-up and readback latency are not game-frame timings.
 Its per-eye compositor mirrors are sampled sequentially, without a same-frame
