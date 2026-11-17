@@ -2,11 +2,23 @@
 
 ## Status
 
+- [Headless testing](headless-vr-testing.md) reuses Mod Linker's virtual HMD
+  and loopback MCP. Installed ED-UP `8fe2295` reached Pilot Assessment, launched
+  into space, and accepted pitch/roll probes with no keys left held. Normal
+  Frontier launcher closure left Elite running in VR. See the linked report
+  for input-profile, focus and configuration recovery evidence.
+- A dedicated keyboard preset removed seven stock Mouse bindings; DirectInput
+  found a usable keyboard but no mouse. Stock files and preimages are preserved.
+- No headless 4000x4000-per-eye, 90 Hz performance result, Auto FG/gaze/VRS
+  qualification or Turbo comparison exists yet. Native and generated cadence
+  remain distinct. The physical-headset evidence below does not transfer to
+  the virtual display. [Source audit](performance-audit-beyond-2026-11-16.md)
+  opportunities remain unmeasured.
 - Installed and visually reviewed candidate: `8fe2295` (v0.22.1-21-g8fe2295).
   User reported the doubled orange HUD gone in the final fixed-2x cockpit
   check, then described subsequent gameplay as very playable. This is a short
   visual qualification, not a long-flight comfort or performance guarantee.
-- Current play configuration, verified 2026-11-17 UTC: Beyond 2e at 90 Hz,
+- Physical-headset play configuration, verified 2026-11-17 UTC: Beyond 2e at 90 Hz,
   4000x4000 output per eye, DLSS Balanced through the game's 0.58 HMD scale
   (2320x2320 input), very-narrow eye-tracked VRS, native-first Auto FG,
   Turbo Off. No desktop-control inputs during the latest cockpit diagnostic.

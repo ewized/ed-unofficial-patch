@@ -239,6 +239,9 @@ REM the PE identity itself, or names an address the signature table cannot place
 REM -- it reads only src\.
 python tools\run_jobs.py ^
     --gate "tools\fetch_openxr_loader.py --self-test" ^
+    --gate "tools\xr_headless.py --self-test" ^
+    --gate "tools\steamvr_benchmark.py --self-test" ^
+    --gate "tools\edup_vr_mcp.py --self-test" ^
     --gate "tools\fetch_xess.py --self-test" ^
     --gate "tools\gen_installer_rc.py --self-test" ^
     --gate "tools\package_native.py --self-test" ^
