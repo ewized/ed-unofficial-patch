@@ -16,9 +16,12 @@
 - Saved pre-probe INI/mirror were restored exactly; simulator stopped. Normal
   controller Stop passed stopped_clean/exit 0, no cleanup errors, inactive
   receipt and no remaining game/runtime processes.
+- A later focused, queries-disabled VRS On/Off/On comparison qualified all three
+  SDK windows, but GPU-span medians 8.6920/8.8723/8.9147 ms establish no repeatable
+  timing benefit. Return-On drift exceeds the initial On/Off difference.
 - Earlier physical-headset misses do not transfer to this scene. Successful
-  discovery here does not fix known selector starvation. Next: matched VRS
-  On/Off timing and visual checks with the diagnostic disabled after drain/settle.
+  discovery here does not fix known selector starvation. Whole-frame benefit
+  and visual qualification remain open.
 
 ## Configuration and provenance
 
@@ -109,8 +112,80 @@ work and no matched triples; this different scene does not explain that miss.
 The [source audit](performance-audit-beyond-2026-11-16.md) reproduces selector
 starvation with a synthetic scheduling transcription. That issue remains open.
 
-After verifying queries disabled/drained and settling the same scene, collect
-matched VRS On/Off/On windows with fixed AA, sizes, gaze, focus and FG/Turbo.
-Compare application GPU timing and native completed-frame cadence separately
-from declared refresh/generated cadence, retaining HUD and visual checks.
-No such new timing comparison or rendering-source change is claimed here.
+The subsequent timing comparison below measures a different scope from these
+draw queries. Sampled PS reduction does not predict its elapsed-time result.
+
+## Queries-disabled VRS On/Off/On comparison
+
+A fresh session of the same sealed build reached the docked Mawson scene after
+instructor readiness and open dock doors. Owner-verified settings: TAA, FG Off,
+Turbo Off, 2320 input to 4000 output, very-narrow VRS; PS diagnostics and native
+application GPU timing remained Off for consistent overhead. Only
+experimental.eye_tracked_foveation changed On/Off/On through saved INI/mirror
+preimages. Native benchmark records independently confirm AA on and these sizes.
+
+Each window renewed synthetic eyes and a 60-second neutral-head replay before
+collection, with no helper actions during collection. Return-On renewed its
+replay through Stop/Start before timing; an earlier rejected eye update before
+Off was retried outside its timing interval. Those setup details are the
+session owner's record, not something inferred from GPU samples.
+
+The private dataset `vrs-ab-benchmarks` retains raw frames, history batches,
+rejections, summaries, control/focus records and the expected-build-filtered
+UTF-16LE `vrs-ab-gfx-evidence.txt` / `vrs-ab-cadence-evidence.txt`. Independent
+parsing exactly reproduced all three raw-frame median/p95/p99 values. All SDK
+windows qualified with no rejected samples, invalid records, history overruns
+or clock discontinuities. Selected SDK spans were 29.9273/29.9353/29.8956 seconds
+for the requested 30-second windows.
+
+Metric: SteamVR m_flTotalRenderGpuMs, the GPU span from work submitted immediately
+after present through the end of compositor work. This includes compositor work;
+it is not isolated application GPU time or native frame-time percentiles.
+
+| VRS window | UTC collection start | Samples | Median ms | p95 ms | p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| On A | 08:15:50 | 318 | 8.6919675 | 9.5077858 | 9.9628484 |
+| Off B | 08:17:20 | 317 | 8.8722572 | 9.9845633 | 10.3681487 |
+| On C | 08:18:33 | 316 | 8.9146557 | 9.7787678 | 10.0713051 |
+
+All three controls passed unchanged game identity, unchanged final INI hash and
+collector exit 0. Every focus record matched the game: 302 observations per
+window, strictly increasing monotonic spans 30.1571/30.1735/30.1734 seconds and
+maximum gaps 0.103313/0.101267/0.101209 seconds. This covers the monitored interval
+at approximately 100 ms cadence; transitions between observations remain unseen.
+All selected SDK HMD poses were valid with the same neutral matrix across runs.
+That does not freeze the game's scene animation or resource state.
+
+Actual native VRS reports, before and throughout each interval, show configured
+1/0/1. Bracketing log rows give the following cumulative counters; their wider
+boundaries are not the exact collector boundaries:
+
+| Window | Valid pairs before → after | Accepted world draws before → after |
+| --- | ---: | ---: |
+| On A | 116 → 1230 | 144710 → 1573622 |
+| Off B | 1855 → 1855 | 2385012 → 2385012 |
+| On C | 1934 → 3041 | 2483260 → 3910600 |
+
+Every intermediate On report increases both counters; Off reports remain
+constant. Stale-refusal counters do not increase within any bracket. This
+supports functioning gaze/map admission in both On windows and actual Off in
+the control, rather than relying on INI bytes alone.
+
+Return-On's median is 0.2226882 ms (2.5620%) above initial On, exceeding the
+initial Off-minus-On difference of 0.1802897 ms. Return-On is 0.0423985 ms slower
+than Off. Thus this sequence establishes **no repeatable whole-frame timing
+benefit**, while retaining the earlier positive sampled-draw PS evidence.
+Outside-window GPU snapshots also vary: core clocks 1890→1890, 1890→1860 and
+1875→1875 MHz; temperatures 76→77, 79→79 and 79→79 C; used memory
+10428→10799, 11083→11117 and 11107→11894 MiB, respectively. Thermal, memory,
+clock and scene variation remain confounds; these endpoints do not prove a
+specific cause or a VRS resource leak.
+
+Separate complete native windows near these measurements report about
+31.55–31.77 caller cycles/s, not 90. Their boundaries differ from the SDK
+collections. Native application GPU samples were missing by design with its
+optional timing disabled, so these SDK results cannot substitute for them.
+No generated cadence, image-quality acceptance or new rendering change follows.
+The owner restored the exact saved pre-probe INI/mirror, stopped the simulator
+and completed normal stopped_clean cleanup with no active receipt or remaining
+game/runtime processes.
