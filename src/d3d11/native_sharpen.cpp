@@ -3,6 +3,7 @@
 #include "ui_layer.h"
 #include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "temporal_pass.h"
+#include "frame_generation_coordinator.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -73,6 +74,11 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // source's size -- the same whether the frame is the source or the
   // sharpened copy of that region.
   float layerUv[4]; edvr::uiLayerUvFromRegion(region,desc.Width,desc.Height,layerUv);
+  // The FG full-eye ABI carries no texture flip transform. Preserve the
+  // native path and explicitly refuse this optional route before any copy.
+  const bool fgBoundsSupported=!flipU&&!flipV;
+  if(!fgBoundsSupported&&edvr::nativeFgRequested())edvr::nativeFgInvalidateProducer(edvr::NativeFgUnsupportedBounds);
+  if(fgBoundsSupported)edvr::nativeFgCaptureDoor(seq,eye,source,region,layerUv);
   // A layer-only eye (ui_layer.h uiLayerDoorLayerOnly: the VR world route's world, or a map's or a menu's 2D screen on foot):
   // the layer holds the WHOLE eye and the frame here is the black one the temporal door
   // handed on. So the layer is composited FIRST and RCAS runs over the composited eye -- the order the ordinary path
@@ -108,6 +114,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   }
   if(s->strength<=0.f||s->stoodDown) {
     ++s->off; if(s->strength<=0.f&&!s->offNoted){s->offNoted=true;edvr::Log::get().note("native sharpen: off (fix.render_sharpness=0); eyes consumed as passthrough.");}
+    if(fgBoundsSupported)edvr::nativeFgCaptureWorld(seq,eye,source,region);
     if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv,edvr::uiLayerDoorFromPass(eye))) { const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]}; edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     edvr::temporalPassCaptureFinalEye(seq,eye,source,region,false,flipU,flipV);
     return S_FALSE;
@@ -115,6 +122,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   void* raw=edvrSharpen(source,int(eye),bounds,s->strength);
   if(!raw) {
     s->stoodDown=true;++s->refusals; edvr::Log::get().note("native sharpen: pass refused; standing down for this session.");
+    if(fgBoundsSupported)edvr::nativeFgCaptureWorld(seq,eye,source,region);
     if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv,edvr::uiLayerDoorFromPass(eye))) { const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]}; edvr::temporalPassCaptureFinalEye(seq,eye,layered,whole,true,flipU,flipV); *output=layered; std::memcpy(outBounds,full,sizeof(full)); return S_OK; }
     edvr::temporalPassCaptureFinalEye(seq,eye,source,region,false,flipU,flipV);
     return S_FALSE;
@@ -123,6 +131,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // The sharpened texture is the input region, region-sized.
   const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
   bool composite=false;
+  if(fgBoundsSupported)edvr::nativeFgCaptureWorld(seq,eye,result,whole);
   if(ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,result,whole,layerUv,true)) { result=layered;composite=true; } else result->AddRef();
   edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,composite,flipU,flipV);
   *output=result; std::memcpy(outBounds,full,sizeof(full)); ++s->treated; s->engagedMask|=1u<<eye; if(s->engagedMask==3&&!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native sharpen: engaged for both eyes.");} return S_OK;

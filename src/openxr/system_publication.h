@@ -9,16 +9,16 @@ namespace edvr::openxr {
 // resource operations; the mutex here never spans an XR call or GPU work.
 class SystemPublication {
  public:
-  uint64_t begin(SystemRead metadata) {
+  uint64_t begin(SystemRead metadata,bool exactInputRecommendation=false) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(active_||generation_==(std::numeric_limits<uint64_t>::max)())return 0;
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
     metadata.optics={};metadata.opticsValid=false;
     metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;
     // The game may query this metadata before any valid pose is available.
-    // Normalize here as well as on live updates so startup cannot cache an
-    // odd size while temporal rendering later uses an even output target.
-    for(unsigned eye=0;eye<2;++eye) {
+    // The legacy output-sized ask remains even. A separate explicit input
+    // recommendation may be odd while its unchanged temporal output is even.
+    for(unsigned eye=0;!exactInputRecommendation&&eye<2;++eye) {
       metadata.recommendedWidth[eye]=gameFacingDimension(metadata.recommendedWidth[eye]);
       metadata.recommendedHeight[eye]=gameFacingDimension(metadata.recommendedHeight[eye]);
     }
@@ -94,15 +94,15 @@ class SystemPublication {
     if(!active_||generation!=generation_||(masks&&masks->generation!=generation))return false;
     state_.hiddenMasks=std::move(masks);return true;
   }
-  void recommend(const uint32_t (&width)[2], const uint32_t (&height)[2]) {
+  void recommend(const uint32_t (&width)[2], const uint32_t (&height)[2],bool exactInputRecommendation=false) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!active_) return;
     for (unsigned eye=0; eye<2; ++eye) {
       if (!width[eye] || !height[eye] || width[eye]>16384 || height[eye]>16384) return;
     }
     for (unsigned eye=0; eye<2; ++eye) {
-      state_.recommendedWidth[eye]=gameFacingDimension(width[eye]);
-      state_.recommendedHeight[eye]=gameFacingDimension(height[eye]);
+      state_.recommendedWidth[eye]=exactInputRecommendation?width[eye]:gameFacingDimension(width[eye]);
+      state_.recommendedHeight[eye]=exactInputRecommendation?height[eye]:gameFacingDimension(height[eye]);
     }
   }
  private:

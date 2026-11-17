@@ -221,6 +221,8 @@ void vScreenForceRefreshConfig();
 // draws reach the eye textures in a frame, which is only knowable at the end
 // of one.
 void vScreenFrameBoundary();
+// Recovery uses the Present owner's ordinal, even during graphics standdown.
+void vScreenNativeFrameBoundary(uint64_t frameOrdinal);
 
 
 // Called about once a second from the frame path: verify the context-vtable

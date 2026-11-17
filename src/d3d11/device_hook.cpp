@@ -1,5 +1,7 @@
 #include "flat_origin_capture.h"
 #include "device_hook.h"
+#include "native_input_scale.h"
+#include "frame_generation_coordinator.h"
 #include "ui_layer.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
@@ -1241,6 +1243,7 @@ EDVR_BOUNDARY_TICK(tkFlatOriginCapture, "flat_origin_capture");
 EDVR_BOUNDARY_TICK(tkCrossProfile, "cross_profile");
 EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
+EDVR_BOUNDARY_TICK(tkNativeVrsClock, "native_vrs_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
 EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
@@ -1581,6 +1584,10 @@ void presentFrameBoundary() {
     // whether the table changed before the hang or after it, and neither
     // number could answer it. One counter, published here, printed by both.
     ++g_state->frameCounter;
+    // Keep recovery on the sole real ordinal before graphics standdown, with
+    // a budget of its own. Vendor failures are handled inside the owner and
+    // do not spend this budget or suppress the next OFF/flat retry.
+    tkNativeVrsClock.run([] { vScreenNativeFrameBoundary(g_state->frameCounter); });
     // The cross-profile cost's window (cross_profile_cost.h): once a frame in both profiles, so the flat profile's line prints too.
     tkCrossProfile.run([] { perfMonitorCrossProfileFrame(); });
     // The 3D mode watch's commit (mode_watch.h): a posted mode is applied here, at the one point no draw of the next frame has started.
@@ -1891,6 +1898,42 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     ID3D11DeviceContext* timingContext = nullptr;
     if (dev) dev->GetImmediateContext(&timingContext);
     if (timingContext) {
+        if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST) &&
+            renderBoundaryValidateOwner(dev, timingContext)) {
+            static uint32_t fgConfigGeneration = UINT32_MAX;
+            static bool fgWasFlat = false;
+            auto& cfg = Config::get();
+            const auto generation = cfg.generation();
+            const bool flat = runtimeFlatProfile();
+            if (generation != fgConfigGeneration || flat != fgWasFlat) {
+                const auto value = cfg.getString("fix.frame_generation", "off");
+                const uint32_t multiplier = flat ? 0u :
+                    _stricmp(value.c_str(), "2x") == 0 ? 2u :
+                    _stricmp(value.c_str(), "4x") == 0 ? 4u : 0u;
+                if(!flat&&_stricmp(value.c_str(),"auto")==0)nativeFgSetAutoMode();
+                else nativeFgSetRequestedMultiplier(multiplier);
+                fgConfigGeneration = generation;
+                fgWasFlat = flat;
+            }
+            if(nativeFgAutoRequested()){
+                const auto cpu=nativeTimingSnapshot();const auto gpu=gpuFrameSnapshot();
+                const uint64_t now=GetTickCount64();
+                static uint64_t autoSession=0,firstAutoPresent=0;
+                if(cpu.generation!=autoSession){autoSession=cpu.generation;firstAutoPresent=g_state->frameCounter+1;}
+                fg_auto::Sample sample;sample.nowMs=now;sample.session=cpu.generation;
+                sample.cpuSequence=cpu.sequence;sample.gpuSequence=gpu.result.sequence;
+                sample.cpuMs=cpu.applicationMs;sample.gpuMs=gpu.result.outerMs;
+                sample.periodMs=fg_auto::panelPeriodMs(cpu.cpu.baseDisplayHz);
+                float menuAlpha=0.f;uint32_t menuStamp=0;
+                const bool blockedByMenu=menuVisible(&menuAlpha,&menuStamp)&&menuAlpha>0.f;
+                sample.valid=!blockedByMenu&&sample.periodMs>0.&&cpu.active&&cpu.haveCpu&&!cpu.invalid&&cpu.applicationValid&&cpu.firstSequence&&
+                    cpu.capturedAtMs&&now>=cpu.capturedAtMs&&now-cpu.capturedAtMs<=500&&
+                    gpu.enabled&&gpu.haveResult&&gpu.result.reason==GpuSpanReason::Valid&&
+                    gpu.result.source==GpuSpanSource::ApplicationRender&&gpu.result.sourceFrame>=firstAutoPresent&&
+                    gpu.capturedAtMs&&now>=gpu.capturedAtMs&&now-gpu.capturedAtMs<=500;
+                nativeFgAutoObserve(sample);
+            }
+        }
         gpuFramePresent(timingContext, g_state->frameCounter + 1);
         timingContext->Release();
     }
@@ -2767,6 +2810,15 @@ void hookDevice(ID3D11Device* device) {
 #undef EDVR_HOOK_DEV_CREATE
     vrSsaaGateStartup();  // log only: the 3D mode file, the .fxcfg's Supersampling and HMD Quality, once per process
     {
+        // Capture before returning the device: later-created samplers AND the
+        // native bridge must consume this same immutable startup decision.
+        const float wanted=nativeInputScaleSaved(sentinelCfg);
+        float hmd=0,ssaa=0;
+        const bool known=wanted!=1.0f && native_input::validScale(wanted) &&
+            eliteHmdMultiplier(&hmd,&ssaa,nullptr,0);
+        nativeInputScaleCapture(sentinelCfg,known,hmd,ssaa);
+    }
+    {
         const int aniso = sentinelCfg.getIntInRange("advanced.texture_anisotropy", 0, 0, 16);
         const bool temporal = temporalModeEnabledFor(sentinelCfg.getString("fix.temporal_aa", "off"), runtimeFlatProfile());
         const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
@@ -2775,7 +2827,8 @@ void hookDevice(ID3D11Device* device) {
             float mult = 0.0f, ssaa = 0.0f;
             char file[80] = {};
             if (eliteHmdMultiplier(&mult, &ssaa, file, sizeof(file))) {
-                bias = log2f(mult);
+                const float inputScale=nativeInputScaleActive();
+                bias = inputScale==1.0f ? log2f(mult) : log2f(mult*inputScale);
                 s.samplerBiasAuto = true;
                 s.samplerBiasMult = mult;
                 snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
@@ -2784,6 +2837,10 @@ void hookDevice(ID3D11Device* device) {
                          "log2 of that is the bias the mips want",
                          static_cast<double>(mult), file[0] ? file : "its graphics preset",
                          static_cast<double>(ssaa));
+                if(inputScale!=1.0f) snprintf(s.samplerBiasWhy,sizeof(s.samplerBiasWhy),
+                    "auto: startup native input scale %.9f x saved HMD %.6f = %.9f; "
+                    "bias %.6f, immutable until restart; recommendation pixel rounding is reported separately",
+                    double(inputScale),double(mult),double(inputScale*mult),double(bias));
             } else {
                 // Say it here rather than leave it to the sampler line: a
                 // failed auto leaves the bias at zero, which switches the

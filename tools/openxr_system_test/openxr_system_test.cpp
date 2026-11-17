@@ -473,6 +473,23 @@ void oddRecommendationTest() {
   system.GetRecommendedRenderTargetSize(&width, &height);
   check(width == 0 && height == 0 && !source.state.recommendedWidth[0] &&
         !source.state.recommendedHeight[0], "retirement clears recommendations");
+
+  // Explicit input size is separate from the unchanged full output geometry.
+  SystemPublication exact;
+  metadata.recommendedWidth[0]=metadata.recommendedWidth[1]=1067;
+  metadata.recommendedHeight[0]=metadata.recommendedHeight[1]=1067;
+  const auto exactGeneration=exact.begin(metadata,true);
+  source.state=exact.read();system.GetRecommendedRenderTargetSize(&width,&height);
+  check(exactGeneration&&width==1067&&height==1067,"explicit odd input survives bootstrap OpenVR size query");
+  auto fullOutput=geometry(exactGeneration,1);
+  for(unsigned eye=0;eye<2;++eye){fullOutput.width[eye]=3200;fullOutput.height[eye]=3200;}
+  check(exact.publish(fullOutput,true,true),"full3200 geometry publishes alongside odd input recommendation");
+  const uint32_t exactSize[2]={1067,1067};exact.recommend(exactSize,exactSize,true);
+  source.state=exact.read();system.GetRecommendedRenderTargetSize(&width,&height);
+  check(width==1067&&height==1067&&source.state.geometry.native.width[0]==3200&&source.state.geometry.native.width[1]==3200,
+        "explicit live input stays1067 while both native output widths stay3200");
+  exact.recommend(exactSize,exactSize);source.state=exact.read();system.GetRecommendedRenderTargetSize(&width,&height);
+  check(width==1068&&height==1068,"control: legacy recommendation still normalizes odd input to even");
 }
 
 // Elite's "now" head pose, through the historical virtual ABI (docs/terrain-culling.md): which GetDeviceToAbsoluteTrackingPose calls are flagged for the drawn

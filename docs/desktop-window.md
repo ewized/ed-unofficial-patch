@@ -2,6 +2,7 @@
 
 ## Status
 
+- **Local candidate (2026-11-15, unflown):** `black` / **Off (black)** suppresses desktop drawing and clears black with normal input/Present. Headset transfers stay unchanged; savings are unmeasured. See "Black desktop" below.
 - **Release (2026-10-30):** Rounds 1 to 8, the Mirror window page and the VR sync-interval-0 Present are in v0.22.0-rc.4 (draft pre-release, `ab1955de`, 2026-10-30). **State (2026-10-28):** rounds 1 to 8 ON MAIN. **Round 8 FLOWN OK on the Pimax**
   (`edvr_gfx_20261028_215040.log`): the rule switched live 22 times, `hidden-area mesh served
   no, as the game, no mesh`, so native equals center there, as expected. OPEN: native's mesh
@@ -11,7 +12,7 @@
   shift, Style (F174). **2026-10-30 (Sean's word):** in VR Elite's Present always goes out with
   sync interval 0, flat keeps Elite's own, no key (`desktop_vsync.h`, line `desktop vsync`; Elite
   already asked 0 in Sean's last five Frontier flights). Five live keys in `[visual]`: `visual.desktop_window` (`game` | `left_eye`
-  | `right_eye` | `both_eyes`, default `left_eye`), `desktop_window_aspect` (`full` | `1:1` |
+  | `right_eye` | `both_eyes` | `black`, default `left_eye`), `desktop_window_aspect` (`full` | `1:1` |
   `4:3` | `16:10` | `16:9` | `21:9`, default `full`), `desktop_window_crop` (`native` | `center`,
   default `native`), `desktop_window_vertical_shift` (-100 to 100, default 0),
   `desktop_window_style` (`window` | `borderless`, default `window`). VR only. No temporary keys.
@@ -59,8 +60,23 @@
   the window means switching away from the game first; centring on the projection centre
   (round 8).
 - Flights 1 to 4, the draw census and rounds 3 and 4: "Flight history" below the design.
-
 ## Design
+
+### Black desktop (local candidate)
+
+`visual.desktop_window = black` keeps the window visible for normal input and Present, suppresses the game's
+buffer draws and clears it black. It never acquires, retains or draws an eye image. The optional runtime callback
+supplies only a VR-activity heartbeat; the existing 500 ms timeout restores desktop drawing when VR frames stop,
+and the next heartbeat can reactivate black. A switch back to an eye waits for a newly held texture.
+
+Mandatory headset capture/shared-image transfers stay unchanged. Against `left_eye`, which already suppresses
+the game's desktop draws, the prospective saving is the finished-eye desktop draw/state work and retained-image
+reference work. No performance improvement has been measured. No minimize, hide, focus or pacing change is made.
+Black retains the existing cinema-mode game-window shape restoration, because Elite uses that shape for the
+in-headset flat-screen HUD. It makes no eye-aspect reshape of its own.
+The desktop is cleared without changing pipeline bindings; its swap-buffer identity is refreshed each Present
+for the existing draw skip. Black logs cumulative clear, eye-demand and retained-image counters beside that
+skip census. The application-render GPU clock ends before this desktop pass, so it cannot measure its saving.
 
 - **The handoff.** `capture()` (`native_runtime_host.h`) calls `noteEye` right after
   an eye is captured, with the texture it is about to give the headset and its

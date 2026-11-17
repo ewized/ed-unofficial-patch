@@ -219,4 +219,14 @@ void dlaaShutdown();
 // Called at a profile switch, render thread, frame boundary: releases every live DLSS feature, NGX stays initialised.
 void dlaaReleaseForSwitch();
 
+// Last app-observed successful/failed evaluation, published with the sparse
+// model audit. Creation hints do not identify the driver's internal model.
+struct DlaaModelSelection {
+    uint32_t inputW=0,inputH=0,outputW=0,outputH=0;
+    uint64_t recordedAtMs=0,presetGeneration=0,successfulEvaluations=0,failedEvaluations=0;
+    bool evaluationSucceeded=false;
+    char mode[24]{},requestedModel[8]{},appliedHint[8]{};
+};
+bool dlaaModelSelection(int eye, DlaaModelSelection* output);
+
 }  // namespace edvr

@@ -7,12 +7,16 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <vector>
 #include "../../src/common/native_temporal.h"
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/temporal_mode.h"   // the map gate's pass verdict bits and flag (temporalMapStillBits, kTemporalFlagMapKeep)
 #include "../../src/d3d11/temporal_pass.h"
+#include "../../src/d3d11/native_gaze_readiness.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_surfaces.h"
 #include "../../src/d3d11/vr_camera_census.h"
@@ -51,7 +55,7 @@ Call note;std::vector<Call> calls;bool passSucceeds=true;
 // CreateTexture2D -- where fix.ui_quality's surfaces ask for the
 // recommendation. The stub asks from there, exactly as the create hook
 // would; MSVC's std::mutex throws on a re-lock from its own thread.
-unsigned reentries=0,reentryThrows=0;uint32_t reentryRecW=0,reentryRecH=0;bool reentryJitter=true,reentryWarm=true,reentryGeometry=true;
+unsigned reentries=0,reentryThrows=0;uint32_t reentryRecW=0,reentryRecH=0;bool reentryJitter=true,reentryWarm=true,reentryGeometry=true,reentryGazeReady=true;
 float reentryUp=0,reentryDown=0;
 void askFromInsideTreat(){
   ++reentries;
@@ -59,7 +63,8 @@ void askFromInsideTreat(){
       edvr::nativeTemporalVerticalTangents(&reentryUp,&reentryDown);
       uint64_t sq=0;float x=0,y=0;uint32_t a=0,b=0;reentryJitter=edvr::nativeTemporalDrawJitter(0,&sq,&x,&y,&a,&b);
       float fr[4]{},sh[2]{};reentryGeometry=edvr::nativeTemporalEyeGeometry(0,&sq,fr,sh);
-      ID3D11Device* dv=nullptr;unsigned long th=0;reentryWarm=edvr::nativeTemporalWarmTarget(&dv,&th);}
+      ID3D11Device* dv=nullptr;unsigned long th=0;reentryWarm=edvr::nativeTemporalWarmTarget(&dv,&th);
+      reentryGazeReady=edvr::nativeTemporalGazeReadiness(nullptr,GetCurrentThreadId()).ready;}
   catch(...){++reentryThrows;}
 }
 // F198: what the Anti-aliasing-off branch of treat publishes (the eye's frustum, the eye offset alone, the submitted texture's size): recorded here, asserted below.
@@ -329,12 +334,36 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
   edvr::shutdownGlitchFrameFix();
 }
 
+void readinessMutationRace(Device& d,EdvrNativeTemporalTable& table,bool closing) {
+  struct Race {std::mutex mutex;std::condition_variable cv;bool entered=false,attempted=false,done=false,inside=false;HRESULT result=E_FAIL;} race;
+  const auto ready=edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId());
+  check(ready.ready,"readiness race starts behind actual successful stereo output");
+  std::thread mutation([&]{
+    {std::unique_lock<std::mutex> lock(race.mutex);race.cv.wait(lock,[&]{return race.entered;});race.attempted=true;race.cv.notify_all();}
+    race.result=closing?table.close(table.context):table.invalidate(table.context);
+    {std::lock_guard<std::mutex> lock(race.mutex);race.done=true;race.cv.notify_all();}
+  });
+  const auto callback=[](void* opaque,uint64_t){
+    auto& r=*static_cast<Race*>(opaque);std::unique_lock<std::mutex> lock(r.mutex);
+    r.entered=true;r.cv.notify_all();r.cv.wait(lock,[&]{return r.attempted;});
+    r.inside=r.cv.wait_for(lock,std::chrono::milliseconds(100),[&]{return r.done;});
+  };
+  const bool admitted=edvr::nativeTemporalWithGazeReady(d.device.Get(),GetCurrentThreadId(),ready.epoch,callback,&race);
+  // Let the worker finish even if a regression refused the callback entirely.
+  if(!admitted){std::lock_guard<std::mutex> lock(race.mutex);race.entered=true;race.cv.notify_all();}
+  mutation.join();
+  check(admitted&&!race.inside&&race.result==S_OK,"owned invalidate/close cannot tear down during the provider callback");
+  check(!edvr::nativeTemporalGazeEpoch()&&!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,
+        "owned teardown revokes the successful-eye epoch before another provider call");
+}
 void run(){
   // N9: the warm target is the channel's raw pointer, not a live reference --
   // false with no channel acquired, the acquiring thread and device once one
   // is, false again once it closes.
   ID3D11Device* warmDev=reinterpret_cast<ID3D11Device*>(1);unsigned long warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target before any channel is acquired");
+  check(!edvr::nativeTemporalGazeReadiness(nullptr,GetCurrentThreadId()).ready&&!edvr::nativeTemporalGazeEpoch(),
+        "startup without an acquired successful channel is never gaze-ready");
   Device d;auto source=d.texture();auto t=acquire(d,11);auto f=frame(11,1);auto p=begin(t,f);
   check(coverNotes>=1&&std::memcmp(coverLast,f.frusta,sizeof(coverLast))==0,"the terrain cull cover is told the frusta the game is handed (the begun frame's, as given)");
   check(jitterNotes>=1&&jitterLastShift[0][0]==p.tangentShift[0][0]&&jitterLastShift[1][1]==p.tangentShift[1][1],"the light grid cache's jitter probe is told the shift the game is handed (the begun frame's)");
@@ -342,11 +371,28 @@ void run(){
   check(edvr::nativeTemporalWarmTarget(&warmDev,&warmThread)&&warmDev==d.device.Get()&&warmThread==GetCurrentThreadId(),
       "warm target names the acquiring thread and device");
   check(p.tangentShift[0][0]==0&&p.tangentShift[1][1]==0,"unknown input size means no jitter");
-  check(treat(t,1,1,source.Get())==S_OK&&treat(t,1,0,source.Get())==S_OK,"reversed first pair");
+  check(!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,"acquire and begin alone do not admit gaze");
+  check(treat(t,1,1,source.Get())==S_OK,"reversed first eye succeeds");
+  check(!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,"one actual successful eye does not admit gaze");
+  check(treat(t,1,0,source.Get())==S_OK,"reversed first pair");
+  const auto firstReady=edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId());
+  check(firstReady.ready&&firstReady.epoch&&firstReady.pairSequence==1&&edvr::nativeTemporalGazeEpoch()==firstReady.epoch,
+        "both real temporal outputs publish the acquired current-channel epoch");
+  unsigned providerCalls=0;const auto countProvider=[](void* value,uint64_t){++*static_cast<unsigned*>(value);};
+  check(!edvr::nativeTemporalWithGazeReady(nullptr,GetCurrentThreadId(),firstReady.epoch,countProvider,&providerCalls)&&
+        !edvr::nativeTemporalWithGazeReady(d.device.Get(),GetCurrentThreadId()+1,firstReady.epoch,countProvider,&providerCalls)&&
+        !edvr::nativeTemporalWithGazeReady(d.device.Get(),GetCurrentThreadId(),firstReady.epoch+1,countProvider,&providerCalls)&&!providerCalls,
+        "unknown device, foreign thread and stale epoch never invoke the provider");
+  check(edvr::nativeTemporalWithGazeReady(d.device.Get(),GetCurrentThreadId(),firstReady.epoch,countProvider,&providerCalls)&&providerCalls==1,
+        "exact acquired owner and successful epoch admit a synchronous provider call");
+  {Device foreign;
+   check(!edvr::nativeTemporalGazeReadiness(foreign.device.Get(),GetCurrentThreadId()).ready&&
+         !edvr::nativeTemporalWithGazeReady(foreign.device.Get(),GetCurrentThreadId(),firstReady.epoch,countProvider,&providerCalls)&&providerCalls==1,
+         "a nonnull foreign COM device cannot borrow the acquired channel's readiness");}
   check(reentries>=2&&reentryThrows==0,"asked from inside treat (as the create hook asks), nothing re-locks the channel's mutex");
   check(reentryRecW==480&&reentryRecH==360,"...and the recommendation is the frame's, read without the lock");
   check(closeFloat(reentryUp,.9f)&&closeFloat(reentryDown,1.1f),"...and so is its vertical frustum (the panel rule's field of view)");
-  check(!reentryJitter&&!reentryWarm&&!reentryGeometry,"...and the readers that take the lock (the eye geometry the VR camera census reads included) answer no there instead of throwing");
+  check(!reentryJitter&&!reentryWarm&&!reentryGeometry&&!reentryGazeReady,"...and the readers that take the lock (including gaze readiness) answer no there instead of throwing");
   {uint32_t rw=0,rh=0;check(edvr::nativeTemporalRecommended(&rw,&rh)&&rw==480&&rh==360,"the recommendation outside treat");}
   {uint32_t aw=1,ah=1;check(!edvr::nativeTemporalAsked(&aw,&ah),"no ask when the host does not say (the recommendation is the answer)");}
   check(calls.back().flags&1,"first history reset");check(!calls.back().head&&!calls.back().eyes,"first frame has no invented head or eye pair");
@@ -399,7 +445,9 @@ void run(){
   check(treat(t,2,0,source.Get())==E_INVALIDARG,"duplicate eye rejected");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"duplicate begin rejected");
   f=frame(11,4);begin(t,f);check(treat(t,4,0,source.Get())==S_OK&&(calls.back().flags&1),"sequence gap reset");
   f=frame(11,5);f.referenceGeneration=2;begin(t,f);check(treat(t,5,0,source.Get())==S_OK&&(calls.back().flags&1),"reference change reset");
-  check(t.invalidate(t.context)==S_OK,"CPU invalidation");check(treat(t,5,0,source.Get())==E_INVALIDARG,"invalidated frame cannot treat");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"invalidated sequence cannot reopen");
+  check(treat(t,5,1,source.Get())==S_OK,"right output completes the new reference's readiness pair");
+  readinessMutationRace(d,t,false);
+  check(treat(t,5,0,source.Get())==E_INVALIDARG,"invalidated frame cannot treat");check(t.beginFrame(t.context,&f,&p)==E_INVALIDARG,"invalidated sequence cannot reopen");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel is invalidated");}
   {uint64_t es=0;float fr[4]{},sh[2]{};check(!edvr::nativeTemporalEyeGeometry(0,&es,fr,sh),"no eye geometry once the channel is invalidated");}
   {uint64_t hs=0;float hd[12]{},eh[2][12]{};check(!edvr::nativeTemporalHeadPose(&hs,hd,eh)&&edvr::nativeTemporalFrameSequence()==0,"no head pose, and no frame sequence, once the channel is invalidated");}
@@ -451,12 +499,19 @@ void run(){
     check(shiftedNow(pm)&&!edvr::temporalMapGateFlag().load(),"map gate: the view no longer named closes the gate and the flag");
     mapFocusKnown=false;mapFocus=0;
   }
-  check(t.close(t.context)==S_OK&&t.close(t.context)==S_FALSE,"idempotent CPU close");
+  check(treat(t,20,0,source.Get())==S_OK&&treat(t,20,1,source.Get())==S_OK,"real pair before closing readiness lifetime");
+  readinessMutationRace(d,t,true);check(t.close(t.context)==S_FALSE,"idempotent CPU close");
   check(edvr::mapLogCalls==1,"map gate: the pass's map counters are written once, when the channel closes");
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}
   auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
+  check(fresh.skipEye(fresh.context,1,0,0,0)==S_OK&&fresh.skipEye(fresh.context,1,1,0,0)==S_OK&&
+        !edvr::nativeTemporalGazeEpoch()&&!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,
+        "actual skipped stereo eyes cannot establish the successful-output milestone");
+  check(!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready&&
+        edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).epoch!=firstReady.epoch,
+        "reacquired same physical device has a new unready channel incarnation");
   // Previous eye yaw 90 degrees, current yaw zero, head translates +X:
   // the translation is +Z in the previous eye and head rotation is zero.
   f.eyeToHead[0][0]=0;f.eyeToHead[0][2]=1;f.eyeToHead[0][8]=-1;f.eyeToHead[0][10]=0;f.sequence=2;
@@ -486,6 +541,7 @@ void run(){
   f=frame(12,5);p=begin(fresh,f,false);const unsigned depth0=offAaDepthNotes;
   check(treat(fresh,5,1,source.Get())==S_FALSE&&offAaDepthNotes==depth0+1&&closeFloat(offAaDepthNear,.025f),"F202: a frame the game made no matrix query in hands the depth step the last near plane, so the lens is not left without one");
   check(fresh.close(fresh.context)==S_OK,"fresh close");
+  check(!edvr::nativeTemporalGazeEpoch(),"AA-Off pass-through never publishes gaze readiness");
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);
   const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes;
   check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");
@@ -493,8 +549,10 @@ void run(){
   check(submittedSizedNotes==sized1+1,"F198: the submitted size is noted with the mode on too");
   check(offAaDepthNotes==depth0+1,"F202: with a mode on the AA-off depth step is never called (the pass makes the depth view itself): the AA-on path is what it was");
   c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
+  check(treat(dlss,1,1,source.Get())==S_OK&&edvr::nativeTemporalGazeEpoch(),"successful DLSS pair establishes readiness before the refusal regression");
   f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
+  check(!edvr::nativeTemporalGazeEpoch(),"refused temporal output never admits gaze");
   f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
   { // World scale (common/world_scale.h) moves the eye origins Elite is given: history made at one separation is not history at the next, whatever moved it.
@@ -734,6 +792,7 @@ void run(){
       routeTookEye[0]=routeTookEye[1]=false;routeTookSeq=0;
       check(treat(lo,q,0,source.Get())==S_OK&&treat(lo,q,1,source.Get())==S_OK,"layer-only setup: eye route frame");
       const auto contFlagsAfter=calls.back().flags;(void)contFlagsAfter;
+      check(lo.invalidate(lo.context)==S_OK&&!edvr::nativeTemporalGazeEpoch(),"layer-only regression begins without an earlier successful-pair milestone");
       // frame 2: the route took both eyes' screen draws
       fr=frame(21,++q);begin(lo,fr);routeTookEye[0]=routeTookEye[1]=true;routeTookSeq=q;gapAnswer=0;gapCalls=0;rawClears=0;
       const auto callsBefore=calls.size();const auto notesAt=uiLayerNotes;
@@ -753,6 +812,8 @@ void run(){
       check(again.hr==E_INVALIDARG&&!again.tex,"...and an eye cannot be treated twice in a frame (layer-only marks it treated)");
       auto o1=outOf(lo,q,1,source.Get());
       check(o1.hr==S_OK&&o1.tex.Get()==o0.tex.Get()&&rawClears==1,"...the other eye shares the one black frame, which was cleared exactly once");
+      check(!edvr::nativeTemporalGazeEpoch()&&!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,
+            "actual layer-only S_OK outputs cannot establish gaze readiness without the temporal pass");
       blank=o0.tex;
       // frame 3: again -- the same frame, never made or cleared again
       fr=frame(21,++q);begin(lo,fr);routeTookSeq=q;

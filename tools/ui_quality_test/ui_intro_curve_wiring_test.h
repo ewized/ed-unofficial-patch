@@ -49,7 +49,22 @@ const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
 const char* const kLambda =
     "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
-    "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}constboolissued=draw(altered);objectProbeCandidateDrawIssued(self,issued);"
+    "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}VrsCoverageDrawvrsDraw{};"
+    "uint64_tvrsVs=0,vrsPs=0;boolvrsEye=false,vrsNotUi=false,vrsClass=false;intvrsEyeId=-1;"
+    "constboolnative=nativeVrsLive();NativeWorldDecisionnativeDecision{self};if(vrsCoverageEnabled()||native){"
+    "inteye=-1,target=-1;vrsVs=bindingShaderHash(BindSlot::Vs);if(vrsVs==vrs_coverage::kWorldVs)vrsPs=bindingShaderHash(BindSlot::Ps);"
+    "vrsEye=g_state->rtv0Eye;vrsNotUi=!uiLayerRedirecting();vrsClass=altered.cls==AlteredDrawClass::None||altered.cls==AlteredDrawClass::PoolFamily;"
+    "constboolworld=owner&&vrsEye&&vrsNotUi&&vrsClass&&vrs_coverage::knownWorldFamily(vrsVs,vrsPs);"
+    "if(world)depthProbeCurrentSceneEyeOf(static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),&eye,&target);"
+    "vrsEyeId=eye;"
+    "nativeDecision={self,world&&eye>=0&&eye<2?unsigned(eye):2u,"
+    "static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0))};"
+    "if(vrsCoverageEnabled())vrsDraw=vrsCoverageBeforeDraw(self,world&&eye>=0&&eye<2?unsigned(eye):2u,"
+    "static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),"
+    "static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),altered.cls==AlteredDrawClass::PoolFamily,{vrsVs,vrsPs,count,instances,args.start,args.startInstance,args.base,kind});}"
+    "constboolissued=native?nativeWorldIssue(nativeDecision,[&]{returndraw(altered);}):draw(altered);if(vrsDraw.active)vrsCoverageAfterDraw(self,vrsDraw,issued);"
+    "if(vrsVs==vrs_coverage::kWorldVs)vrsCoverageNoteGate(vrsVs,vrsPs,owner,vrsEye,vrsNotUi,vrsClass,vrsEyeId,vrsDraw.active,issued);"
+    "objectProbeCandidateDrawIssued(self,issued);"
     "if(seedOutcome.on)seedOutcome.original=seedOutcome.original||issued;returnissued;};";
 const char* const kDim =
     "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){if(!(stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,"

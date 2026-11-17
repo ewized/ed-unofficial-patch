@@ -2241,7 +2241,7 @@ void testDesktopWindowPage() {
     constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
     struct Want { const char* key; const char* label; const char* choices; };   // an empty choices is the number row
     static const Want want[] = {
-        {"desktop_window", "Image", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes"},
+        {"desktop_window", "Image", "game=Game|left_eye=Left eye|right_eye=Right eye|both_eyes=Both eyes|black=Off (black)"},
         {"desktop_window_aspect", "Shape", "full=Full picture|1:1=1:1|4:3=4:3|16:10=16:10|16:9=16:9|21:9=21:9"},
         {"desktop_window_crop", "Crop", "native=Same as the game's mirror|center=Centre"},
         {"desktop_window_vertical_shift", "Vertical shift", ""},

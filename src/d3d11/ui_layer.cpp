@@ -13,6 +13,10 @@
 // owner, which may open a frame -- is only read, under native_temporal's own
 // lock, through nativeTemporalDrawJitter.
 #include "ui_layer.h"
+#include "ui_layer_fg_adapter.h"
+#include "render_boundary.h"
+#include "ui_vrs_guard.h"
+#include "native_vrs.h"
 #include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
@@ -109,6 +113,11 @@ template <class T>
 using Ptr = Microsoft::WRL::ComPtr<T>;
 
 constexpr uint64_t kTotalsMs = 30000;
+// Published only by the existing owned Present boundary. The registry proves
+// device/context identity; this stamp additionally proves the calling thread.
+std::atomic<DWORD> g_fgRenderThread{0};
+std::atomic<ID3D11DeviceContext*> g_fgRenderContext{nullptr};
+ui_layer_fg::CaptureCache g_fgCaptureCache[2];
 constexpr uint32_t kWatchPerFrame = 64;
 // First-seen lines are one per (family, decision, vs, ps): Phase 3's eight
 // take hologram hashes share the one kHoloGeneric row, so each needs its
@@ -120,6 +129,49 @@ constexpr uint32_t kMaxAfterLines = 16;
 // tonemap runs every frame when the path works, so a streak this long says
 // the consumer is not coming; ~a third of a second at 90 Hz.
 constexpr uint32_t kCrispHdrMissFrames = 30;
+
+UiVrsGuard g_uiVrs;
+uint64_t g_uiVrsCoverageActivation[2] = {};
+HMODULE g_uiVrsMagic = nullptr, g_uiVrsNvapi = nullptr;
+void refreshUiVrs() {
+    // GetModuleHandle only: this optional compatibility path loads no DLLs,
+    // initializes no driver API and changes no driver or Magic configuration.
+    const HMODULE magic = GetModuleHandleW(L"LibMagicD3D1164.dll");
+    const HMODULE nvapi = magic ? GetModuleHandleW(L"nvapi64.dll") : nullptr;
+    if (magic == g_uiVrsMagic && nvapi == g_uiVrsNvapi) return;
+    g_uiVrsMagic = magic;
+    g_uiVrsNvapi = nvapi;
+    using Query = void* (__cdecl*)(unsigned int);
+    const auto query = nvapi ? reinterpret_cast<Query>(GetProcAddress(nvapi, "nvapi_QueryInterface")) : nullptr;
+    const auto reset = query ? reinterpret_cast<UiVrsReset>(query(0x34f7938f)) : nullptr;
+    g_uiVrs.configure(magic != nullptr, reset);
+}
+void uiVrsBefore(ID3D11DeviceContext* ctx, UiVrsScope scope) {
+    if(nativeVrsLive()&&ctx&&ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE)nativeVrsFullRate(ctx);
+    refreshUiVrs(); // a late attach is observed at its first recognized UI issue
+    g_uiVrs.before(ctx, scope);
+}
+void uiLayerExecuteFullRate(ID3D11DeviceContext* ctx, ID3D11CommandList* list, int restore) {
+    // Vendor extension state need not follow D3D11 command-list restoration.
+    // Reset the playback context explicitly, independently of the recorder,
+    // and reassert it afterward for a tone/UI issue following this list.
+    uiVrsExecute(ctx, list, restore, uiVrsBefore, vScreenExecuteCommandListRaw);
+}
+void uiLayerRecordFullRate(ID3D11DeviceContext* ctx) {
+    uiVrsBefore(ctx, UiVrsScope::DeferredRecord);
+}
+void logUiVrs() {
+    refreshUiVrs();
+    if (!g_uiVrs.magicLoaded()) return;
+    for (unsigned i = 0; i < static_cast<unsigned>(UiVrsScope::Count); ++i) {
+        const auto scope = static_cast<UiVrsScope>(i);
+        const UiVrsCounts& c = g_uiVrs.counts(scope);
+        Log::get().note("ui vrs: Magic4All loaded api_ready %u scope %s cumulative attempts %llu NVAPI_OK %llu errors %llu last_status %d; zero viewports, SRRV preserved.",
+            g_uiVrs.apiReady() ? 1u : 0u, uiVrsScopeName(scope),
+            static_cast<unsigned long long>(c.attempts), static_cast<unsigned long long>(c.ok),
+            static_cast<unsigned long long>(c.errors), c.lastStatus);
+    }
+}
 
 // ------------------------------------------------------------ configuration
 
@@ -2142,6 +2194,7 @@ void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
     }
     if (!e.mapPunchSrv) return;
     ID3D11DeviceContext* c = g_deferred.Get();
+    uiVrsBefore(c, UiVrsScope::DeferredRecord);
     const struct { UINT in[2], out[2]; float jitter[2], pad[2]; } constants{{td.Width, td.Height}, {e.hdrW, e.hdrH}, {g_draw.jx, g_draw.jy}, {0.0f, 0.0f}};
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(c->Map(g_mapPunch.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
@@ -2171,7 +2224,7 @@ void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
     c->PSSetShaderResources(0, 1, &none);
     Ptr<ID3D11CommandList> list;
     if (FAILED(c->FinishCommandList(FALSE, &list)) || !list) return;
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    uiLayerExecuteFullRate(ctx, list.Get(), 1);
     mapui::g_bodyCutouts.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2354,6 +2407,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     if (seedToken) g_hdrSeedGpu.endCopy(ctx, seedToken);
     bool recorded = false;
     try {
+        uiVrsBefore(g_deferred.Get(), UiVrsScope::DeferredRecord);
         g_seeder->seed(g_deferred.Get(), srcDepth, srcStencil, l.dsv.Get(),
                        td.Width, td.Height, outW, outH, g_draw.jx, g_draw.jy, stencilMask,
                        needDepth);
@@ -2371,7 +2425,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
         return false;
     }
     if (seedToken) g_hdrSeedGpu.beginWork(ctx, seedToken);
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    uiLayerExecuteFullRate(ctx, list.Get(), 1);
     if (seedToken) g_hdrSeedGpu.endWork(ctx, seedToken);
     seedProbe.token = 0;
     if (seedToken) g_hdrSeedActive = 0;
@@ -3065,6 +3119,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         mapBodiesPunch(ctx, e);
     ctx->OMSetBlendState(layerBlend, factor, sampleMask);
     if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    uiVrsBefore(ctx, UiVrsScope::Layer); // also required when the map keeps its already-bound UI target
     if (mapRunIssue) {
         g_draw.mapRunBound = true;
         g_draw.mapRunEye = g_draw.eye;
@@ -3410,7 +3465,7 @@ UiLayerSmaa* edgeSmoothingFor(Eye& e, uint32_t eye, ID3D11Device* dev) {
 
 ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
                                 const uint32_t region[4], const float layerUv[4], bool useMult,
-                                bool ownedFrame, const char** why, bool smooth) {
+                                bool ownedFrame, const char** why, bool smooth, bool recordNative = true) {
     D3D11_TEXTURE2D_DESC fd{};
     frame->GetDesc(&fd);
     const DXGI_FORMAT view = uiLayerFrameView(fd.Format);
@@ -3459,8 +3514,10 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         *why = "no device";
         return nullptr;
     }
-    routePoll(ctx.Get());
-    g_hdrSeedGpu.poll(ctx.Get());
+    if (recordNative) {
+        routePoll(ctx.Get());
+        g_hdrSeedGpu.poll(ctx.Get());
+    }
     compileOnce(ctx.Get());
     if (!g_cs) {
         *why = "the composite shader did not compile";
@@ -3546,7 +3603,7 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         e.outW = rw;
         e.outH = rh;
         e.outFmt = fd.Format;
-        Log::get().note("ui quality: layer: %s eye's composite output %ux%u (%s, %.1f MB).",
+        if (recordNative) Log::get().note("ui quality: layer: %s eye's composite output %ux%u (%s, %.1f MB).",
                         eye == 0 ? "left" : "right", rw, rh, viewName(view),
                         uiLayerMB(uiLayerBytes(rw, rh)));
     }
@@ -3592,8 +3649,8 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
     ctx->CSGetConstantBuffers(0, 1, &savedCb);
 
-    const int qs = routeBegin(ctx.Get(), UiRouteStage::kComposite, static_cast<int>(eye), e.seq);
-    gpuCensusBegin(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
+    const int qs = recordNative ? routeBegin(ctx.Get(), UiRouteStage::kComposite, static_cast<int>(eye), e.seq) : -1;
+    if (recordNative) gpuCensusBegin(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
     if (viaCopy) {
         D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
         ctx->CopySubresourceRegion(e.copy.Get(), 0, 0, 0, 0, frame, 0, &box);
@@ -3609,21 +3666,13 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     }
     ID3D11ShaderResourceView* nullSrv[3] = {};
     ID3D11UnorderedAccessView* nullUav = nullptr;
-    ctx->CSSetShaderResources(0, 3, nullSrv);
-    ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-    ctx->CSSetShader(inPlaceUav ? g_csInPlace : g_cs, nullptr, 0);
-    ctx->CSSetConstantBuffers(0, 1, &g_cb);
-    // In place the frame is bound ONLY as the UAV: slot 0 stays null, so the one texture is never an
-    // SRV and a UAV in the same dispatch (the hazard D3D11 resolves by silently dropping a binding).
-    ID3D11ShaderResourceView* srvs[3] = {inPlaceUav ? nullptr : frameSrv, layerSrv,
-                                         useMult ? e.mSrv.Get() : nullptr};
-    ctx->CSSetShaderResources(0, 3, srvs);
-    ID3D11UnorderedAccessView* uav = inPlaceUav ? inPlaceUav : e.outUav.Get();
-    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-    ctx->Dispatch((rw + kUiLayerCompositeGroupX - 1) / kUiLayerCompositeGroupX,
-                  (rh + kUiLayerCompositeGroupY - 1) / kUiLayerCompositeGroupY, 1);
-    routeEnd(ctx.Get(), qs);
-    gpuCensusEnd(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
+    ui_layer_fg::issueComposite(ctx.Get(), inPlaceUav ? g_csInPlace : g_cs, g_cb,
+        inPlaceUav ? nullptr : frameSrv, layerSrv, useMult ? e.mSrv.Get() : nullptr,
+        inPlaceUav ? inPlaceUav : e.outUav.Get(), rw, rh);
+    if (recordNative) {
+        routeEnd(ctx.Get(), qs);
+        gpuCensusEnd(ctx.Get(), GpuCensusSection::DoorUiLayerComposite);
+    }
 
     ctx->CSSetShaderResources(0, 3, nullSrv);
     ctx->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
@@ -3637,6 +3686,11 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedUav) savedUav->Release();
     if (savedCb) savedCb->Release();
 
+    if (!recordNative) {
+        ID3D11Texture2D* out = inPlaceUav ? frame : e.out.Get();
+        out->AddRef();
+        return out;
+    }
     ++g_win.composites;
     g_flatEdge.result.outcome = !smooth ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
     g_flatEdge.result.w = e.w;
@@ -5308,6 +5362,7 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
         // depth or stencil write lands in the game's buffer exactly as it
         // always did, and its colour lands nowhere (it is in the layer).
         vScreenSetRenderTargetsRaw(ctx, 0, nullptr, g_draw.wbDsv);
+        uiVrsBefore(ctx, UiVrsScope::WriteBack);
         ok = true;
     });
     if (!ok) {
@@ -5647,6 +5702,7 @@ static ID3D11ShaderResourceView* glowFeedPass(ID3D11DeviceContext* ctx, const Ey
         g_glow = made;
     }
     ID3D11DeviceContext* dc = g_crispDeferred.Get();
+    if (hud) uiVrsBefore(dc, UiVrsScope::DeferredRecord);
     ID3D11RenderTargetView* target = g_glow.rtv.Get();
     const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(td.Width), static_cast<float>(td.Height), 0.0f, 1.0f};
     dc->IASetInputLayout(nullptr);
@@ -5686,7 +5742,8 @@ static ID3D11ShaderResourceView* glowFeedPass(ID3D11DeviceContext* ctx, const Ey
         verdict = UiGlowFeed::kFault;
         return nullptr;
     }
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    if (hud) uiLayerExecuteFullRate(ctx, list.Get(), 1);
+    else vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
     verdict = UiGlowFeed::kFed;
     if (use) use->applied = true;
     if (star) star->hudIncluded = hud != nullptr;
@@ -6287,6 +6344,10 @@ const char* crispToneVariantName(uint64_t vs, uint64_t ps) {
 // context -- the depth-stencil seed's pattern: recorded off the hooked
 // immediate context, executed with the context state restored.
 bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) {
+    refreshUiVrs();
+    // A list cached before late attach is recorded once more with the explicit
+    // deferred reset. Cache hits thereafter append no commands to its recorder.
+    if (g_uiVrs.invalidateCache(g_uiVrsCoverageActivation[eye])) e.coverage.reset();
     if (!g_covVs || !g_covPs) compileCoverageOnce(ctx);
     if (!g_covVs || !g_covPs) return false;
     if (!g_crispDeferred) {
@@ -6313,7 +6374,7 @@ bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) 
     try {
         const UiCoverageBindings bindings{e.hdrSrv.Get(), e.rtv.Get(), g_covVs, g_covPs,
                                           blend, e.w, e.h};
-        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw, &failure);
+        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, uiLayerExecuteFullRate, &failure, uiLayerRecordFullRate);
     } catch (const std::exception&) {
         e.coverage.reset();
         ok = false;
@@ -6842,6 +6903,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // Bind: the 8-bit layer, no depth view; the full-layer viewport (and scissor rect, if the game's rasterizer tests one).
         ID3D11RenderTargetView* target = e.rtv.Get();
         vScreenSetRenderTargetsRaw(ctx, 1, &target, nullptr);
+        uiVrsBefore(ctx, UiVrsScope::Tone);
         D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.w), static_cast<float>(e.h), 0.0f,
                           1.0f};
         vScreenRSSetViewportsRaw(ctx, 1, &vp);
@@ -6867,7 +6929,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // is (sharpGlassAddPass). A failure leaves W without the glass this frame: counted, and said once.
         if (wpnC && e.gSeq == p.seq && e.gDraws) {
             const bool added = e.gSrv && glassAddReady(ctx) &&
-                               sharpGlassAddPass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, e.gSrv.Get(), e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw);
+                               sharpGlassAddPass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, e.gSrv.Get(), e.wRtv.Get(), e.wW, e.wH, uiLayerExecuteFullRate, uiLayerRecordFullRate);
             if (added) {
                 ++g_win.glassAdds;
             } else {
@@ -6884,7 +6946,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         bool fellBack = wpnC && !plan.sourcePass;
         if (plan.sourcePass &&
             !sharpSourcePass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, gameHdr.Get(), g_sharpScratch.rtv.Get(),
-                             e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw)) {
+                             e.wRtv.Get(), e.wW, e.wH, uiLayerExecuteFullRate, uiLayerRecordFullRate)) {
             plan = sharpTonePlan(hudC, wpnC, false);
             fellBack = true;
             plainWhy = "the source pass failed";
@@ -7716,6 +7778,113 @@ uint32_t g_eyeSwapStreak = 0;           // consecutive swapped composites (F30: 
 bool g_eyeStoodDown = false;            // F30: the eye check stood the layer down (the frame boundary re-arms it on the next native mode edge)
 uint32_t g_eyeRearmSeen = 0;            // F30: g_nativeModeEdges at the last frame boundary
 constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
+
+static bool fgOwner(ID3D11DeviceContext* context, ID3D11Device* device) {
+    return context && context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+           g_fgRenderThread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
+           g_fgRenderContext.load(std::memory_order_acquire) == context &&
+           renderBoundaryValidateOwner(device, context);
+}
+
+bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
+                        UiLayerFgPlanes* planes) noexcept {
+    if (!planes) return false;
+    *planes = UiLayerFgPlanes{};
+    if (!snapshot || !snapshot->info.fullSupported) return false;
+    planes->info = snapshot->info;
+    planes->layer = snapshot->layer.Get();
+    planes->multiply = snapshot->multiply.Get();
+    std::memcpy(planes->layerUv, snapshot->uv, sizeof(snapshot->uv));
+    planes->useMult = snapshot->useMult;
+    planes->smooth = snapshot->smooth;
+    return true;
+}
+
+std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
+    ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgInfo* info) noexcept {
+    UiLayerFgInfo result;
+    result.sequence = sequence; result.eye = eye;
+    const auto fail = [&](UiLayerFgRefusal why) -> std::shared_ptr<const UiLayerFgSnapshot> {
+        result.refusal = why;
+        if (info) *info = result;
+        return {};
+    };
+    try {
+        UiLayerFgFacts facts;
+        facts.arguments = context && frame && region && layerUv && sequence && eye < 2;
+        if (!facts.arguments) return fail(uiLayerFgAdmission(facts));
+        Ptr<ID3D11Device> device;
+        frame->GetDevice(&device);
+        facts.owner = fgOwner(context, device.Get());
+        if (!facts.owner) return fail(uiLayerFgAdmission(facts));
+        Eye& e = g_eye[eye];
+        D3D11_TEXTURE2D_DESC fd{}; frame->GetDesc(&fd);
+        result.width = fd.Width; result.height = fd.Height; result.frameFormat = fd.Format;
+        result.ownerThread = GetCurrentThreadId();
+        result.sourceDevice = reinterpret_cast<uintptr_t>(device.Get());
+        facts.available = !runtimeFlatProfile() && detail::g_uiQualityLive &&
+            !g_stoodDown && !g_crispStoodDown && !g_weaponsStoodDown && !graphicsRuntimeDisabled();
+        facts.sequence = e.submittedSeq == sequence && e.temporalOutSeq == sequence &&
+            e.doorFromPass && e.compositedSeq != sequence;
+        facts.hasUi = e.seq == sequence && e.draws != 0;
+        const void* mine = e.submittedSeq == sequence ? e.submitted : nullptr;
+        const void* other = g_eye[1 - eye].submitted;
+        const void* copied = e.copiedSeq == sequence ? e.copiedTo : nullptr;
+        facts.eye = frame == e.temporalOut && mine && mine != other &&
+            (!facts.hasUi || e.target == mine || copied == mine);
+        facts.size = fd.Width && fd.Height && fd.SampleDesc.Count == 1 &&
+            fd.ArraySize == 1 && fd.MipLevels == 1 && uiLayerFrameView(fd.Format) != DXGI_FORMAT_UNKNOWN &&
+            region[0] == 0 && region[1] == 0 && region[2] == fd.Width && region[3] == fd.Height &&
+            layerUv[0] == 0.f && layerUv[1] == 0.f && layerUv[2] == 1.f && layerUv[3] == 1.f &&
+            e.door.fullW == fd.Width && e.door.fullH == fd.Height &&
+            (!facts.hasUi || (e.tex && e.srv && e.w == fd.Width && e.h == fd.Height));
+        facts.scope = scopeZoomWanted();
+        facts.ripple = g_rippleLive && e.dSeq == sequence && e.dDraws;
+        facts.world = g_screenHeld == 1 || e.worldSeq == sequence || e.screenTakenSeq == sequence;
+        const bool hdr = e.hdrSeq == sequence && e.hdrDraws;
+        const bool weapons = e.wSeq == sequence && e.wDraws;
+        const bool multiply = e.mSeq == sequence;
+        facts.complete = !g_draw.active && !detail::g_uiLayerIssueBlocked &&
+            !detail::g_uiLayerCrispPending && !detail::g_uiLayerWorldReissue &&
+            (!hdr || (facts.hasUi && e.hdrToneSeq == sequence)) &&
+            (!weapons || (facts.hasUi && e.wPubSeq == sequence)) &&
+            (!multiply || (facts.hasUi && e.mTex && e.mSrv && e.mW == fd.Width && e.mH == fd.Height));
+        const auto refusal = uiLayerFgAdmission(facts);
+        if (refusal != UiLayerFgRefusal::None) return fail(refusal);
+        ui_layer_fg::Source source;
+        source.info = result; source.facts = facts; source.expectedFrame = e.temporalOut;
+        source.layer = e.tex.Get(); source.layerView = e.srv.Get();
+        source.multiply = e.mTex.Get(); source.multiplyView = e.mSrv.Get();
+        source.useMult = multiply; source.smooth = g_hudSmoothVr;
+        std::memcpy(source.uv, layerUv, sizeof(source.uv));
+        return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info);
+    } catch (...) { return fail(UiLayerFgRefusal::CopyFailed); }
+}
+
+bool uiLayerFgReplay(ID3D11DeviceContext* context,
+    const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
+    ID3D11Texture2D* generatedWorld, ID3D11Texture2D** output,
+    UiLayerFgInfo* info) noexcept {
+    const bool owner = snapshot && fgOwner(context, snapshot->device.Get());
+    return ui_layer_fg::replay(context, snapshot, generatedWorld, output, owner,
+        [](const UiLayerFgSnapshot& captured, ID3D11Texture2D* world) {
+            // Each output/cache is private to this replay. Existing leases keep
+            // earlier generated outputs alive without their pixels being reused.
+            Eye privateEye;
+            privateEye.tex = captured.layer; privateEye.srv = captured.layerSrv;
+            privateEye.mTex = captured.multiply; privateEye.mSrv = captured.multiplySrv;
+            privateEye.w = privateEye.basisW = privateEye.door.fullW = captured.info.width;
+            privateEye.h = privateEye.basisH = privateEye.door.fullH = captured.info.height;
+            privateEye.seq = captured.info.sequence; privateEye.doorFromPass = true;
+            const uint32_t whole[4] = {0, 0, captured.info.width, captured.info.height};
+            const char* why = nullptr;
+            return compositeInner(privateEye, captured.info.eye, world, whole, captured.uv,
+                captured.useMult, false, &why, false, false);
+        }, info);
+}
+
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
     // The flat adapter's ask for this composite (uiLayerFlatSetEdgeSmoothing), taken whatever happens below so it never carries to another call.
@@ -7902,6 +8071,15 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
+    if (ctx && ctx->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+        if (g_fgRenderContext.load(std::memory_order_acquire) != ctx ||
+            g_fgRenderThread.load(std::memory_order_acquire) != GetCurrentThreadId()) {
+            for (auto& cache : g_fgCaptureCache) cache.resetOwned();
+        }
+        g_fgRenderThread.store(0, std::memory_order_release);
+        g_fgRenderContext.store(ctx, std::memory_order_release);
+        g_fgRenderThread.store(GetCurrentThreadId(), std::memory_order_release);
+    }
     // A run of map sprites never outlives a frame: its references are let go and the game's targets are on the context for everything the boundary and the next frame do.
     uiLayerMapRunEnd(ctx);
     settleIssueFence(ctx);
@@ -8048,6 +8226,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
     }
     logSharpWeapons();
+    logUiVrs(); // bounded by the existing 30-second UI reporting window
     logLegacyGlass();
     logShieldRipple();
     g_win = Window{};

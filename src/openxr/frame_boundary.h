@@ -173,6 +173,27 @@ class FrameBoundary final {
     return finish(true);
   }
 
+  // The single owner may present an already-copied stereo image independently
+  // of native/game Submit tokens. No capture, sceneFinished or native timing
+  // sample is manufactured by this route. The caller retains layer backing
+  // storage through the synchronous end and uses this frame's displayTime.
+  XrResult prepared(const XrCompositionLayerProjection* layer,const XrCompositionLayerProjection* nativeUi=nullptr) {
+    if(!ownerThread()||failed_||!session_.frameOpen()||deferred_||accepted_[0]||accepted_[1])
+      return XR_ERROR_CALL_ORDER_INVALID;
+    if(layer&&(layer->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION||layer->next||
+       !layer->space||layer->viewCount!=2||!layer->views))return XR_ERROR_VALIDATION_FAILURE;
+    if(nativeUi&&(!layer||nativeUi->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION||nativeUi->next||
+       !nativeUi->space||nativeUi->viewCount!=2||!nativeUi->views||
+       !(nativeUi->layerFlags&XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT)))return XR_ERROR_VALIDATION_FAILURE;
+    const bool pixels=layer&&frame_.shouldRender&&!session_.terminal();
+    const XrCompositionLayerBaseHeader* headers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(layer),
+      reinterpret_cast<const XrCompositionLayerBaseHeader*>(nativeUi)};
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.layerCount=pixels?(nativeUi?2u:1u):0u;end.layers=pixels?headers:nullptr;
+    {SubmissionWallScope measured(&endFrameMs_);lastResult_=session_.end(frame_,end,{pixels,pixels});}
+    if(lastResult_!=XR_SUCCESS)failed_=true;
+    return lastResult_;
+  }
+
  private:
   // Records the last REAL (runtime-reported) predicted time/period and when
   // it was learned, whichever pacing produced it: a synchronous wait, or a

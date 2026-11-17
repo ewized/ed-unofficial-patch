@@ -59,6 +59,8 @@ struct Fake {
   XrTime step = 1;
   XrDuration period = 11;
   bool lastHadLayers = false;
+  unsigned lastLayerCount=0;
+  float worldSourceX=0,nativeUiSourceX=0;
   XrTime lastDisplayTime = 0;
   static Fake* current;
   static XrResult poll(XrInstance, XrEventDataBuffer* out) {
@@ -97,6 +99,11 @@ struct Fake {
   static XrResult beginFrame(XrSession, const XrFrameBeginInfo*) { current->trace.push_back('B'); return XR_SUCCESS; }
   static XrResult endFrame(XrSession, const XrFrameEndInfo* info) {
     current->trace.push_back('E');
+    current->lastLayerCount=info->layerCount;
+    if(info->layerCount==2) {
+      current->worldSourceX=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0])->views[0].pose.position.x;
+      current->nativeUiSourceX=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[1])->views[0].pose.position.x;
+    }
     ++current->endCalls; current->lastHadLayers = info->layerCount != 0; current->lastDisplayTime = info->displayTime; return current->endResult;
   }
   Dispatch dispatch() {
@@ -129,6 +136,35 @@ struct Sink : FrameSink {
 bool start(SessionState& session, Fake& fake) {
   if (session.reset(fake.dispatch(), reinterpret_cast<XrInstance>(1), reinterpret_cast<XrSession>(2), XR_ENVIRONMENT_BLEND_MODE_OPAQUE) != XR_SUCCESS) return false;
   return session.pollEvents()==XR_SUCCESS && session.startIfReady()==XR_SUCCESS;
+}
+
+void preparedFrames() {
+  Fake fake;SessionState session;check(start(session,fake),"prepared: running session");
+  Sink sink(fake);FrameBoundary boundary(session,sink);
+  XrCompositionLayerProjectionView views[2]={{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+  XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};layer.space=reinterpret_cast<XrSpace>(3);layer.viewCount=2;layer.views=views;
+  check(boundary.prepared(&layer)==XR_ERROR_CALL_ORDER_INVALID,"prepared: refuses without runtime token");
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: runtime wait");const auto tick=boundary.frame();
+  check(boundary.prepared(&layer)==XR_SUCCESS,"prepared: leased stereo endpoint ends runtime tick");
+  check(fake.lastHadLayers&&fake.lastDisplayTime==tick.predictedDisplayTime,"prepared: current runtime display time with source views");
+  check(fake.captureCalls==0&&fake.composeCalls==0&&sink.finished==0,"prepared: no synthetic native capture/compose/completion");
+  check(boundary.prepared(&layer)==XR_ERROR_CALL_ORDER_INVALID,"prepared: cannot consume token twice");
+  XrCompositionLayerProjectionView uiViews[2]={views[0],views[1]};
+  views[0].pose.position.x=.5f;uiViews[0].pose.position.x=1.f;
+  auto nativeUi=layer;nativeUi.views=uiViews;
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: native HUD has independent tick");
+  check(boundary.prepared(&layer,&nativeUi)==XR_ERROR_VALIDATION_FAILURE&&session.frameOpen(),
+    "prepared: refuses auxiliary HUD without explicit source-alpha semantics");
+  nativeUi.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+  check(boundary.prepared(&layer,&nativeUi)==XR_SUCCESS&&fake.lastLayerCount==2&&
+    fake.worldSourceX==.5f&&fake.nativeUiSourceX==1.f,"prepared: world interpolation and native HUD retain distinct source poses in one real tick");
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: next independent tick");layer.viewCount=1;
+  check(boundary.prepared(&layer)==XR_ERROR_VALIDATION_FAILURE&&session.frameOpen(),"prepared: refuses half stereo without consuming tick");
+  check(boundary.prepared(nullptr)==XR_SUCCESS&&!fake.lastHadLayers,"prepared: unavailable source closes empty");
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: native admission token");boundary.setGeometryReady(true);
+  bool pair=false;check(boundary.publish(vr::Eye_Left,nullptr,nullptr,vr::Submit_Default,pair)==vr::VRCompositorError_None,"prepared: native eye admitted");
+  layer.viewCount=2;check(boundary.prepared(&layer)==XR_ERROR_CALL_ORDER_INVALID,"prepared: cannot steal partially submitted native frame");
+  check(boundary.clear()==XR_SUCCESS,"prepared: native partial clear");
 }
 
 void gateTest() {
@@ -936,7 +972,7 @@ void traceBatchTest() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
+  preparedFrames();gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
   frameEndOwnerBodyRaceTest();
   latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
   blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();

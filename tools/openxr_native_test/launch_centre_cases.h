@@ -22,6 +22,7 @@ struct Fake {
   // XR_FALSE exactly; frame_end_overlap_cases.h is the one that needs a
   // wait that actually admits pixels.
   bool shouldRender=false;
+  XrTime frameTime=200;
   XrReferenceSpaceType naturalType=XR_REFERENCE_SPACE_TYPE_LOCAL;
   XrSpace naturalSpace=reinterpret_cast<XrSpace>(3); // the default LOCAL fixture handle
   XrPosef localOriginInStage{{0,0,0,1},{0,0,0}};
@@ -51,7 +52,7 @@ inline XrResult XRAPI_PTR poll(XrInstance,XrEventDataBuffer* out) {
 inline XrResult XRAPI_PTR beginSession(XrSession,const XrSessionBeginInfo*){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR endSession(XrSession){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR wait(XrSession,const XrFrameWaitInfo*,XrFrameState* out) {
-  out->predictedDisplayTime=200;out->predictedDisplayPeriod=10;out->shouldRender=active->shouldRender?XR_TRUE:XR_FALSE;return XR_SUCCESS;
+  out->predictedDisplayTime=active->frameTime;out->predictedDisplayPeriod=10;out->shouldRender=active->shouldRender?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR beginFrame(XrSession,const XrFrameBeginInfo*){return XR_SUCCESS;}
 inline XrResult XRAPI_PTR endFrame(XrSession,const XrFrameEndInfo*){return XR_SUCCESS;}

@@ -2512,22 +2512,45 @@ void testSelfUpdate() {
         check(!swapInNewLauncher(exe, failFirst, &e2) && calls == 1 && readAll(exe) == oldBytes, "when the running exe cannot be renamed nothing else is tried: " + e2);
         // The restore failing too says where the old exe is.
         calls = 0;
+        std::vector<std::pair<std::wstring,std::wstring>> restoreMoves;
         FileMover failRestore = [&](const std::wstring& from, const std::wstring& to) {
             ++calls;
-            if (calls >= 2) return false;
-            return moveReplacing(from, to);
+            restoreMoves.emplace_back(from,to);
+            // Exercise the injected error branch independently of transient
+            // OS sharing on the first rename. Real running-image renames are
+            // exercised immediately above and below this deterministic case.
+            return calls == 1;
         };
-        check(!swapInNewLauncher(exe, failRestore, &e2) && contains(e2, "could not be put back") && contains(e2, "ed-up-launcher.exe.old"), "when the restore fails too, the old exe's new name is given: " + e2);
-        moveReplacing(oldLauncherPath(exe), exe);  // the rig puts it back itself
-        check(readAll(exe) == oldBytes, "the rig restored the stand-in");
+        const bool restoreResult=swapInNewLauncher(exe, failRestore, &e2);
+        check(!restoreResult && calls==3 && restoreMoves.size()==3 &&
+              restoreMoves[0]==std::make_pair(exe,oldLauncherPath(exe)) &&
+              restoreMoves[1]==std::make_pair(newLauncherPath(exe),exe) &&
+              restoreMoves[2]==std::make_pair(oldLauncherPath(exe),exe) &&
+              contains(e2, "could not be put back") && contains(e2, "ed-up-launcher.exe.old"),
+              "when the restore fails too, all three moves and the old exe's new name are given: " + e2);
+        check(readAll(exe)==oldBytes && readAll(newLauncherPath(exe))==newBytes &&
+              !exists(oldLauncherPath(exe)) && stillRunning(running),
+              "the deterministic error mover leaves both files and the running stand-in unchanged");
     }
 
     // The real swap, with the old program still running from its renamed file.
     std::string e3;
-    check(swapInNewLauncher(exe, FileMover(moveReplacing), &e3), "the swap works on a running exe: " + e3);
+    unsigned realMoves=0;
+    FileMover observedRealMove=[&](const std::wstring& from,const std::wstring& to){
+        const DWORD fromAttributes=GetFileAttributesW(from.c_str()),toAttributes=GetFileAttributesW(to.c_str());
+        SetLastError(ERROR_SUCCESS);
+        const BOOL moved=MoveFileExW(from.c_str(),to.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+        const DWORD moveError=moved?ERROR_SUCCESS:GetLastError(); // before any other Win32 call
+        std::printf("selfupdate real move: call=%u moved=%u win32_error=%lu from_attributes=0x%08lX to_attributes=0x%08lX flags=0x%08lX from=%s to=%s\n",
+            ++realMoves,moved?1u:0u,moveError,fromAttributes,toAttributes,DWORD(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH),narrowUtf8(from).c_str(),narrowUtf8(to).c_str());
+        return moved!=FALSE;
+    };
+    const bool realSwap=swapInNewLauncher(exe,observedRealMove,&e3);
+    check(realSwap,"the swap works on a running exe: "+e3);
     check(readAll(exe) == newBytes && readAll(oldLauncherPath(exe)) == oldBytes && !exists(newLauncherPath(exe)), "the new bytes are at the exe's path and the old ones at .old");
     check(stillRunning(running), "the old program is still running, from the .old file");
-    check(!swapInNewLauncher(exe, FileMover(moveReplacing), &e3) && contains(e3, "no downloaded"), "with no download there is nothing to switch to: " + e3);
+    const bool noDownloadSwap=swapInNewLauncher(exe,FileMover(moveReplacing),&e3);
+    check(!noDownloadSwap&&contains(e3,"no downloaded"),"with no download there is nothing to switch to: "+e3);
     endProgram(running);
     removeLauncherLeftovers(exe);
     check(!exists(oldLauncherPath(exe)) && readAll(exe) == newBytes, "the next start deletes .old and keeps the exe");
@@ -5344,6 +5367,14 @@ int main(int argc, char** argv) {
         }
     }
     std::printf("launcher_test: fixtures %ls\n", g_fixtures.c_str());
+
+    // Narrow diagnosis retains the exact real running-image assertions. The
+    // normal full gate still runs every section below, without this selector.
+    if(argc==6&&std::strcmp(argv[5],"--selfupdate-only")==0){
+        testSelfUpdate();endFakes();
+        std::printf("launcher_test selfupdate: %d checks, %d failed\n",g_checks,g_fails);
+        return g_fails?1:0;
+    }
 
     testJson();
     testSigning();

@@ -2529,11 +2529,16 @@ static void constantsCases() {
     check(c.get(g_ctx.Get(), pull) == first && c.written() == pull && c.get(g_ctx.Get(), top) == first && c.written() == top && c.get(g_ctx.Get(), only) == first && c.written() == only,
           "a pull, a push of the key's top (2.00 m) and a translation alone (gap 0) are accepted, the same buffer rewritten each time");
     check(readBack(first) == only, "...and the buffer holds the translation alone's numbers");
+    // Keep the old buffer alive across the cache's device switch. Comparing a
+    // freed address would otherwise fail if the allocator reused it for d2.
+    ComPtr<ID3D11Buffer> keepFirst(first);
     ComPtr<ID3D11Device> d2;
     ComPtr<ID3D11DeviceContext> c2;
     ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d2, nullptr, &c2), "second device");
     ID3D11Buffer* other = c.get(c2.Get(), p0);
-    check(other && other != first && c.written() == p0, "another device: the buffer is made again for it");
+    ComPtr<ID3D11Device> owner;
+    if (other) other->GetDevice(&owner);
+    check(other && other != keepFirst.Get() && owner.Get() == d2.Get() && c.written() == p0, "another device: the buffer is made again for it");
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads

@@ -7,6 +7,7 @@
 #include "native_local_config.h"
 #include "native_cpu_trace.h"
 #include "init_error.h"
+#include "../common/native_input_scale.h"
 #include <new>
 #include <stdexcept>
 
@@ -236,6 +237,7 @@ uint32_t initModule(Module& owner,vr::EVRInitError* error,vr::EVRApplicationType
   return token;
 }
 
+
 bool copyPath(const wchar_t* input,std::wstring& output) {
   if (!input) return false;
   size_t length=0; while(length<32768&&input[length])++length;
@@ -318,6 +320,11 @@ std::wstring localConfigPath() noexcept {
   wchar_t* slash=wcsrchr(filename,L'\\');wchar_t* other=wcsrchr(filename,L'/');if(other&&(!slash||other>slash))slash=other;
   if(!slash)return {};*slash=L'\0';return std::wstring(filename)+L"\\edvr_openxr.ini";
 }
+}
+
+// No module/runtime initialization, XR, device, pose, settings or input calls.
+extern "C" uint32_t WINAPI edvrNativeInputScaleCapability(uint32_t version) {
+  return version==EDVR_NATIVE_INPUT_SCALE_CAPABILITY_EXACT_ASK?EDVR_NATIVE_INPUT_SCALE_CAPABILITY_EXACT_ASK:0u;
 }
 
 extern "C" HRESULT WINAPI edvrConfigureNativeRuntime(const EdvrNativeRuntimeConfig* config) try {

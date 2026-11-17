@@ -84,6 +84,15 @@ static void rules() {
     check(desktopWindowParse("left_eye", &known) == DesktopWindowMode::LeftEye && known, "left_eye");
     check(desktopWindowParse("RIGHT_EYE", &known) == DesktopWindowMode::RightEye && known, "right_eye in capitals");
     check(desktopWindowParse("both_eyes", &known) == DesktopWindowMode::BothEyes && known, "both_eyes");
+    check(desktopWindowParse("BLACK", &known) == DesktopWindowMode::Black && known, "black is a supported word, case-insensitive");
+    check(!std::strcmp(desktopWindowModeName(DesktopWindowMode::Black), "black") && desktopWindowEyeMask(DesktopWindowMode::Black) == 0, "black round-trips and requests no eye texture");
+    {
+        const uint64_t none[2] = {}, left[2] = {1000, 0}, right[2] = {0, 1000};
+        check(!desktopWindowFresh(DesktopWindowMode::Black, 1000, none), "black waits for actual VR activity");
+        check(desktopWindowFresh(DesktopWindowMode::Black, 1500, left) && !desktopWindowFresh(DesktopWindowMode::Black, 1501, left), "black uses the existing 500 ms VR timeout");
+        check(desktopWindowFresh(DesktopWindowMode::Black, 1000, right), "either activity-only eye can reactivate black");
+        check(!desktopWindowFresh(DesktopWindowMode::BothEyes, 1000, left) && !desktopWindowFresh(DesktopWindowMode::Game, 1000, left), "eye modes retain their requested-eye rule and Game never suppresses the desktop");
+    }
     // The flat profile's getString answers "off" for a key it does not allow: an unknown word, and so game.
     check(desktopWindowParse("off", &known) == DesktopWindowMode::Game && !known, "off (the flat profile's answer) is game and unknown");
     check(desktopWindowParse("left", &known) == DesktopWindowMode::Game && !known, "an unfinished word is game and unknown");
@@ -1086,6 +1095,7 @@ static void wiring(const std::string& root) {
         const size_t returnAt = at(t, "if (!S.active) return;", leaveAt);
         const size_t commit = at(t, "S.active = true;\n        desktopWindowCursorSetActive(true);");
         return leaveAt != std::string::npos && clearAt != std::string::npos && returnAt != std::string::npos && clearAt < returnAt && commit != std::string::npos &&
+               count(t, "S.active = true;\n        desktopWindowCursorSetActive(true);") == 2 &&
                at(c, "if (active && !was) g_centre.store(0, std::memory_order_relaxed);") != std::string::npos;
     };
     check(flagged(cpp, cursor), "the cursor flag is set at the activation's commit and cleared in leave before its early return");
@@ -1147,12 +1157,12 @@ static void wiring(const std::string& root) {
     const size_t aspectKey = at(ini, "\ndesktop_window_aspect = full\n", key), cropKey = at(ini, "\ndesktop_window_crop = native\n", aspectKey);
     const size_t shiftKey = at(ini, "\ndesktop_window_vertical_shift = 0\n", cropKey);
     const size_t styleKey = at(ini, "\ndesktop_window_style = window\n", shiftKey);
-    const size_t ui = ini.rfind("# ui: Image | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes | live | menu desktop_window\n", key);
+    const size_t ui = ini.rfind("# ui: Image | choices game=Game, left_eye=Left eye, right_eye=Right eye, both_eyes=Both eyes, black=Off (black) | live | menu desktop_window\n", key);
     const size_t uiAspect = ini.rfind("# ui: Shape | choices full=Full picture, 1:1=1:1, 4:3=4:3, 16:10=16:10, 16:9=16:9, 21:9=21:9 | live | menu desktop_window\n", aspectKey);
     const size_t uiCrop = ini.rfind("# ui: Crop | choices native=Same as the game's mirror, center=Centre | live | menu desktop_window\n", cropKey);
     const size_t uiShift = ini.rfind("# ui: Vertical shift | range -100..100 | step 5 | unit % | signed | zero default | recommended 0 | live | menu desktop_window\n", shiftKey);
     const size_t uiStyle = ini.rfind("# ui: Style | choices window=Window, borderless=Borderless full screen | live | menu desktop_window\n", styleKey);
-    check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 160 &&
+    check(visual != std::string::npos && world != std::string::npos && key != std::string::npos && ui != std::string::npos && ui > world && key - ui < 200 &&
               aspectKey != std::string::npos && uiAspect != std::string::npos && uiAspect > key && aspectKey - uiAspect < 200 && cropKey != std::string::npos && uiCrop != std::string::npos &&
               uiCrop > aspectKey && cropKey - uiCrop < 200 && shiftKey != std::string::npos && uiShift != std::string::npos && uiShift > cropKey && shiftKey - uiShift < 200 && styleKey != std::string::npos && uiStyle != std::string::npos && uiStyle > shiftKey && styleKey - uiStyle < 160 &&
               count(ini, "\ndesktop_window = ") == 1 && count(ini, "\ndesktop_window_aspect = ") == 1 && count(ini, "\ndesktop_window_crop = ") == 1 && count(ini, "\ndesktop_window_vertical_shift = ") == 1 &&
@@ -1213,6 +1223,33 @@ static void wiring(const std::string& root) {
     check(!shiftWired(replaced(cpp, "S.shiftOpt = shiftOpt;", "")), "control: a read that is not kept trips the pin");
     check(!shiftWired(replaced(cpp, "rule %s, vertical shift %d; crop bounds", "straight ahead %s, vertical shift %d; crop bounds")), "control: a crop line that says straight ahead trips the pin");
     check(at(flatKeys, "vertical_shift") == std::string::npos, "the flat profile's allow-list does not carry visual.desktop_window_vertical_shift");
+    auto blackWired = [&](const std::string& text) {
+        const std::string body = between(text, "Outcome presentBlack(", "// The work of one Present");
+        const size_t identity = at(body, "g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);");
+        const size_t clear = at(body, "desktopWindowClearBlack(ctx.Get(), rtv.Get());");
+        const size_t cinema = at(body, "holdGameShape(now);");
+        return cinema != std::string::npos && identity != std::string::npos && clear != std::string::npos && cinema < identity && identity < clear &&
+               at(body, "snapshot(") == std::string::npos && at(body, "srvFor(") == std::string::npos &&
+               at(body, "ensurePipe(") == std::string::npos && at(body, "drawEyes(") == std::string::npos &&
+               at(body, "->Draw(") == std::string::npos && at(body, "CopyResource(") == std::string::npos &&
+               at(body, "evaluateWindow(") == std::string::npos && at(body, "requestWindow(") == std::string::npos;
+    };
+    check(blackWired(cpp), "black retains the cinema game-shape guard, records the real swap buffer for suppression and clears it without acquiring/drawing an eye or an eye-aspect reshape");
+    check(!blackWired(replaced(cpp, "desktopWindowClearBlack(ctx.Get(), rtv.Get());", "")), "black control: removing the clear is caught");
+    check(!blackWired(replaced(cpp, "g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);", "")), "black control: a clear without suppressing original desktop draws is caught");
+    check(!blackWired(replaced(cpp, "    holdGameShape(now);", "")), "black control: dropping the cinema guard after an eye reshape is caught");
+    const std::string cinema = between(cpp, "bool holdGameShape(uint64_t now) {", "// The activation ends.");
+    check(at(cinema, "if (!cinema) {") < at(cinema, "S.cinema = false;") &&
+              at(cinema, "if (!S.cinemaRestored && (!S.pending || now - S.lastRequestMs >= kRequestEveryMs)) {") < at(cinema, "restoreWindow(window, sizeof window);") &&
+              at(cinema, "S.cinemaRestored = true;") < at(cinema, "restoreWindow(window, sizeof window);"),
+          "black-from-eye cinema restores the saved game shape after pending reshape settles, once per cinema stretch, and leaving cinema clears its latch");
+    const size_t heartbeat = at(cpp, "if (g_blackWanted.load(std::memory_order_relaxed)) {");
+    const size_t tick = at(cpp, "g_lastTick[eye].store(stampMs(), std::memory_order_release);", heartbeat);
+    const size_t reject = at(cpp, "return S_FALSE;", tick);
+    const size_t addRef = at(cpp, "texture->AddRef();", heartbeat);
+    check(heartbeat != std::string::npos && tick < reject && reject < addRef, "black handoff stamps activity and returns before retaining or locking an image");
+    check(at(cpp, "if (outcome == Outcome::Waiting && S.blackActive) outcome = presentBlack(") != std::string::npos,
+          "black-to-eye waits for a newly held image without restoring or moving the window");
 }
 
 // The desktop window's vertical sync (desktop_vsync.h): VR presents with 0 whatever Elite asks, flat as Elite asks; one line per change, never per frame. The wiring: the

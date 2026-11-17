@@ -1159,6 +1159,85 @@ int main() {
               "prepared hook restores the original entry","prepared hook left its entry patched");
     }
 
+    // Opt-in distant replacements still use the actual CodeHook entry guards.
+    // These are owned executable fixture pages, never a game/driver module.
+    {
+        const auto replacement=reinterpret_cast<uintptr_t>(&codeReplacement);
+        uint8_t* memory=nullptr;
+        for(uintptr_t candidate=0x10000000;candidate<0x70000000&&!memory;candidate+=0x1000000){
+            const auto distance=replacement>candidate?replacement-candidate:candidate-replacement;
+            if(distance>0x90000000)memory=static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate),65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+        }
+        for(uintptr_t candidate=0x10000000000;candidate<0x10100000000&&!memory;candidate+=0x1000000){
+            const auto distance=replacement>candidate?replacement-candidate:candidate-replacement;
+            if(distance>0x90000000)memory=static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate),65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+        }
+        check(memory!=nullptr,"far replacement fixture allocates an actual out-of-range entry","no distant owned executable page was available");
+        if(memory){
+            auto* counter=reinterpret_cast<volatile uint32_t*>(memory+0x8000);
+            // inc [rip+counter]; mov eax,ecx; add eax,7; ret.
+            const uint8_t body[]={0xff,0x05,0,0,0,0,0x8b,0xc1,0x83,0xc0,0x07,0xc3};
+            memcpy(memory,body,sizeof(body));const int32_t displacement=0x8000-6;memcpy(memory+2,&displacement,4);
+            memory[0x200]=0xe9; // An aligned jump entry remains forbidden.
+            uint8_t entry[8]{};memcpy(entry,memory,sizeof(entry));
+            DWORD old=0;const bool sealed=VirtualProtect(memory,4096,PAGE_EXECUTE_READ,&old)!=FALSE;
+            check(sealed,"far fixture entry is executable read-only","could not seal owned fixture code");
+            FlushInstructionCache(GetCurrentProcess(),memory,4096);
+            if(sealed){
+                auto target=reinterpret_cast<PFN_CodeTarget>(memory);
+                CodeHook direct;void* untouched=reinterpret_cast<void*>(uintptr_t(1));
+                check(!direct.install(memory,reinterpret_cast<void*>(&codeReplacement),&untouched,"far-default-refusal")&&
+                      strstr(direct.refusal(),"two gigabytes from the replacement")&&untouched==reinterpret_cast<void*>(uintptr_t(1))&&memcmp(entry,memory,sizeof(entry))==0,
+                      "default caller still refuses a far replacement without changing entry/output","opt-in relay changed default range refusal");
+                struct FarPrepare {uint8_t* target=nullptr;uint8_t entry[8]{};unsigned calls=0;bool allow=false,unchanged=false,forwardWorked=false;} prepared;
+                prepared.target=memory;memcpy(prepared.entry,entry,sizeof(entry));
+                auto prepare=+[](void* forward,void* context) noexcept -> bool {
+                    auto& p=*static_cast<FarPrepare*>(context);++p.calls;
+                    p.unchanged=memcmp(p.target,p.entry,sizeof(p.entry))==0;
+                    p.forwardWorked=reinterpret_cast<PFN_CodeTarget>(forward)(1)==8;
+                    if(p.allow)g_codeOriginal=reinterpret_cast<PFN_CodeTarget>(forward);
+                    return p.allow;
+                };
+                CodeHook refused;
+                check(!refused.install(memory,reinterpret_cast<void*>(&codeReplacement),&untouched,"far-prepare-refusal",prepare,&prepared,true)&&
+                      prepared.calls==1&&prepared.unchanged&&prepared.forwardWorked&&memcmp(entry,memory,sizeof(entry))==0&&untouched==reinterpret_cast<void*>(uintptr_t(1)),
+                      "far relay preparation refusal leaves entry/output original","relay published before preparation accepted");
+                CodeHook unaligned,jump;
+                check(!unaligned.install(memory+1,reinterpret_cast<void*>(&codeReplacement),nullptr,"far-unaligned",nullptr,nullptr,true)&&
+                      strstr(unaligned.refusal(),"eight-byte aligned")&&memcmp(entry,memory,sizeof(entry))==0,
+                      "far opt-in retains aligned atomic-entry requirement","relay bypassed entry alignment");
+                check(!jump.install(memory+0x200,reinterpret_cast<void*>(&codeReplacement),nullptr,"far-jump",nullptr,nullptr,true)&&memory[0x200]==0xe9,
+                      "far opt-in still refuses jump prologues","relay bypassed conservative instruction decoder");
+                prepared.allow=true;prepared.calls=0;prepared.unchanged=prepared.forwardWorked=false;
+                CodeHook relay;
+                const bool installed=relay.install(memory,reinterpret_cast<void*>(&codeReplacement),nullptr,"far-opt-in",prepare,&prepared,true);
+                check(installed&&prepared.calls==1&&prepared.unchanged&&prepared.forwardWorked,
+                      "far opt-in prepares the real original before publishing relay entry","far installation failed or published before original forward");
+                if(installed){
+                    *counter=0;g_codeHookCalls=0;
+                    check(target(1)==108&&g_codeHookCalls==1&&*counter==1,
+                          "far relay reaches replacement and forwards original exactly once","relay changed arguments/results or duplicated original issue");
+                    *counter=0;check(g_codeOriginal(2)==9&&*counter==1,
+                          "original trampoline remains original-only with relocated RIP operand","original forward accidentally enters replacement relay");
+                    int32_t relative=0;memcpy(&relative,memory+1,4);const auto entryDestination=reinterpret_cast<uintptr_t>(memory+5)+relative;
+                    const auto* relayBytes=reinterpret_cast<const uint8_t*>(entryDestination);uint64_t absolute=0;memcpy(&absolute,relayBytes+6,8);
+                    MEMORY_BASIC_INFORMATION relayInfo{},forwardInfo{};VirtualQuery(relayBytes,&relayInfo,sizeof(relayInfo));VirtualQuery(reinterpret_cast<void*>(g_codeOriginal),&forwardInfo,sizeof(forwardInfo));
+                    check(memory[0]==0xe9&&relayBytes[0]==0xff&&relayBytes[1]==0x25&&absolute==replacement&&
+                          relayInfo.Protect==PAGE_EXECUTE_READ&&relayInfo.AllocationBase==forwardInfo.AllocationBase&&
+                          entryDestination==reinterpret_cast<uintptr_t>(g_codeOriginal)+relay.stolenBytes()+14,
+                          "entry reaches a separate immutable absolute relay beside original trampoline","relay storage/target/protection disagrees with contract");
+                    relay.uninstall();*counter=0;g_codeHookCalls=0;
+                    check(memcmp(entry,memory,sizeof(entry))==0&&target(1)==8&&*counter==1&&g_codeHookCalls==0,
+                          "far relay uninstall recognizes its entry and restores original bytes","uninstall compared far callback instead of actual near entry destination");
+                    MEMORY_BASIC_INFORMATION released{};VirtualQuery(reinterpret_cast<void*>(entryDestination),&released,sizeof(released));
+                    check(released.State==MEM_FREE,"single relay/trampoline allocation released on safe uninstall","relay allocation outlived original trampoline after owned uninstall");
+                }
+                g_codeOriginal=nullptr;
+            }
+            VirtualFree(memory,0,MEM_RELEASE);
+        }
+    }
+
     // THE DECODER -- what it measures, where it says the displacement is, and
     // what it refuses. The refusals matter more than the successes: a length
     // this gets wrong is a crash in somebody else's code with EDVR nowhere on

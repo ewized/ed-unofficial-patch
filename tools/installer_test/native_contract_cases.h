@@ -40,6 +40,14 @@ inline void nativeBuiltContractCases(Check check, const std::wstring& root) {
     const auto loader=bytes(L"openxr_loader.dll");
     check(validateNativePayloadBytes(graphics.data(),graphics.size(),NativeImageKind::Graphics),"built native graphics marker/providers accepted");
     check(validateNativePayloadBytes(runtime.data(),runtime.size(),NativeImageKind::Runtime),"built native runtime exact export contract accepted");
+    // The new @17 CPU capability is part of this paired payload's exact ABI.
+    // A merely matching export count must not admit an unrelated name.
+    auto wrongCapability=runtime;
+    const char capability[]="edvrNativeInputScaleCapability";
+    bool mutatedCapability=false;
+    for(size_t i=0;i+sizeof(capability)<=wrongCapability.size();++i)
+      if(!std::memcmp(wrongCapability.data()+i,capability,sizeof(capability))){wrongCapability[i]='x';mutatedCapability=true;break;}
+    check(mutatedCapability&&!validateNativePayloadBytes(wrongCapability.data(),wrongCapability.size(),NativeImageKind::Runtime),"native runtime with a wrong @17 capability name rejected");
     check(validateNativePayloadBytes(loader.data(),loader.size(),NativeImageKind::Loader),"bundled x64 Khronos loader accepted");
     check(probeDll(root+L"\\build\\edvr_openxr_runtime.dll").kind==DllKind::Edvr,"native runtime is identified as EDVR, never as an original to preserve");
     if(graphics.empty())return;

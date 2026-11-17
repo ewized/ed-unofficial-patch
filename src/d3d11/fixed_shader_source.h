@@ -215,7 +215,7 @@ cbuffer P : register(b0) {
     float4 uv;         // the layer's rectangle for that region: u0, v0, u1, v1
     float2 layerSize;  // the layer, texels
     uint2  outSize;    // the region's size, which is the output's
-    uint   mode;       // 0 the composite, 1 the ui_layer debug view
+    uint   mode;       // 0 composite, 1 debug, 2 native UI coverage for XR
     uint   useMult;    // 1: a multiply drew into M this frame
     uint2  pad;
 };
@@ -249,7 +249,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     float3 m = (useMult != 0 && wsum > 0) ? accM / wsum : float3(1, 1, 1);
     float3 c = mode == 1 ? l.rgb + float3(0.0, 0.08, 0.25) * (1.0 - l.a * dot(m, 1.0 / 3.0))
                          : l.rgb + f.rgb * l.a * m;
-    Out[id.xy] = float4(saturate(c), f.a);
+    if (mode == 2) {
+        // Preserve the game's stored-space blend, including colored multiply.
+        // Native pixels beneath translucent UI travel with that UI's pose;
+        // there is no approximation as a linear-space alpha-only UI layer.
+        bool covered = any(l.rgb != 0) || l.a != 1.0 || any(m != 1.0);
+        Out[id.xy] = covered ? float4(saturate(c), 1.0) : float4(0,0,0,0);
+    } else Out[id.xy] = float4(saturate(c), f.a);
 }
 )HLSL";
 

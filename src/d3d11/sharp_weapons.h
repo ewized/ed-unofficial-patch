@@ -77,11 +77,14 @@ inline SharpStepBinding sharpStepBinding(ToneStep step, ID3D11ShaderResourceView
 // The source pass, recorded on a deferred context (the pattern of the HUD's coverage pass: state recorded off the game's context,
 // executed on the immediate one with its state restored by `execute`): F -> S replaced, W += F_up, at the layer's size.
 using SharpExecute = void (*)(ID3D11DeviceContext*, ID3D11CommandList*, int);
+using SharpBeforeRecord = void (*)(ID3D11DeviceContext*);
 inline bool sharpSourcePass(ID3D11DeviceContext* immediate, ID3D11DeviceContext* deferred, ID3D11VertexShader* vs, ID3D11PixelShader* ps,
                             const SharpPassStates& states, ID3D11ShaderResourceView* f, ID3D11RenderTargetView* scratch,
-                            ID3D11RenderTargetView* weapons, uint32_t layerW, uint32_t layerH, SharpExecute execute) {
+                            ID3D11RenderTargetView* weapons, uint32_t layerW, uint32_t layerH, SharpExecute execute,
+                            SharpBeforeRecord beforeRecord = nullptr) {
     if (!immediate || !deferred || !vs || !ps || !states.sourceBlend || !f || !scratch || !weapons || !layerW || !layerH || !execute)
         return false;
+    if (beforeRecord) beforeRecord(deferred);
     ID3D11RenderTargetView* targets[2] = {scratch, weapons};
     deferred->IASetInputLayout(nullptr);
     deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -106,8 +109,9 @@ inline bool sharpSourcePass(ID3D11DeviceContext* immediate, ID3D11DeviceContext*
 // additive blend gives W += bilinear(G). It runs before the source pass of the same re-issue, which then adds F_up to the sum.
 inline bool sharpGlassAddPass(ID3D11DeviceContext* immediate, ID3D11DeviceContext* deferred, ID3D11VertexShader* vs, ID3D11PixelShader* ps,
                               const SharpPassStates& states, ID3D11ShaderResourceView* g, ID3D11RenderTargetView* weapons,
-                              uint32_t layerW, uint32_t layerH, SharpExecute execute) {
+                              uint32_t layerW, uint32_t layerH, SharpExecute execute, SharpBeforeRecord beforeRecord = nullptr) {
     if (!immediate || !deferred || !vs || !ps || !states.sourceBlend || !g || !weapons || !layerW || !layerH || !execute) return false;
+    if (beforeRecord) beforeRecord(deferred);
     ID3D11RenderTargetView* targets[2] = {nullptr, weapons};
     deferred->IASetInputLayout(nullptr);
     deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

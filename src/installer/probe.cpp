@@ -131,7 +131,8 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
             "VR_GetInitToken","VR_GetStringForHmdError","VR_GetVRInitErrorAsEnglishDescription",
             "VR_GetVRInitErrorAsSymbol","VR_InitInternal","VR_IsHmdPresent",
             "VR_IsInterfaceVersionValid","VR_IsRuntimeInstalled","VR_RuntimePath",
-            "VR_ShutdownInternal","edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+            "VR_ShutdownInternal","edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus",
+            "edvrNativeInputScaleCapability"};
         bool providerFound[_countof(providers)]{},runtimeFound[_countof(runtimeNames)]{};
         for (DWORD i=0;i<nameCount;++i) {
             DWORD off=0;

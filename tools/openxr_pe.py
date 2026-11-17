@@ -17,7 +17,8 @@ EXPECTED = dict(enumerate((
     'VR_GetVRInitErrorAsEnglishDescription', 'VR_GetVRInitErrorAsSymbol',
     'VR_InitInternal', 'VR_IsHmdPresent', 'VR_IsInterfaceVersionValid',
     'VR_IsRuntimeInstalled', 'VR_RuntimePath', 'VR_ShutdownInternal',
-    'edvrConfigureNativeRuntime', 'edvrGetNativeRuntimeStatus'), 1))
+    'edvrConfigureNativeRuntime', 'edvrGetNativeRuntimeStatus',
+    'edvrNativeInputScaleCapability'), 1))
 GAME = {'VR_InitInternal', 'VR_ShutdownInternal', 'VR_GetGenericInterface',
         'VR_IsInterfaceVersionValid', 'VR_GetInitToken'}
 
@@ -373,14 +374,16 @@ def self_test():
         dirs = 0x98 + 112
         put(dirs, 0x1000)
         put(dirs + 4, 0x600)
+        # Keep the address/name/ordinal tables disjoint with the added @17
+        # capability; the former 16-entry layout ended exactly at its next table.
         for pos, value in ((16, 1), (20, len(export_names)), (24, len(export_names)), (28, 0x1040),
-                           (32, 0x1080), (36, 0x10c0)):
+                           (32, 0x1090), (36, 0x10e0)):
             rv(0x1000 + pos, value)
-        next_name = 0x1100
+        next_name = 0x1120
         for i, name in enumerate(export_names):
             rv(0x1040 + i * 4, 0x3000 if name == NATIVE_STARTUP_ROUTING_EXPORT else 0x1800 + i)
-            rv(0x1080 + i * 4, next_name)
-            rv(0x10c0 + i * 2, i, 2)
+            rv(0x1090 + i * 4, next_name)
+            rv(0x10e0 + i * 2, i, 2)
             string(next_name, name)
             next_name += len(name) + 1
         if NATIVE_STARTUP_ROUTING_EXPORT in export_names:
@@ -431,7 +434,7 @@ def self_test():
             lambda p, r: r(0x1040 + (len(graphics_names) - 1) * 4, 0x3100),
             lambda p, r: p(0x98 + 240 + 40 + 36, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE),
             lambda p, r: p(0x98 + 240 + 40 + 36, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE),
-            lambda p, r: r(0x1080, 0x4fff),
+            lambda p, r: r(0x1090, 0x4fff),
     ):
         data, put, rv = fixture(export_names=graphics_names)
         bad(put, rv)
@@ -447,11 +450,11 @@ def self_test():
         (lambda p, r: p(0x84, 0x14c, 2), lambda im: im),
         (lambda p, r: p(0x94, 100, 2), lambda im: im),
         (lambda p, r: p(0x98 + 108, 17), lambda im: im),
-        (lambda p, r: r(0x1000 + 20, 17), _native_exports),
-        (lambda p, r: r(0x10c2, 0, 2), _native_exports),
+        (lambda p, r: r(0x1000 + 20, len(EXPECTED) + 1), _native_exports),
+        (lambda p, r: r(0x10e2, 0, 2), _native_exports),
         (lambda p, r: r(0x1040, 0), _native_exports),
         (lambda p, r: r(0x1040, 0x1100), _native_exports),
-        (lambda p, r: r(0x1080, 0x4fff), _native_exports),
+        (lambda p, r: r(0x1090, 0x4fff), _native_exports),
         (lambda p, r: p(0x98 + 112 + 12, 40), _game_imports),
         (lambda p, r: r(0x2014, 0x4ff8), _game_imports),
         (lambda p, r: r(0x2400, 1 << 63 | 9, 8), lambda im: _validate_rows(_game_imports(im))),

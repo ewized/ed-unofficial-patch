@@ -355,9 +355,9 @@ void testSourcePins(const std::string& root) {
     check(fn != std::string::npos && call != std::string::npos && flat != std::string::npos && call < flat &&
               vs.find("if (fssRevealWatching() && !foreignContext(self) && !runtimeFlatProfile()) {", fn) < call,
           "the reveal fix is asked in DrawInstanced on the owner context, VR profile only, before the flat branch could be taken");
-    check(has(vs, "rc.drawInstanced = reinterpret_cast<void*>(reissueDrawInstanced<ReissueCaller::FssReveal>);") && has(vs, "ReissueClock clock(C);\n    g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);") && has(vs, "rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);") &&
+    check(has(vs, "rc.drawInstanced = reinterpret_cast<void*>(reissueDrawInstanced<ReissueCaller::FssReveal>);") && has(vs, "ReissueClock clock(C);\n    nativeBeforeReissue(self);\n    g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);") && has(vs, "rc.omSetRts = reinterpret_cast<void*>(g_state->realOMSetRenderTargets);") &&
               has(vs, "rc.psSetSrv = reinterpret_cast<void*>(g_state->realPSSetShaderResources);"),
-          "the game's own un-hooked entry points are passed, so no hook sees the replay");
+          "the FSS thunk enters full rate then forwards unchanged to the game's un-hooked draw; OM/SRV entries remain un-hooked");
     check(has(vs, "fssRevealFrameBoundary(onShow, runtimeFlatProfile(), s->frameNo);") && has(vs, "deviceHookFssModeLatch() || (s->fssChromeFrame != 0 && s->frameNo - s->fssChromeFrame <= 5)") &&
               has(vs, "fssRevealConfigure(runtimeFlatProfile());") && has(vs, "fssRevealShutdown();"),
           "the scanner is on show while the FSS latch is open or its chrome matched within five frames; the fix is configured, ticked every frame and shut down");

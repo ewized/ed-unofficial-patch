@@ -231,6 +231,12 @@ void CodeHook::refusedf(const char* fmt, ...) {
 
 bool CodeHook::install(void* target, void* replacement, void** origOut,
                        const char* who, Prepare prepare, void* prepareContext) {
+    return install(target,replacement,origOut,who,prepare,prepareContext,false);
+}
+
+bool CodeHook::install(void* target, void* replacement, void** origOut,
+                       const char* who, Prepare prepare, void* prepareContext,
+                       bool allowFarReplacement) {
     const char* label = who ? who : "?";
     m_refusal[0] = 0;
     if (m_installed || !target || !replacement) return false;
@@ -301,7 +307,15 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
     // within reach of the target by construction, but the code AFTER the patch
     // does not have to be within reach of the trampoline once both have been
     // placed by the allocator.
-    const size_t trampolineBytes = stolen + 14;
+    const intptr_t replacementDisplacement =
+        reinterpret_cast<intptr_t>(replacement) -
+        (reinterpret_cast<intptr_t>(code) + static_cast<intptr_t>(kCodeHookPatchBytes));
+    const bool needsRelay = allowFarReplacement &&
+        (replacementDisplacement > INT32_MAX || replacementDisplacement < INT32_MIN);
+    // The original forward ends at its own absolute jump back. A separate
+    // fourteen-byte relay follows it in the same near allocation; forwarding
+    // through tramp can never fall through into the replacement relay.
+    const size_t trampolineBytes = stolen + 14 + (needsRelay ? 14 : 0);
     uint8_t* const tramp = allocateNear(target, trampolineBytes);
     if (!tramp) {
         refusedf(
@@ -347,6 +361,14 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
         const uint64_t resume =
             reinterpret_cast<uintptr_t>(code) + stolen;
         memcpy(back + 6, &resume, sizeof(resume));
+        if (needsRelay) {
+            uint8_t* const relay = back + 14;
+            relay[0] = 0xFF;
+            relay[1] = 0x25;
+            relay[2] = relay[3] = relay[4] = relay[5] = 0;
+            const uint64_t destination = reinterpret_cast<uintptr_t>(replacement);
+            memcpy(relay + 6, &destination, sizeof(destination));
+        }
         memcpy(m_original, code, stolen);
     });
     if (!built || !relocatable) {
@@ -382,8 +404,9 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
     // Build the replacement's eight bytes: E9 rel32, then whatever the original
     // held beyond the patch, so the store leaves the tail of the eight-byte
     // word exactly as it found it.
+    void* const entryDestination = needsRelay ? tramp + stolen + 14 : replacement;
     const intptr_t displacement =
-        reinterpret_cast<intptr_t>(replacement) -
+        reinterpret_cast<intptr_t>(entryDestination) -
         (reinterpret_cast<intptr_t>(code) + static_cast<intptr_t>(kCodeHookPatchBytes));
     if (displacement > INT32_MAX || displacement < INT32_MIN) {
         refusedf(
@@ -438,6 +461,7 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
 
     m_target = target;
     m_replacement = replacement;
+    m_entryDestination = entryDestination;
     m_trampoline = tramp;
     m_stolen = stolen;
     m_installed = true;
@@ -450,6 +474,9 @@ bool CodeHook::install(void* target, void* replacement, void** origOut,
         "which is the point: the table can be restored as often as its owner "
         "likes and there is nothing left to lose a race with.",
         label, target, stolen, static_cast<void*>(tramp));
+    if (needsRelay) Log::get().note(
+        "CodeHook %s: immutable near relay at %p reaches distant replacement %p; original forward remains %p.",
+        label, entryDestination, replacement, static_cast<void*>(tramp));
     return true;
 }
 
@@ -464,7 +491,7 @@ void CodeHook::uninstall() {
     bool ours = false;
     guarded("CodeHook::uninstall/check", [&] {
         const intptr_t displacement =
-            reinterpret_cast<intptr_t>(m_replacement) -
+        reinterpret_cast<intptr_t>(m_entryDestination) -
             (reinterpret_cast<intptr_t>(code) +
              static_cast<intptr_t>(kCodeHookPatchBytes));
         int32_t rel = 0;
@@ -506,6 +533,7 @@ void CodeHook::uninstall() {
     m_trampoline = nullptr;
     m_target = nullptr;
     m_replacement = nullptr;
+    m_entryDestination = nullptr;
     m_stolen = 0;
     m_installed = false;
 }

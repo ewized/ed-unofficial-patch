@@ -20,7 +20,7 @@
 
 namespace edvr {
 
-enum class DesktopWindowMode : uint8_t { Game = 0, LeftEye = 1, RightEye = 2, BothEyes = 3 };
+enum class DesktopWindowMode : uint8_t { Game = 0, LeftEye = 1, RightEye = 2, BothEyes = 3, Black = 4 };
 
 namespace dwdetail {
 inline bool sameWord(const char* text, const char* word) {
@@ -32,7 +32,7 @@ inline bool sameWord(const char* text, const char* word) {
 }
 }  // namespace dwdetail
 
-// The key's words. The empty string is the default (game, known); any other word that is not one of the four is game and unknown, so the caller can say so once.
+// The key's words. The empty string is the default (game, known); an unknown word is game and unknown, so the caller can say so once.
 // The flat profile never reaches this: its getString answers "off" for a key it does not allow, which is an unknown word and so game.
 inline DesktopWindowMode desktopWindowParse(const char* text, bool* known = nullptr) {
     if (known) *known = true;
@@ -40,6 +40,7 @@ inline DesktopWindowMode desktopWindowParse(const char* text, bool* known = null
     if (dwdetail::sameWord(text, "left_eye")) return DesktopWindowMode::LeftEye;
     if (dwdetail::sameWord(text, "right_eye")) return DesktopWindowMode::RightEye;
     if (dwdetail::sameWord(text, "both_eyes")) return DesktopWindowMode::BothEyes;
+    if (dwdetail::sameWord(text, "black")) return DesktopWindowMode::Black;
     if (known) *known = false;
     return DesktopWindowMode::Game;
 }
@@ -49,6 +50,7 @@ inline const char* desktopWindowModeName(DesktopWindowMode mode) {
         case DesktopWindowMode::LeftEye: return "left_eye";
         case DesktopWindowMode::RightEye: return "right_eye";
         case DesktopWindowMode::BothEyes: return "both_eyes";
+        case DesktopWindowMode::Black: return "black";
         default: return "game";
     }
 }
@@ -64,6 +66,17 @@ inline unsigned desktopWindowEyeMask(DesktopWindowMode mode) {
 }
 
 constexpr uint64_t kDesktopWindowStaleMs = 500;   // an eye image older than this is no longer being handed over
+
+// Black needs only proof that VR frames are arriving, never an eye texture.
+// Eye modes still require every requested eye; Game never takes the desktop.
+inline bool desktopWindowFresh(DesktopWindowMode mode, uint64_t now, const uint64_t ticks[2]) {
+    auto fresh = [&](unsigned eye) { return ticks[eye] && (ticks[eye] < now ? now - ticks[eye] : 0) <= kDesktopWindowStaleMs; };
+    if (mode == DesktopWindowMode::Black) return fresh(0) || fresh(1);
+    const unsigned need = desktopWindowEyeMask(mode);
+    if (!need) return false;
+    for (unsigned eye = 0; eye < 2; ++eye) if ((need & (1u << eye)) && !fresh(eye)) return false;
+    return true;
+}
 
 struct DwSize { double w = 0, h = 0; };
 struct DwRect { double x = 0, y = 0, w = 0, h = 0; };

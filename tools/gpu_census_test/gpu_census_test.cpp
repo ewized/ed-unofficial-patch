@@ -1172,9 +1172,15 @@ const char* seedWiringProblem(const std::string& raw) {
     if (stmt.find("{outW, outH, dsBytesPerPixel(vd.Format), td.Width, td.Height, viewName(vd.Format)}") == std::string::npos)
         return "the scope's target is not the layer's size, its format's bytes, the game's size and the format's name";
     const size_t copy = body.find("vScreenCopyResourceRaw(");
-    const size_t exec = body.find("vScreenExecuteCommandListRaw(");
+    const size_t exec = body.find("uiLayerExecuteFullRate(");
     if (copy == std::string::npos || exec == std::string::npos) return "the seed's copy or its execute is not in seedLayerDepth";
     if (scope > copy || scope > exec) return "the scope is entered after the seed's copy: its GPU time is outside the section";
+    const size_t wrapper = source.find("void uiLayerExecuteFullRate(");
+    const size_t wrapperEnd = source.find("\n}\n", wrapper);
+    if (wrapper == std::string::npos || wrapperEnd == std::string::npos ||
+        withoutLineComments(source.substr(wrapper, wrapperEnd - wrapper)).find(
+            "uiVrsExecute(ctx, list, restore, uiVrsBefore, vScreenExecuteCommandListRaw);") == std::string::npos)
+        return "the seed's guarded execute does not forward to its raw execute";
     return nullptr;
 }
 
@@ -1208,6 +1214,20 @@ void seedWiringCases() {
     }
     mutants.push_back({"the scope commented out", source.substr(0, at) + "// " + stmt + source.substr(stmtEnd), "does not construct"});
     mutants.push_back({"the scope constructed twice", source.substr(0, stmtEnd) + "\n    " + stmt + source.substr(stmtEnd), "more than one"});
+    {
+        std::string missingExecute = source;
+        const std::string executeCall = "uiLayerExecuteFullRate(ctx, list.Get(), 1);";
+        const size_t callAt = missingExecute.find(executeCall, missingExecute.find("bool seedLayerDepth("));
+        check(callAt != std::string::npos, "seed wiring: guarded execute is present for its negative control");
+        missingExecute.erase(callAt, executeCall.size());
+        mutants.push_back({"the guarded execute deleted", missingExecute, "copy or its execute"});
+        std::string missingForward = source;
+        const std::string forward = "uiVrsExecute(ctx, list, restore, uiVrsBefore, vScreenExecuteCommandListRaw);";
+        const size_t forwardAt = missingForward.find(forward);
+        check(forwardAt != std::string::npos, "seed wiring: guarded forwarding is present for its negative control");
+        missingForward.erase(forwardAt, forward.size());
+        mutants.push_back({"the guarded execute no longer forwards", missingForward, "does not forward"});
+    }
     {
         std::string moved = source.substr(0, at) + source.substr(stmtEnd);
         const size_t copyAt = moved.find(copyCall);

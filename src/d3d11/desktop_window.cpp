@@ -6,6 +6,7 @@
 // (desktopWindowNoteSkippedDraw) is written by the draw hooks, which are the same thread.
 #include "temporal_shader_bytecode.h"
 #include "desktop_window.h"
+#include "desktop_window_black.h"
 #include "desktop_window_cursor.h"
 
 #include <windows.h>
@@ -69,6 +70,7 @@ unsigned g_retiredCount = 0;
 uint64_t g_serial = 0;
 std::atomic<unsigned> g_retirePending{0};
 std::atomic<unsigned> g_wantMask{0};           // the eyes the setting needs, as the last Present read it; noteEye holds nothing else
+std::atomic<bool> g_blackWanted{false};        // setting demand, retained while stale so the next VR Submit can reactivate black
 std::atomic<uint64_t> g_lastTick[2] = {};      // stampMs of each eye's last handoff, 0 never
 std::atomic<uint64_t> g_handoffs[2] = {};
 std::atomic<bool> g_holding{false};
@@ -81,6 +83,10 @@ HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const
     if (context != &g_contextToken || eye > 1 || !texture || !bounds) return E_INVALIDARG;
     for (int i = 0; i < 4; ++i) {
         if (!std::isfinite(bounds[i])) return E_INVALIDARG;
+    }
+    if (g_blackWanted.load(std::memory_order_relaxed)) {
+        g_lastTick[eye].store(stampMs(), std::memory_order_release);
+        return S_FALSE; // activity only: no AddRef, image publication or mutex
     }
     if (!(g_wantMask.load(std::memory_order_relaxed) & (1u << eye))) return S_FALSE;
     texture->AddRef();
@@ -178,10 +184,12 @@ struct Session {
     unsigned srvNext = 0;
     // the activation
     bool active = false;
+    bool blackActive = false;          // a black clear owns the buffer; retained while waiting for the first newly requested eye
     bool dead = false;                  // a fault or a disabled graphics runtime: no more work this session
     HWND hwnd = nullptr;
     unsigned activations = 0;
     uint64_t seen = 0, drawn = 0, stale = 0;
+    uint64_t blackClears = 0;
     uint64_t presentsSinceReshape = 0;
     uint64_t nextStatsMs = 0;
     uint64_t lastSerial[2] = {};
@@ -284,7 +292,7 @@ void refreshMode(bool flat) {
     const std::string raw = cfg.getString("visual.desktop_window", "left_eye");
     bool known = true;
     const DesktopWindowMode mode = desktopWindowParse(raw.c_str(), &known);
-    if (!known) Log::get().note("desktop window: unknown setting \"%.40s\" (it is game, left_eye, right_eye or both_eyes); treated as game", raw.c_str());
+    if (!known) Log::get().note("desktop window: unknown setting \"%.40s\" (it is game, left_eye, right_eye, both_eyes or black); treated as game", raw.c_str());
     if (!S.settingLogged || mode != S.mode) {
         char line[160];
         desktopWindowSettingLine(line, sizeof line, desktopWindowModeName(mode), S.settingLogged ? desktopWindowModeName(S.mode) : nullptr);
@@ -795,6 +803,7 @@ void leave(const char* reason) {
     desktopWindowCursorSetActive(false);   // the cursor hooks pass everything through again
     if (!S.active) return;
     S.active = false;
+    S.blackActive = false;
     S.cinema = false;   // the next activation looks at the mode afresh
     S.cinemaRestored = false;
     char window[200];
@@ -929,7 +938,66 @@ void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const Ey
     saved.restore(ctx);
 }
 
-enum class Outcome { Drew, Declined };
+enum class Outcome { Drew, Waiting, Declined };
+
+// One clear, with no eye acquisition, shader/state setup or eye-aspect reshape.
+// Keep the existing cinema game-shape restore: Elite uses it for the headset HUD.
+// The caller still makes Elite's ordinary real Present and frame-boundary calls.
+Outcome presentBlack(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, char* why, size_t whySize) {
+    ComPtr<ID3D11DeviceContext> ctx;
+    device->GetImmediateContext(&ctx);
+    ComPtr<ID3D11Texture2D> back;
+    if (!ctx || FAILED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(back.GetAddressOf()))) || !back) {
+        std::snprintf(why, whySize, "black: the context or swap buffer is unavailable");
+        return Outcome::Declined;
+    }
+    D3D11_TEXTURE2D_DESC bd{};
+    back->GetDesc(&bd);
+    const DwFormats formats = desktopWindowFormats(DXGI_FORMAT_R8G8B8A8_UNORM, bd.Format);
+    DXGI_SWAP_CHAIN_DESC sc{};
+    if (bd.SampleDesc.Count != 1 || !formats.ok || FAILED(swap->GetDesc(&sc)) || !sc.OutputWindow) {
+        std::snprintf(why, whySize, "black: unsupported swap buffer or missing window");
+        return Outcome::Declined;
+    }
+    RECT client{};
+    GetClientRect(sc.OutputWindow, &client);
+    if (client.right <= client.left || client.bottom <= client.top) {
+        std::snprintf(why, whySize, "black: the client area is empty");
+        return Outcome::Declined;
+    }
+    D3D11_RENDER_TARGET_VIEW_DESC rd{};
+    rd.Format = formats.target;
+    rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    if (FAILED(device->CreateRenderTargetView(back.Get(), &rd, &rtv)) || !rtv) {
+        std::snprintf(why, whySize, "black: the swap buffer target view is unavailable");
+        return Outcome::Declined;
+    }
+    if (!S.active) {
+        S.active = true;
+        desktopWindowCursorSetActive(true);
+        ++S.activations;
+        S.nextStatsMs = now + kTenSecondsMs;
+        S.hwnd = sc.OutputWindow;
+        g_census.reset();
+        Log::get().note("desktop window: active #%u (black); suppressing game buffer draws, no eye images requested or retained; real Present continues", S.activations);
+    }
+    holdGameShape(now);
+    S.blackActive = true;
+    S.chainW = bd.Width; S.chainH = bd.Height;
+    S.clientW = client.right - client.left; S.clientH = client.bottom - client.top;
+    g_desktopWindowBack.store(back.Get(), std::memory_order_relaxed);
+    POINT centre = {S.clientW / 2, S.clientH / 2};
+    if (ClientToScreen(sc.OutputWindow, &centre)) desktopWindowCursorPublishCentre(centre.x, centre.y);
+    desktopWindowCursorHide(sc.OutputWindow);
+    {
+        VrWorldInternalScope internal;
+        desktopWindowClearBlack(ctx.Get(), rtv.Get());
+    }
+    ++S.blackClears;
+    ++S.drawn;
+    return Outcome::Drew;
+}
 
 // The work of one Present while the feature is wanted and the eyes are fresh. Declined: nothing was skipped or drawn this Present, and the reason is in `why`.
 Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, char* why, size_t whySize) {
@@ -947,7 +1015,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         if (!(need & (1u << eye))) continue;
         if (!snap.texture[eye]) {
             std::snprintf(why, whySize, "no image of the %s eye is held", eye ? "right" : "left");
-            return Outcome::Declined;
+            return Outcome::Waiting;
         }
         use[eye] = srvFor(device, snap.texture[eye].Get());
         if (!use[eye].ok) {
@@ -1134,6 +1202,7 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         draws[i].rect = rects[i];
     }
     drawEyes(ctx.Get(), rtv.Get(), draws, count);
+    S.blackActive = false;
     ++S.drawn;
     return Outcome::Drew;
 }
@@ -1168,32 +1237,45 @@ void desktopWindowNoteSkippedDraw(ID3D11DeviceContext* ctx, char kind, uint64_t 
 
 bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned presentFlags, bool flatProfile) {
     if (presentFlags & DXGI_PRESENT_TEST) return false;
-    if (S.dead) return false;
+    if (S.dead) {
+        g_blackWanted.store(false, std::memory_order_relaxed);
+        g_wantMask.store(0, std::memory_order_relaxed);
+        if (g_holding.load(std::memory_order_relaxed) || g_retirePending.load(std::memory_order_relaxed)) releaseHeld();
+        return false;
+    }
     drainRetired();
     refreshMode(flatProfile);
     const unsigned need = flatProfile ? 0u : desktopWindowEyeMask(S.mode);
+    const bool black = !flatProfile && S.mode == DesktopWindowMode::Black;
     g_wantMask.store(need, std::memory_order_relaxed);
-    if (!need && !S.active && !g_holding.load(std::memory_order_relaxed)) return false;
+    g_blackWanted.store(black, std::memory_order_relaxed);
+    // A noteEye already past its old demand check can publish once more during
+    // the switch: keep draining on later black Presents, not just the mode edge.
+    if (black && (g_holding.load(std::memory_order_relaxed) || g_retirePending.load(std::memory_order_relaxed))) releaseHeld();
+    if (!need && !black && !S.active && !g_holding.load(std::memory_order_relaxed)) return false;
 
     const uint64_t now = stampMs();
-    bool fresh = need != 0;
-    for (unsigned eye = 0; eye < 2 && fresh; ++eye) {
-        if (!(need & (1u << eye))) continue;
-        const uint64_t tick = g_lastTick[eye].load(std::memory_order_acquire);
-        if (!tick || (tick < now ? now - tick : 0) > kDesktopWindowStaleMs) fresh = false;
-    }
+    const uint64_t ticks[2] = {g_lastTick[0].load(std::memory_order_acquire), g_lastTick[1].load(std::memory_order_acquire)};
+    const bool fresh = desktopWindowFresh(S.mode, now, ticks);
     char why[200] = {};
     bool drew = false;
-    if (need && fresh && swap && device) {
+    if ((need || black) && fresh && swap && device) {
         if (graphicsRuntimeDisabled() || !g_budget.shouldRun()) {
             S.dead = true;
+            g_blackWanted.store(false, std::memory_order_relaxed);
+            g_wantMask.store(0, std::memory_order_relaxed);
             leave(graphicsRuntimeDisabled() ? "the graphics runtime is disabled" : "stood down after faults in the draw");
             releaseHeld();
             return true;
         }
         ++S.seen;
         Outcome outcome = Outcome::Declined;
-        if (!guardedBudget(g_budget, [&] { outcome = presentActive(swap, device, now, why, sizeof why); })) {
+        if (!guardedBudget(g_budget, [&] {
+                outcome = black ? presentBlack(swap, device, now, why, sizeof why) : presentActive(swap, device, now, why, sizeof why);
+                // An activity-only black heartbeat is not a held eye. Keep the
+                // existing black buffer until the newly requested image arrives.
+                if (outcome == Outcome::Waiting && S.blackActive) outcome = presentBlack(swap, device, now, why, sizeof why);
+            })) {
             std::snprintf(why, sizeof why, "a fault in the draw");
             outcome = Outcome::Declined;
         }
@@ -1213,6 +1295,7 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
             desktopWindowStatsLine(line, sizeof line, S.drawn, S.seen, g_skipped.load(std::memory_order_relaxed), g_handoffs[0].load(std::memory_order_relaxed),
                                    g_handoffs[1].load(std::memory_order_relaxed), S.stale, S.clientW, S.clientH, S.chainW, S.chainH, S.userMoves, S.userResizes);
             Log::get().note("%s", line);
+            if (S.blackActive) Log::get().note("desktop window: black clears=%llu, eye demand=%u, retained images=%u; no mirror eye draw", static_cast<unsigned long long>(S.blackClears), need, g_holding.load(std::memory_order_relaxed) ? 1u : 0u);
             S.userMoves = S.userResizes = 0;
             char census[640];
             g_census.format(census, sizeof census);
@@ -1227,12 +1310,12 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
     // Not drawing: nothing is skipped any more, the window goes back, and the held images are let go.
     const bool wasActive = S.active;
     if (S.active) {
-        leave(!need ? (flatProfile ? "the flat profile is active" : "the setting is now game") : "no eye image for 500 ms (3D is off, or no frames arrive)");
+        leave(!need && !black ? (flatProfile ? "the flat profile is active" : "the setting is now game") : "no VR image/activity for 500 ms (3D is off, or no frames arrive)");
     } else {
         g_desktopWindowBack.store(nullptr, std::memory_order_relaxed);
     }
     if (g_holding.load(std::memory_order_relaxed) && (!need || !fresh)) releaseHeld();
-    return wasActive || need != 0;
+    return wasActive || need != 0 || black;
 }
 
 }  // namespace edvr

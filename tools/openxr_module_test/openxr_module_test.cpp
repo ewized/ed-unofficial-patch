@@ -299,7 +299,7 @@ void ordinalTests(const Exports& api) {
       "VR_GetVRInitErrorAsEnglishDescription","VR_GetVRInitErrorAsSymbol",
       "VR_InitInternal","VR_IsHmdPresent","VR_IsInterfaceVersionValid",
       "VR_IsRuntimeInstalled","VR_RuntimePath","VR_ShutdownInternal",
-      "edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus"};
+      "edvrConfigureNativeRuntime","edvrGetNativeRuntimeStatus","edvrNativeInputScaleCapability"};
   bool same=true;
   for(unsigned i=0;i<_countof(names);++i) {
     const auto byName=GetProcAddress(api.module,names[i]);
@@ -307,6 +307,9 @@ void ordinalTests(const Exports& api) {
     same=same&&byName&&byOrdinal&&byName==byOrdinal;
   }
   check(same,"historical and private export ordinals resolve to the named exports");
+  using Capability=uint32_t(WINAPI*)(uint32_t);
+  const auto capability=reinterpret_cast<Capability>(GetProcAddress(api.module,"edvrNativeInputScaleCapability"));
+  check(capability&&capability(2)==2&&capability(1)==0&&capability(0)==0,"input scale capability returns exact-input version2 and refuses old even-input protocol");
 }
 
 void parserModeTests(const std::filesystem::path& directory) {

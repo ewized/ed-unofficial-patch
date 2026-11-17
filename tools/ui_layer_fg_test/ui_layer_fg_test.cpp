@@ -1,0 +1,280 @@
+// CPU admission falsifiers by default. --gpu runs the shared production capture
+// and replay adapter, actual SMAA and shared composite dispatch on WARP.
+// No game/runtime/NVAPI calls on either path.
+#include "../../src/d3d11/ui_layer.h"
+#include "../../src/d3d11/ui_layer_fg_adapter.h"
+#include "../../src/d3d11/ui_layer_math.h"
+#include "../../src/d3d11/ui_layer_shaders.h"
+#include "temporal_shader_bytecode.h" // build-generated production bytecode include directory
+#include <windows.h>
+#include <d3d11.h>
+#include <wrl/client.h>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <thread>
+
+using Microsoft::WRL::ComPtr;
+static unsigned checks = 0;
+static void check(bool ok, const char* what) {
+    ++checks;
+    if (!ok) throw std::runtime_error(what);
+}
+static void hr(HRESULT result, const char* what) { check(SUCCEEDED(result), what); }
+
+static void contracts() {
+    using edvr::UiLayerFgRefusal;
+    edvr::UiLayerFgFacts good;
+    good.arguments = good.owner = good.available = good.sequence = true;
+    good.eye = good.size = good.complete = true;
+    check(edvr::uiLayerFgAdmission(good) == UiLayerFgRefusal::None, "authoritative empty admitted");
+    good.hasUi = true;
+    check(edvr::uiLayerFgAdmission(good) == UiLayerFgRefusal::None, "published UI admitted");
+    struct Falsifier { bool edvr::UiLayerFgFacts::*member; bool value; UiLayerFgRefusal expected; };
+    const Falsifier cases[] = {
+        {&edvr::UiLayerFgFacts::arguments, false, UiLayerFgRefusal::InvalidArgument},
+        {&edvr::UiLayerFgFacts::owner, false, UiLayerFgRefusal::ForeignOwner},
+        {&edvr::UiLayerFgFacts::available, false, UiLayerFgRefusal::Unavailable},
+        {&edvr::UiLayerFgFacts::sequence, false, UiLayerFgRefusal::WrongSequence},
+        {&edvr::UiLayerFgFacts::eye, false, UiLayerFgRefusal::EyeUnproven},
+        {&edvr::UiLayerFgFacts::size, false, UiLayerFgRefusal::SizeMismatch},
+        {&edvr::UiLayerFgFacts::scope, true, UiLayerFgRefusal::ScopeActive},
+        {&edvr::UiLayerFgFacts::ripple, true, UiLayerFgRefusal::RippleActive},
+        {&edvr::UiLayerFgFacts::world, true, UiLayerFgRefusal::WorldRoute},
+        {&edvr::UiLayerFgFacts::complete, false, UiLayerFgRefusal::IncompletePublication},
+    };
+    for (const auto& c : cases) for (bool content : {false, true}) {
+        auto f = good; f.hasUi = content; f.*(c.member) = c.value;
+        check(edvr::uiLayerFgAdmission(f) == c.expected, "unsafe empty/content refused");
+    }
+    // Pin the live wrapper's links to the adapter with deletion controls. The
+    // GPU fixture below calls that shared adapter directly, without live g_eye.
+    std::ifstream source("src/d3d11/ui_layer.cpp", std::ios::binary);
+    check(bool(source), "production source available from tree root");
+    std::string text((std::istreambuf_iterator<char>(source)), {});
+    std::ifstream adapter("src/d3d11/ui_layer_fg_adapter.h", std::ios::binary);
+    check(bool(adapter), "shared production adapter available");
+    text.append(std::istreambuf_iterator<char>(adapter), std::istreambuf_iterator<char>());
+    const char* pins[] = {
+        "context->CopyResource(texture.Get(), source);",
+        "renderBoundaryValidateOwner(device, context)",
+        "e.submittedSeq == sequence && e.temporalOutSeq == sequence",
+        "e.compositedSeq != sequence",
+        "e.hdrToneSeq == sequence", "e.wPubSeq == sequence",
+        "frame == source.expectedFrame",
+        "runSmooth(cache.smaa, context, source.layerView)",
+        "return compositeInner(privateEye, captured.info.eye, world",
+        "Eye privateEye;",
+        "captured.useMult, false, &why, false, false)",
+        "facts.world = g_screenHeld == 1",
+        "return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info)",
+        "return ui_layer_fg::replay(context, snapshot, generatedWorld",
+    };
+    for (const char* pin : pins) {
+        const auto at = text.find(pin);
+        check(at != std::string::npos, "snapshot production wiring");
+        auto deleted = text;
+        if (at != std::string::npos) deleted.erase(at, std::strlen(pin));
+        check(deleted.find(pin) == std::string::npos, "wiring deletion control detects removal");
+    }
+}
+
+using Pixel = std::array<unsigned char, 4>;
+struct Image { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv; ComPtr<ID3D11UnorderedAccessView> uav; };
+static Image image(ID3D11Device* device, Pixel pixel, bool writable = false) {
+    std::array<Pixel, 64> pixels; pixels.fill(pixel);
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = d.Height = 8; d.MipLevels = d.ArraySize = d.SampleDesc.Count = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (writable) d.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    D3D11_SUBRESOURCE_DATA data{pixels.data(), 8 * sizeof(Pixel), 0};
+    Image out;
+    hr(device->CreateTexture2D(&d, &data, &out.tex), "pixel texture");
+    hr(device->CreateShaderResourceView(out.tex.Get(), nullptr, &out.srv), "pixel view");
+    if (writable) hr(device->CreateUnorderedAccessView(out.tex.Get(), nullptr, &out.uav), "pixel UAV");
+    return out;
+}
+static Pixel read(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture) {
+    D3D11_TEXTURE2D_DESC desc{}; texture->GetDesc(&desc);
+    desc.BindFlags = desc.MiscFlags = 0; desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    hr(device->CreateTexture2D(&desc, nullptr, &staging), "readback texture");
+    context->CopyResource(staging.Get(), texture);
+    D3D11_MAPPED_SUBRESOURCE map{};
+    hr(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map), "pixel readback");
+    Pixel value{}; std::memcpy(value.data(), map.pData, sizeof(value));
+    context->Unmap(staging.Get(), 0); return value;
+}
+static void gpu() {
+    namespace adapter = edvr::ui_layer_fg;
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &device, nullptr, &context), "WARP device");
+    ComPtr<ID3D11ComputeShader> shader, sentinelShader;
+    hr(device->CreateComputeShader(edvr::kUiLayerCompositeBytecode, sizeof(edvr::kUiLayerCompositeBytecode),
+        nullptr, &shader), "production composite shader");
+    hr(device->CreateComputeShader(edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode),
+        nullptr, &sentinelShader), "distinct sentinel CS");
+    edvr::UiLayerCompositeParams p{};
+    p.region[2] = p.region[3] = 8; p.uv[2] = p.uv[3] = 1;
+    p.layerSize[0] = p.layerSize[1] = 8; p.outSize[0] = p.outSize[1] = 8; p.useMult = 1;
+    D3D11_BUFFER_DESC bd{}; bd.ByteWidth = sizeof(p); bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA initial{&p, 0, 0}; ComPtr<ID3D11Buffer> constants, sentinelConstants;
+    hr(device->CreateBuffer(&bd, &initial, &constants), "production composite constants");
+    hr(device->CreateBuffer(&bd, &initial, &sentinelConstants), "sentinel constants");
+    const Pixel hud{32, 48, 64, 128}, tint{64, 128, 192, 255}, world{80, 100, 120, 255};
+    auto live = image(device.Get(), hud), liveMult = image(device.Get(), tint);
+    auto scene = image(device.Get(), world), wrongEye = image(device.Get(), world);
+    auto sent0 = image(device.Get(), {}), sent1 = image(device.Get(), {}), sent2 = image(device.Get(), {});
+    auto sentOut = image(device.Get(), {}, true);
+    ComPtr<ID3D11SamplerState> sampler;
+    D3D11_SAMPLER_DESC sd{}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
+    hr(device->CreateSamplerState(&sd, &sampler), "sentinel sampler");
+    const auto bindSentinels = [&] {
+        ID3D11Buffer* cb = sentinelConstants.Get();
+        ID3D11ShaderResourceView* inputs[3] = {sent0.srv.Get(), sent1.srv.Get(), sent2.srv.Get()};
+        ID3D11UnorderedAccessView* target = sentOut.uav.Get();
+        ID3D11SamplerState* samplers[2] = {sampler.Get(), sampler.Get()};
+        context->CSSetShader(sentinelShader.Get(), nullptr, 0); context->CSSetConstantBuffers(0, 1, &cb);
+        context->CSSetShaderResources(0, 3, inputs); context->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
+        context->CSSetSamplers(0, 2, samplers);
+    };
+    const auto sentinels = [&] {
+        ComPtr<ID3D11ComputeShader> cs; ComPtr<ID3D11Buffer> cb; ComPtr<ID3D11UnorderedAccessView> uav;
+        context->CSGetShader(&cs, nullptr, nullptr); context->CSGetConstantBuffers(0, 1, &cb);
+        context->CSGetUnorderedAccessViews(0, 1, &uav);
+        check(cs.Get() == sentinelShader.Get() && cb.Get() == sentinelConstants.Get() && uav.Get() == sentOut.uav.Get(),
+            "actual adapter restores sentinel CS/CB0/UAV0");
+        ID3D11ShaderResourceView* srvs[3]{}; context->CSGetShaderResources(0, 3, srvs);
+        const bool same = srvs[0] == sent0.srv.Get() && srvs[1] == sent1.srv.Get() && srvs[2] == sent2.srv.Get();
+        for (auto* view : srvs) if (view) view->Release();
+        check(same, "actual adapter restores sentinel SRV0..2");
+        ID3D11SamplerState* ss[2]{}; context->CSGetSamplers(0, 2, ss);
+        const bool sameSamplers = ss[0] == sampler.Get() && ss[1] == sampler.Get();
+        for (auto* state : ss) if (state) state->Release();
+        check(sameSamplers, "actual adapter restores samplers0..1");
+    };
+    adapter::CaptureCache cache;
+    adapter::Source source;
+    source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
+    source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
+    source.info.sequence = 42; source.info.eye = 0; source.expectedFrame = scene.tex.Get();
+    source.layer = live.tex.Get(); source.layerView = live.srv.Get();
+    source.multiply = liveMult.tex.Get(); source.multiplyView = liveMult.srv.Get(); source.useMult = true;
+    edvr::UiLayerFgInfo info;
+    bindSentinels();
+    auto snapshot = adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info);
+    check(snapshot && info.fullSupported && !info.empty, "actual production capture"); sentinels();
+    check(!adapter::capture(context.Get(), wrongEye.tex.Get(), source, cache, &info) &&
+        info.refusal == edvr::UiLayerFgRefusal::EyeUnproven, "same-size same-device wrong-eye frame rejected"); sentinels();
+    ComPtr<ID3D11DeviceContext> deferred; hr(device->CreateDeferredContext(0, &deferred), "deferred fixture");
+    check(!adapter::capture(deferred.Get(), scene.tex.Get(), source, cache, &info) &&
+        info.refusal == edvr::UiLayerFgRefusal::ForeignOwner, "deferred capture rejected"); sentinels();
+    source.smooth = true;
+    auto smooth = adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info);
+    check(smooth && info.smoothingApplied, "actual production SMAA capture"); sentinels();
+    check(cache.builderCalls == 1 && cache.reused == 0, "first smoothed capture builds once");
+    const auto cachedShader = cache.smaa.edgesCs;
+    const auto cachedLookup = cache.smaa.area;
+    const auto cachedOutput = cache.smaa.out;
+    const Pixel smoothFirst = read(device.Get(), context.Get(), smooth->layer.Get());
+    std::array<Pixel, 64> newUi; newUi.fill(Pixel{96, 80, 72, 200});
+    context->UpdateSubresource(live.tex.Get(), 0, nullptr, newUi.data(), 8 * sizeof(Pixel), 0);
+    auto smoothNext = adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info);
+    check(smoothNext && cache.builderCalls == 1 && cache.reused == 1, "same size reuses builder and resources"); sentinels();
+    check(cache.smaa.edgesCs.Get() == cachedShader.Get() && cache.smaa.area.Get() == cachedLookup.Get() &&
+        cache.smaa.out.Get() == cachedOutput.Get(), "SMAA shader LUT and target identities retained");
+    check(smoothNext->layer.Get() != smooth->layer.Get() && smoothNext->layer.Get() != cache.smaa.out.Get() &&
+        read(device.Get(), context.Get(), smoothNext->layer.Get()) != smoothFirst &&
+        read(device.Get(), context.Get(), smooth->layer.Get()) == smoothFirst,
+        "changed UI gets independent immutable smoothed pixels");
+    newUi.fill(hud); context->UpdateSubresource(live.tex.Get(), 0, nullptr, newUi.data(), 8 * sizeof(Pixel), 0);
+    auto mismatched = source; mismatched.layerView = wrongEye.srv.Get();
+    check(!adapter::capture(context.Get(), scene.tex.Get(), mismatched, cache, &info),
+        "smoothed capture refuses SRV naming a different texture"); sentinels();
+    check(!cache.bind(deferred.Get(), device.Get(), 0) && !cache.bind(context.Get(), device.Get(), 1),
+        "cache refuses foreign context or eye");
+    bool foreignBind = true, foreignReset = true;
+    std::thread foreign([&] { foreignBind = cache.bind(context.Get(), device.Get(), 0); foreignReset = cache.resetOwned(); });
+    foreign.join();
+    check(!foreignBind && !foreignReset && cache.smaa.out.Get() == cachedOutput.Get(),
+        "cache refuses foreign thread without clearing producer resources");
+    const auto failAfterSmaa = +[](edvr::UiLayerSmaa& smaa, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* layer) -> ID3D11ShaderResourceView* {
+        edvr::uiLayerSmaaRun(smaa, ctx, layer); return nullptr;
+    };
+    check(!adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info, failAfterSmaa), "capture failure after actual SMAA"); sentinels();
+    const auto throwAfterSmaa = +[](edvr::UiLayerSmaa& smaa, ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* layer) -> ID3D11ShaderResourceView* {
+        edvr::uiLayerSmaaRun(smaa, ctx, layer); throw std::runtime_error("injected failure after SMAA");
+    };
+    check(!adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info, throwAfterSmaa), "capture exception after actual SMAA"); sentinels();
+    source.smooth = false;
+    // Advance/mutate both live inputs after the real capture, then exercise
+    // real production replay and its shared dispatch, not a parallel copy path.
+    std::array<Pixel, 64> changed; changed.fill(Pixel{200, 0, 0, 0});
+    context->UpdateSubresource(live.tex.Get(), 0, nullptr, changed.data(), 8 * sizeof(Pixel), 0);
+    context->UpdateSubresource(liveMult.tex.Get(), 0, nullptr, changed.data(), 8 * sizeof(Pixel), 0);
+    const auto composite = [&](const edvr::UiLayerFgSnapshot& captured, ID3D11Texture2D* color) -> ID3D11Texture2D* {
+        ComPtr<ID3D11ShaderResourceView> view; hr(device->CreateShaderResourceView(color, nullptr, &view), "world view");
+        auto destination = image(device.Get(), {}, true);
+        adapter::issueComposite(context.Get(), shader.Get(), constants.Get(), view.Get(), captured.layerSrv.Get(),
+            captured.useMult ? captured.multiplySrv.Get() : nullptr, destination.uav.Get(), 8, 8);
+        return destination.tex.Detach();
+    };
+    ComPtr<ID3D11Texture2D> output, second;
+    check(adapter::replay(context.Get(), snapshot, scene.tex.Get(), &output, true, composite, &info), "actual production replay"); sentinels();
+    const Pixel first = read(device.Get(), context.Get(), output.Get());
+    const auto px = [](Pixel v) { return edvr::UiPx{v[0]/255.f, v[1]/255.f, v[2]/255.f, v[3]/255.f}; };
+    const auto expected = edvr::uiLayerCompositePx(px(hud), px(tint), px(world));
+    const float reference[3] = {expected.r, expected.g, expected.b};
+    for (unsigned c = 0; c < 3; ++c) check(std::fabs(float(first[c]) - reference[c] * 255.f) <= 1.1f,
+        "real immutable capture preserves transmittance and multiply pixels");
+    check(adapter::replay(context.Get(), snapshot, scene.tex.Get(), &second, true, composite, &info), "second production replay"); sentinels();
+    check(second.Get() != output.Get() && read(device.Get(), context.Get(), second.Get()) == first &&
+        read(device.Get(), context.Get(), output.Get()) == first, "separate output leases preserve prior pixels");
+    const auto brokenComposite = [&](const edvr::UiLayerFgSnapshot& captured, ID3D11Texture2D* color) -> ID3D11Texture2D* {
+        ComPtr<ID3D11Texture2D> dropped; dropped.Attach(composite(captured, color)); return nullptr;
+    };
+    ComPtr<ID3D11Texture2D> refused;
+    check(!adapter::replay(context.Get(), snapshot, scene.tex.Get(), &refused, true, brokenComposite, &info) && !refused,
+        "production replay failure refuses output"); sentinels();
+    check(!adapter::replay(context.Get(), snapshot, scene.tex.Get(), &refused, false, composite, &info), "foreign replay refused"); sentinels();
+    source.facts.hasUi = false; source.useMult = false;
+    source.layer = nullptr; source.layerView = nullptr; source.multiply = nullptr; source.multiplyView = nullptr;
+    auto empty = adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info);
+    check(empty && info.empty && info.fullSupported, "actual authoritative empty capture"); sentinels();
+    source.facts.complete = false;
+    check(!adapter::capture(context.Get(), scene.tex.Get(), source, cache, &info), "missing publication is not empty"); sentinels();
+    check(adapter::replay(context.Get(), empty, scene.tex.Get(), &refused, true, composite, &info), "actual empty replay"); sentinels();
+    check(refused.Get() != scene.tex.Get() && read(device.Get(), context.Get(), refused.Get()) == world,
+        "empty replay owns unchanged world pixels");
+    std::weak_ptr<const edvr::UiLayerFgSnapshot> lease = snapshot;
+    auto retained = snapshot; snapshot.reset(); check(!lease.expired(), "consumer lease retains snapshot");
+    retained.reset(); check(lease.expired(), "snapshot retires after final lease");
+    check(read(device.Get(), context.Get(), output.Get()) == first, "output survives snapshot retirement after GPU completion");
+    check(cache.resetOwned() && !cache.smaa.ready(), "owned lifecycle reset releases SMAA resources");
+    check(read(device.Get(), context.Get(), smooth->layer.Get()) == smoothFirst &&
+        read(device.Get(), context.Get(), output.Get()) == first, "snapshots and outputs survive cache reset");
+    ComPtr<ID3D11Device> otherDevice; ComPtr<ID3D11DeviceContext> otherContext;
+    hr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &otherDevice, nullptr, &otherContext), "other lifecycle device");
+    check(cache.bind(otherContext.Get(), otherDevice.Get(), 0), "owned reset permits new context/device binding");
+    check(!cache.bind(context.Get(), device.Get(), 0), "wrong device/context rejected after rebind");
+    check(cache.resetOwned(), "final owned cache retirement");
+    check(read(device.Get(), context.Get(), scene.tex.Get()) == world, "source world unchanged");
+}
+
+int main(int argc, char** argv) {
+    try {
+        check(argc == 1 || (argc == 2 && !std::strcmp(argv[1], "--gpu")), "optional --gpu only");
+        contracts();
+        if (argc == 2) gpu();
+        std::printf("PASS ui_layer_fg_test: %u checks; WARP=%s; live calls=0\n", checks, argc == 2 ? "yes" : "not run");
+        return 0;
+    } catch (const std::exception& e) { std::fprintf(stderr, "FAIL ui_layer_fg_test: %s\n", e.what()); return 1; }
+}

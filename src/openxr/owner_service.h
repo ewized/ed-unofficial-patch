@@ -29,11 +29,19 @@ class OwnerService final {
   OwnerService& operator=(const OwnerService&) = delete;
   ~OwnerService() { if (worker_.joinable()||joining_) std::terminate(); }
 
+  // Used only by an owner idle callback which itself performs a paced wait.
+  // Queue work still has priority; no extra worker or busy timer is created.
+  void setContinuousIdle(bool enabled) {
+    {std::lock_guard<std::mutex> lock(mutex_);continuousIdle_=enabled;}
+    cv_.notify_one();
+  }
+
   bool start(IdleCallback idle = {}) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (running_ || worker_.joinable() || stopping_ || stopCallers_ != 0) return false;
     const bool previousOutcome=finalOutcome_;
     idle_ = std::move(idle);
+    continuousIdle_ = false;
     stopping_ = false;
     cancellationReady_ = false; idleFailed_ = false; finalOutcome_ = true; finalizer_ = {};
     running_ = true;
@@ -218,7 +226,10 @@ class OwnerService final {
       std::shared_ptr<FlatOwnerWaits> waits;   // read under the mutex too (setFlatWaits)
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, std::chrono::milliseconds(5), [&] { return stopping_ || !queue_.empty(); });
+        // A paced idle producer yields a short queue-coalescing interval to
+        // the caller it just released. Back-to-back eye submits/native waits
+        // must get a turn before another blocking runtime wait begins.
+        cv_.wait_for(lock, std::chrono::milliseconds(continuousIdle_?1:5), [&] { return stopping_ || !queue_.empty(); });
         if(stopping_) {
           cv_.wait(lock,[&]{return cancellationReady_;});
           auto finalizer = std::move(finalizer_);
@@ -250,7 +261,8 @@ class OwnerService final {
         finish(request, success);
         if (detached) request->waits->note(request->flat);
         auto now = std::chrono::steady_clock::now();
-        if (idle_ && now - lastIdle >= std::chrono::milliseconds(5)) {
+        bool continuous=false;{std::lock_guard<std::mutex> lock(mutex_);continuous=continuousIdle_;}
+        if (idle_ && !continuous && now - lastIdle >= std::chrono::milliseconds(5)) {
           bool between=false;
           { std::lock_guard<std::mutex> lock(mutex_); between=!stopping_; waits=flatWaits_; if (between && waits) waits->idleBegin(); }
           if (between) {
@@ -275,6 +287,7 @@ class OwnerService final {
   IdleCallback idle_;
   std::thread::id ownerId_{};
   bool running_ = false, stopping_ = false, joining_ = false;
+  bool continuousIdle_ = false;
   bool cancellationReady_ = false, idleFailed_ = false, finalOutcome_ = true;
   std::function<void()> finalizer_;
   unsigned stopCallers_ = 0;

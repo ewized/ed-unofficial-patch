@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <mutex>
 
 #include <windows.h>
 
@@ -58,6 +59,8 @@ struct DlaaRoleStats {
 };
 // Indexed by upscaler slot (dlaa.h, kUpscalerSlots): the eyes' two and the VR world route's third.
 DlaaRoleStats g_fullStats[kUpscalerSlots];
+std::mutex g_modelSelectionMutex;
+DlaaModelSelection g_modelSelection[kUpscalerSlots];
 
 // The measured price for one eye, for the totals line. False when that eye
 // has not evaluated yet.
@@ -99,6 +102,10 @@ struct EyeFeature {
     // The flat HDR route's input is HDR with automatic exposure (section 81). The flags are creation-time, so
     // the feature key carries the bit: a route flip remakes the feature and its history starts again.
     bool              hdr = false;
+    // App-observed policy/results; never identification of the driver's model.
+    unsigned requestedModel = 11, appliedHint = 11, createResult = 0;
+    int qualityValue = 0;
+    uint64_t successfulEvaluations = 0, failedEvaluations = 0, lastModelAuditMs = 0;
 };
 
 // The flag set is hdr_backend_flags.h's, pure so a rig can pin it; every constant is checked against the SDK's own
@@ -124,7 +131,9 @@ static_assert(flatDlssCreateFlags(false, true) == static_cast<uint32_t>(NVSDK_NG
 // most at rest; and the cost probe priced the models at the Crystal Super's
 // sizes -- on the full frame K, L, M and J cost the same within 7% (the
 // price is the output's), under Performance L costs 1.8x K, and under DLAA L
-// costs FIVE times K. So: K everywhere; never L or M under DLAA.
+// costs FIVE times K. Those are historical measurements, not model support
+// restrictions. K remains the default. Explicit Quality choices are honored;
+// DLAA/UltraQuality retain the prior local measured-cost safeguard.
 unsigned g_preset = 11;        // the full frame's, every mode
 uint64_t g_presetGen = 1;
 // The flat HDR route's exposure input (section 106): NVIDIA's "1x1 texture containing the final exposure scale",
@@ -144,28 +153,31 @@ const char* presetName(unsigned p) {
     }
 }
 
-// L and M are upscaling models: under DLAA L cost five times K on the desk.
+// NVIDIA also supports L/M with DLAA. Its retained K fallback below is local
+// measured-cost policy, not an SDK incompatibility restriction.
 unsigned dlaaSafe(unsigned p) { return (p == 12 || p == 13) ? 11u : p; }
 
-// The hints for a feature about to be created: g_preset for every mode
-// (never L or M under DLAA and the Quality modes).
-void applyPresetHints() {
+// Snapshot the app request once for creation. Quality honors that request;
+// DLAA/UltraQuality retain the local safeguard. Other modes are unchanged.
+void applyPresetHints(unsigned requested = g_preset) {
     if (!g_params) return;
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, dlaaSafe(g_preset));
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, dlaaSafe(g_preset));
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, dlaaSafe(g_preset));
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, g_preset);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, g_preset);
-    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, g_preset);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, dlaaSafe(requested));
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, dlaaSafe(requested));
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, requested);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, requested);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, requested);
+    g_params->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, requested);
 }
 
 // The preset a feature of this quality runs under, for the log.
-unsigned presetFor(NVSDK_NGX_PerfQuality_Value q) {
-    if (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_MaxQuality ||
-        q == NVSDK_NGX_PerfQuality_Value_UltraQuality) {
-        return dlaaSafe(g_preset);
-    }
-    return g_preset;
+unsigned presetFor(NVSDK_NGX_PerfQuality_Value q, unsigned requested) {
+    if (q == NVSDK_NGX_PerfQuality_Value_DLAA || q == NVSDK_NGX_PerfQuality_Value_UltraQuality)
+        return dlaaSafe(requested);
+    return requested;
+}
+
+const char* modelPolicyReason(unsigned requested, unsigned applied) {
+    return requested == applied ? "application_choice" : "local_measured_cost_safeguard";
 }
 
 const char* qualityName(NVSDK_NGX_PerfQuality_Value q) {
@@ -308,6 +320,39 @@ void logDlssModesOnce(uint32_t outW, uint32_t outH, const DlssModeRange modes[kD
     Log::get().note("dlss: modes for %ux%u: %s", outW, outH, line);
 }
 
+// Actual NGX return codes under the app's creation hint. The public API used
+// here does not establish the runtime's internal selected model.
+void logModelEvaluation(EyeFeature& f, int eye, NVSDK_NGX_Result result) {
+    const uint64_t now = GetTickCount64();
+    const bool first = (NVSDK_NGX_FAILED(result) ? f.failedEvaluations : f.successfulEvaluations) == 1;
+    if (!first && f.lastModelAuditMs && now - f.lastModelAuditMs < 5000) return;
+    f.lastModelAuditMs = now;
+    {
+        DlaaModelSelection selected;
+        selected.inputW=f.w;selected.inputH=f.h;selected.outputW=f.outW;selected.outputH=f.outH;
+        selected.recordedAtMs=now;selected.presetGeneration=f.presetGen;
+        selected.successfulEvaluations=f.successfulEvaluations;selected.failedEvaluations=f.failedEvaluations;
+        selected.evaluationSucceeded=!NVSDK_NGX_FAILED(result);
+        std::snprintf(selected.mode,sizeof(selected.mode),"%s",qualityName(static_cast<NVSDK_NGX_PerfQuality_Value>(f.qualityValue)));
+        std::snprintf(selected.requestedModel,sizeof(selected.requestedModel),"%s",presetName(f.requestedModel));
+        std::snprintf(selected.appliedHint,sizeof(selected.appliedHint),"%s",presetName(f.appliedHint));
+        std::lock_guard<std::mutex> lock(g_modelSelectionMutex);
+        g_modelSelection[eye]=selected;
+    }
+    Log::get().note(
+        "dlss model audit: event=evaluate slot=%d in=%ux%u out=%ux%u mode=%s "
+        "requested_model=%s applied_hint=%s policy_reason=%s preset_generation=%llu "
+        "ngx_create_result=0x%08X ngx_eval_result=0x%08X successful_evaluations=%llu "
+        "failed_evaluations=%llu driver_internal_model_verified=false; cumulative per feature",
+        eye, f.w, f.h, f.outW, f.outH,
+        qualityName(static_cast<NVSDK_NGX_PerfQuality_Value>(f.qualityValue)),
+        presetName(f.requestedModel), presetName(f.appliedHint),
+        modelPolicyReason(f.requestedModel, f.appliedHint),
+        static_cast<unsigned long long>(f.presetGen), f.createResult, static_cast<unsigned>(result),
+        static_cast<unsigned long long>(f.successfulEvaluations),
+        static_cast<unsigned long long>(f.failedEvaluations));
+}
+
 // The full-frame feature for one upscaler slot (an eye's, or the VR world route's third): made when it is missing or its key
 // (the sizes, the preset generation, the route's bit) has moved, left alone otherwise. Each slot keeps its own key, its own
 // handle and so its own history; the preset generation is shared, so dlaaSetPreset remakes every slot's feature. The
@@ -429,7 +474,9 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         // grid); reversed-Z depth.
         cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));
         cp.InEnableOutputSubrects = false;
-        applyPresetHints();
+        const unsigned requestedModel = g_preset;
+        const unsigned appliedHint = presetFor(quality, requestedModel);
+        applyPresetHints(requestedModel);
         // An event with a duration for the monitor's drop attribution: the
         // feature's creation is the mod's own heaviest one-off on the render
         // thread, and it recurs at every size change.
@@ -446,6 +493,13 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         create.close();   // after the duration above is taken: the crumb's own write is not part of the creation's time
         perfMonitorNoteEvent(kEvNgx, ms);
         if (createMs) *createMs = ms;
+        Log::get().note(
+            "dlss model audit: event=create slot=%d in=%ux%u out=%ux%u mode=%s "
+            "requested_model=%s applied_hint=%s policy_reason=%s ngx_create_result=0x%08X "
+            "handle_present=%u driver_internal_model_verified=false",
+            eye, w, h, outW, outH, qualityName(quality), presetName(requestedModel),
+            presetName(appliedHint), modelPolicyReason(requestedModel, appliedHint),
+            static_cast<unsigned>(cr), f.handle ? 1u : 0u);
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
             f.handle = nullptr;
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
@@ -461,6 +515,9 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         f.outH = outH;
         f.presetGen = g_presetGen;
         f.hdr = hdr;
+        f.requestedModel = requestedModel; f.appliedHint = appliedHint;
+        f.qualityValue = static_cast<int>(quality); f.createResult = static_cast<unsigned>(cr);
+        f.successfulEvaluations = f.failedEvaluations = f.lastModelAuditMs = 0;
         if (hdr)
             Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input, exposure %s; the "
                             "history starts here.", upscalerSlotLabel(eye),
@@ -479,7 +536,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                 "dlaa: the feature is created for %s at %ux%u, DLAA, preset %s (the "
                 "runtime's optimal render size for this output %ux%u, which DLAA ignores); "
                 "the history starts here (made in %.0f ms).",
-                upscalerSlotLabel(eye), w, h, presetName(presetFor(quality)), optW, optH, ms);
+                upscalerSlotLabel(eye), w, h, presetName(f.appliedHint), optW, optH, ms);
         } else {
             Log::get().note(
                 "dlss: the feature is created for %s, %ux%u in and %ux%u out (%.0f%% "
@@ -487,7 +544,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                 "range the runtime names as %ux%u..%ux%u; the history starts here (made in %.0f ms).",
                 upscalerSlotLabel(eye), w, h, outW, outH,
                 100.0 * static_cast<double>(w) / static_cast<double>(outW),
-                qualityName(quality), presetName(presetFor(quality)), optW, optH, minW, minH, maxW, maxH, ms);
+                qualityName(quality), presetName(f.appliedHint), optW, optH, minW, minH, maxW, maxH, ms);
         }
     }
     return true;
@@ -753,6 +810,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     evaluate.close();
     if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
     if (NVSDK_NGX_FAILED(er)) {
+        ++f.failedEvaluations;
+        logModelEvaluation(f, eye, er);
         ID3D11Device* failedDevice = nullptr;
         ctx->GetDevice(&failedDevice);
         if (failedDevice) {
@@ -769,6 +828,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         if (reason) *reason = g_reason;
         return false;
     }
+    ++f.successfulEvaluations;
+    logModelEvaluation(f, eye, er);
     ++g_evaluations;
     if (reset) ++g_resets;
     return true;
@@ -812,6 +873,15 @@ bool dlaaTotals(uint32_t* evaluations, double* avgMs, double* maxMs,
 // for callers that only want one number.
 bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
     return fullTotals(eye, evaluations, avgMs, maxMs);
+}
+
+bool dlaaModelSelection(int eye, DlaaModelSelection* output) {
+    if(!output)return false;
+    *output={};
+    if(!upscalerSlotHasFullFrame(eye))return false;
+    std::lock_guard<std::mutex> lock(g_modelSelectionMutex);
+    *output=g_modelSelection[eye];
+    return output->recordedAtMs!=0;
 }
 
 void dlaaShutdown() {

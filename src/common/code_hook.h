@@ -83,6 +83,14 @@ public:
                  const char* who, Prepare prepare = nullptr,
                  void* prepareContext = nullptr);
 
+    // Explicit opt-in overload: a caller may place a separate absolute-jump
+    // relay next to the original trampoline for a distant replacement. Keep
+    // the existing six-argument API/symbol and its direct-range refusal.
+    // Both overloads retain the same aligned atomic patch and entry guards.
+    bool install(void* target, void* replacement, void** origOut,
+                 const char* who, Prepare prepare, void* prepareContext,
+                 bool allowFarReplacement);
+
     // Put the original bytes back, but ONLY if the patch is still ours: another
     // tool that hooked the same function after us owns those bytes now, and
     // restoring them would cut it out exactly the way this class exists to
@@ -107,6 +115,7 @@ private:
 
     void*    m_target = nullptr;
     void*    m_replacement = nullptr;
+    void*    m_entryDestination = nullptr;
     uint8_t* m_trampoline = nullptr;
     uint8_t  m_original[16] = {};
     size_t   m_stolen = 0;

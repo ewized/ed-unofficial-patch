@@ -35,6 +35,7 @@
 #include "aa_compare.h"     // aaCompareNoteMenuEdit(): an F8 pick of the AA mode ends an AA comparison
 #include "cockpit_glass_core.h"   // parseLook, dirtRowDim: the Legacy glass dirt row dims unless visual.cockpit_glass is legacy
 #include "device_hook.h"
+#include "frame_generation_coordinator.h"
 #include "elite_binds.h"
 #include "flat_elite_settings.h"
 #include "flat_runtime.h"
@@ -44,12 +45,17 @@
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
 #include "menu_write.h"
+#include "beyond_vrs_control.h"
+#include "beyond_controls_policy.h"
 #include "menu_aim_prompt.h"    // F177: the aiming choice at start: the page's words, the trigger, the writes
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_pad.h"
 #include "menu_panel.h"
 #include "native_menu.h"
+#include "native_input_scale.h"
+#include "native_vrs.h"
+#include "dlaa.h"
 #include "native_render_labels.h"
 #include "vr_runtime.h"
 #include "menu_schema.h"
@@ -117,11 +123,12 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice };
+enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice, BeyondVrs };
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
     int         def = -1;        // index into kMenuRows for Setting
+    int         beyondControl = -1;
     int         action = -1;     // index into g_actions for Action
     int         pluginSetting = -1; // index into g_pluginRows.rows() for PluginSetting
     uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
@@ -1018,6 +1025,8 @@ constexpr const char* kNoRuntimeToken = "not written: the runtime's name yields 
 // never as text: a hand edit to another headset's entry, or a canonicalising
 // rewrite of the list, changes nothing here and must badge nothing.
 bool rowPending(const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
+    if(!strcmp(d.section,"fix")&&!strcmp(d.key,"native_input_scale"))
+        return std::fabs(std::atof(value.c_str())-nativeInputScaleLatched())>.00001;
     if (isOpenxrRenderScaleRow(d)) return renderScaleRowPending(value);
     return value != snapshot;
 }
@@ -1032,13 +1041,30 @@ struct ChoiceItem {
 
 const char* nvidiaLabel() {
     if (runtimeFlatProfile()) return flatRuntimeNativeScale() ? "DLAA" : "DLSS";
+    DlaaModelSelection left{},right{};
+    const uint64_t now=GetTickCount64();
+    const bool observed=dlaaModelSelection(0,&left)&&dlaaModelSelection(1,&right)&&
+        left.evaluationSucceeded&&right.evaluationSucceeded&&left.recordedAtMs&&right.recordedAtMs&&
+        now-left.recordedAtMs<=7000&&now-right.recordedAtMs<=7000&&
+        left.inputW&&left.inputH&&right.inputW&&right.inputH&&
+        left.outputW&&left.outputH&&right.outputW&&right.outputH;
+    const bool upscale=left.inputW<left.outputW||left.inputH<left.outputH||
+        right.inputW<right.outputW||right.inputH<right.outputH;
     float quality = 0.0f;
     deviceHookHmdQuality(&quality);
-    return temporalNvidiaLabel(quality);
+    // HMD=1 alone no longer means DLAA: the boot-latched native input scale
+    // independently reduces the recommendation. Unknown/stale NGX state is
+    // explicitly an estimate, never an assertion about the evaluated model.
+    return beyond_controls::nvidiaLabel(observed,upscale,double(quality)*nativeInputScaleActive());
 }
 
+bool isNativeInputScaleRow(const MenuRowDef& d);
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
+    if(isNativeInputScaleRow(d)) {
+        for(const auto& preset:beyond_controls::inputPresets)out.push_back({preset.value,preset.label});
+        return out;
+    }
     std::string packed(d.choices);
     size_t pos = 0;
     while (pos <= packed.size()) {
@@ -1105,7 +1131,12 @@ std::string switchWord(const MenuRowDef& d, const std::string& value) {
     return current;
 }
 
+bool isNativeInputScaleRow(const MenuRowDef& d);
 std::string displayValue(const MenuRowDef& d, const std::string& v) {
+    if(isNativeInputScaleRow(d)) {
+        const int index=beyond_controls::inputPreset(std::atof(v.c_str()));
+        return index<0 ? "Custom ("+v+")" : beyond_controls::inputPresets[index].label;
+    }
     if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && _stricmp(v.c_str(), "dlaa") == 0) {
         return "DLAA"; // explicit legacy 1:1 mode, even below HMD Quality 1
     }
@@ -1436,6 +1467,39 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
 // I/O, serialised, coalescing repeated changes to one key while a key is
 // held; and the frame thread drains the results, asking for the reload
 // that applies each landed write.
+struct BeyondVrsCompletion { uint32_t generation=0; beyond_vrs::Snapshot snapshot; bool poll=false; };
+beyond_vrs::Snapshot g_beyondVrs;
+uint32_t g_beyondVrsGeneration=0;
+bool g_beyondVrsPending=false;
+uint64_t g_beyondVrsPollMs=0;
+char g_beyondVrsStatus[160]="VRS file: waiting for a read; runtime state unverified";
+char g_nativeVrsStatus[5][160]={"Native VRS: waiting for status"};
+char g_nativeFgStatus[160]="Frame generation: waiting for status";
+
+const char* nativeVrsFailureLabel(NativeVrsFailure failure) {
+    switch(failure) {
+    case NativeVrsFailure::None:return "none";
+    case NativeVrsFailure::Disabled:return "disabled";
+    case NativeVrsFailure::InvalidRadii:return "invalid radii";
+    case NativeVrsFailure::MagicPresent:return "Magic coexistence refused";
+    case NativeVrsFailure::ContextRefused:return "context refused";
+    case NativeVrsFailure::ThreadRefused:return "thread refused";
+    case NativeVrsFailure::FrameRefused:return "frame refused";
+    case NativeVrsFailure::NvapiModule:return "driver module unavailable";
+    case NativeVrsFailure::NvapiPath:return "driver path refused";
+    case NativeVrsFailure::NvapiQuery:return "driver query unavailable";
+    case NativeVrsFailure::NvapiOwner:return "driver owner refused";
+    case NativeVrsFailure::NvapiPin:return "driver pin failed";
+    case NativeVrsFailure::NvapiInitialize:return "driver initialization failed";
+    case NativeVrsFailure::DriverCall:return "driver call failed";
+    case NativeVrsFailure::TargetRefused:return "target refused";
+    case NativeVrsFailure::MapCreate:return "rate map creation failed";
+    case NativeVrsFailure::GazeInvalid:return "provider pair invalid";
+    case NativeVrsFailure::GazeStale:return "provider receipt stale";
+    }
+    return "unknown failure";
+}
+
 struct Writer {
     std::mutex              m;
     std::condition_variable cv;
@@ -1444,6 +1508,7 @@ struct Writer {
     bool                    quit = false;
     std::vector<WriteJob>   queue;
     std::vector<WriteDone>  done;
+    std::vector<BeyondVrsCompletion> vrsDone;
 };
 // Like the panel worker, this may still be joinable when Windows terminates
 // the other threads before DLL detach. Do not register a thread destructor
@@ -1473,6 +1538,16 @@ void writerMain() {
             if (!later) last.push_back(jobs[i]);
         }
         for (const WriteJob& job : last) {
+            if(job.destination==WriteDestination::BeyondVrs||job.destination==WriteDestination::BeyondVrsPoll) {
+                beyond_vrs::Snapshot snap; std::string why;
+                const bool poll=job.destination==WriteDestination::BeyondVrsPoll;
+                const bool ok=poll ? (snap=beyond_vrs::read(), true)
+                    : beyond_vrs::writeField(unsigned(job.def),unsigned(std::strtoul(job.value.c_str(),nullptr,10)),snap,why);
+                std::lock_guard<std::mutex> lock(g_writer.m);
+                g_writer.vrsDone.push_back({job.gen,snap,poll});
+                g_writer.done.push_back({job,ok,why});
+                continue;
+            }
             WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
                 bool ok = false;
                 guarded("menu/write", [&] { ok = write.pairs.empty() ? menuIniWrite(write.dotted, write.value, err) : menuIniWritePairs(write.pairs, err); });
@@ -1497,6 +1572,41 @@ void enqueueWrite(const WriteJob& job) {
 
 // HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and the steps of a
 // quarter second are written together, and once more on release: about four config refreshes a second on the frame thread instead of about twelve. The writes below go to the same queue as every other change.
+void tickBeyondControls(uint64_t now) {
+    const auto& s=g_s;
+    if(!s.open||s.pages.empty()||strcmp(s.pages[s.page].name,"Beyond"))return;
+    const bool automatic=nativeFgAutoRequested();
+    const auto fg=nativeFgAutoStatus();
+    if(automatic)snprintf(g_nativeFgStatus,sizeof(g_nativeFgStatus),
+        "Auto: %s; CPU %.2f ms, render GPU %.2f ms; %s",
+        fg.multiplier==2?"2x":"native",fg.cpuMs,fg.gpuMs,fg_auto::reasonName(fg.reason));
+    else snprintf(g_nativeFgStatus,sizeof(g_nativeFgStatus),"Frame generation follows the selected fixed mode");
+    if(!g_beyondVrsPending&&now-g_beyondVrsPollMs>=1000) {
+        g_beyondVrsPollMs=now;
+        WriteJob job;job.destination=WriteDestination::BeyondVrsPoll;job.dotted="beyond_vrs.poll";job.gen=g_beyondVrsGeneration;enqueueWrite(job);
+    }
+    snprintf(g_beyondVrsStatus,sizeof(g_beyondVrsStatus),"VRS file %s; Magic %s, shim %s; active unverified",g_beyondVrs.valid?"valid":"unavailable/invalid",g_beyondVrs.magicLoaded?"loaded":"not detected",g_beyondVrs.shimLoaded?"loaded":"not detected");
+    const auto native=nativeVrsStatus();
+    snprintf(g_nativeVrsStatus[4],sizeof(g_nativeVrsStatus[4]),
+        "VRS full-rate core %.0f%% wide; transition %.0f%% wide",native.sharpRadius*200.f,native.transitionRadius*200.f);
+    const bool requested=Config::get().getBool("experimental.eye_tracked_foveation",false);
+    snprintf(g_nativeVrsStatus[0],sizeof(g_nativeVrsStatus[0]),
+        "Native request %s; configured %s; driver %s; %s",requested?"on":"off",
+        native.configured?"on":"off",native.driverReady?"ready":"not ready",native.refused?"refused":"not refused");
+    snprintf(g_nativeVrsStatus[1],sizeof(g_nativeVrsStatus[1]),
+        "Driver state %s; acknowledged: full %s, coarse %s; Magic %s",
+        native.vendorStateKnown?"known":"unknown",native.fullRateAcknowledged?"yes":"no",
+        native.coarseAcknowledged?"yes":"no",native.magicAbsent?"absent":"absence unconfirmed");
+    snprintf(g_nativeVrsStatus[2],sizeof(g_nativeVrsStatus[2]),
+        "Native: %s; driver code %d; errors %llu",nativeVrsFailureLabel(native.failure),
+        native.lastDriverStatus,static_cast<unsigned long long>(native.driverErrors));
+    snprintf(g_nativeVrsStatus[3],sizeof(g_nativeVrsStatus[3]),
+        "Provider polls %llu; valid/invalid %llu/%llu; stale %llu; world accepted %llu/%llu",
+        static_cast<unsigned long long>(native.providerPolls),static_cast<unsigned long long>(native.validPairs),
+        static_cast<unsigned long long>(native.invalidPairs),static_cast<unsigned long long>(native.staleRefusals),
+        static_cast<unsigned long long>(native.worldAccepted),static_cast<unsigned long long>(native.worldCalls));
+}
+
 void writeHeldEdit(void*, const WriteJob& job, EditFlush) { enqueueWrite(job); }
 // The burst reads as one change in the log and on the Status page: from what the file held before its first step to the value of its last.
 void mergeHeldEdit(WriteJob& pending, const WriteJob& latest) {
@@ -1756,6 +1866,34 @@ Page makeAimPromptPage() {
     return p;
 }
 
+bool isNativeInputScaleRow(const MenuRowDef& d) {
+    return !strcmp(d.section,"fix")&&!strcmp(d.key,"native_input_scale");
+}
+void addBeyondSetting(Page& p,const char* section,const char* key) {
+    for(int i=0;i<kRowDefCount;++i)if(!strcmp(kMenuRows[i].section,section)&&!strcmp(kMenuRows[i].key,key)) {
+        Entry e;e.kind=EntryKind::Setting;e.def=i;p.entries.push_back(e);return;
+    }
+}
+void addBeyondPage(State& s) {
+    Page p;p.name="Beyond";
+    addBeyondSetting(p,"fix","temporal_aa");
+    addBeyondSetting(p,"fix","temporal_aa_model");
+    addBeyondSetting(p,"fix","native_input_scale");
+    addBeyondSetting(p,"fix","render_sharpness");
+    addBeyondSetting(p,"advanced","texture_lod_bias");
+    addBeyondSetting(p,"visual","desktop_window");
+    addBeyondSetting(p,"fix","frame_generation");
+    {Entry h;h.kind=EntryKind::Heading;h.note=true;h.text=g_nativeFgStatus;p.entries.push_back(h);}
+    addBeyondSetting(p,"experimental","eye_tracked_foveation");
+    addBeyondSetting(p,"experimental","foveation_focus");
+    for(auto& status:g_nativeVrsStatus) {
+        Entry h;h.kind=EntryKind::Heading;h.note=true;h.text=status;p.entries.push_back(h);
+    }
+    Entry h;h.kind=EntryKind::Heading;h.note=true;h.text=g_beyondVrsStatus;p.entries.push_back(h);
+    for(int i=0;i<3;++i){Entry e;e.kind=EntryKind::BeyondVrs;e.beyondControl=i;p.entries.push_back(e);}
+    firstSelectable(p);s.pages.push_back(p);
+}
+
 void buildPages() {
     State& s = g_s;
     const int keepPage = s.page;
@@ -1837,6 +1975,7 @@ void buildPages() {
         firstSelectable(p);
         s.pages.push_back(p);
     }
+    addBeyondPage(s);
     {
         Page p;
         p.name = "Fixes";
@@ -2470,6 +2609,17 @@ void buildContent(MenuContent& c) {
                 continue;
             }
             const bool hi = (i == p.highlight);
+            if(e.kind==EntryKind::BeyondVrs) {
+                const int field=e.beyondControl;
+                const char* labels[]={"World VRS (requested)","Use eye tracking","Invert gaze Y"};
+                strncpy(l.left,labels[field],sizeof(l.left)-1);
+                const unsigned value=beyond_vrs::field(g_beyondVrs.value,unsigned(field));
+                const char* word=field==0?beyond_controls::vrsMode(value):field==1?(value?"Off":"On"):(value?"On":"Off");
+                snprintf(l.right,sizeof(l.right),"%s%s",word,g_beyondVrsPending?" (saving)":"");
+                l.style=hi?kMenuRowHi:kMenuRow;
+                if(hi)snprintf(c.hint,sizeof(c.hint),"Saved file request only; Magic reads at most once/second when queried. Runtime application and gaze provider are unverified. No provider selector.");
+                continue;
+            }
             if (e.kind == EntryKind::AimChoice) {
                 strncpy(l.left, aimprompt::kRows[e.choice], sizeof(l.left) - 1);
                 l.style = hi ? kMenuRowHi : kMenuRow;
@@ -2572,6 +2722,7 @@ void buildContent(MenuContent& c) {
                 const std::string mode = runtimeFlatProfile() ? Config::get().requestedTemporalMode()
                                                               : Config::get().getString("fix.temporal_aa", "off");
                 snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
+                if(!strcmp(p.name,"Beyond"))snprintf(l.left,sizeof(l.left),"NVIDIA model (requested)");
             }
             if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
                 strcmp(d.key, "temporal_aa") == 0) {
@@ -2669,6 +2820,10 @@ void buildContent(MenuContent& c) {
                              "completed once.");
                 }
             }
+            if(hi&&(isNativeInputScaleRow(d)||dlssRow))
+                snprintf(c.hint,sizeof(c.hint),"%s",nativeInputScaleMenuStatus().c_str());
+            if(hi&&!strcmp(d.section,"experimental")&&!strcmp(d.key,"eye_tracked_foveation"))
+                snprintf(c.hint,sizeof(c.hint),"Requested native VRS; status below reports driver acknowledgements only. Magic coexistence is refused. Provider validity does not verify physical gaze; GPU application and performance are unverified.");
             if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
@@ -2684,14 +2839,15 @@ void buildContent(MenuContent& c) {
                 // to change a value needs -- its range, its shipped value,
                 // when it applies, and which key does it.
                 std::string body;
+                if(isNativeInputScaleRow(d)||dlssRow)body=nativeInputScaleMenuStatus()+"\n";
                 if (openxrScaleRow) {
                     body += openxrResolutionFacts();
                 } else if (isVscreenResolutionRow(d) && d.lo[0] && d.hi[0]) {
                     body += std::string("\"auto\", or a width in pixels from ") + d.lo +
                             " to " + d.hi + ". The height always follows it at 16:9.  ";
-                } else if (d.kind == MenuKind::Number && d.lo[0] && d.hi[0]) {
+                } else if (d.kind == MenuKind::Number && !isNativeInputScaleRow(d) && d.lo[0] && d.hi[0]) {
                     body += std::string("Range ") + d.lo + " to " + d.hi + (d.unit[0] ? std::string(" ") + d.unit : std::string()) + ".  ";
-                } else if (d.kind == MenuKind::Choice) {
+                } else if (d.kind == MenuKind::Choice || isNativeInputScaleRow(d)) {
                     std::string list;
                     for (const ChoiceItem& ch : choicesOf(d)) {
                         if (!list.empty()) list += ", ";
@@ -2750,7 +2906,7 @@ void buildContent(MenuContent& c) {
                     // The keys the player already uses in the ship, named
                     // only while they act here.
                     char act[64];
-                    menuComposeTipAction(navName, !(d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice),
+                    menuComposeTipAction(navName, !(d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice || isNativeInputScaleRow(d)),
                                          act, sizeof(act));
                     body += std::string("\n") + act;
                 } else if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
@@ -3100,12 +3256,20 @@ void aimPromptWriteDone(const WriteDone& w);   // F177, below with the keys
 void drainWrites() {
     State& s = g_s;
     std::vector<WriteDone> done;
+    std::vector<BeyondVrsCompletion> vrsDone;
     {
         std::lock_guard<std::mutex> lock(g_writer.m);
         if (g_writer.done.empty()) return;
         done.swap(g_writer.done);
+        vrsDone.swap(g_writer.vrsDone);
     }
+    for(const auto& v:vrsDone)if(v.generation==g_beyondVrsGeneration){g_beyondVrs=v.snapshot;if(!v.poll)g_beyondVrsPending=false;g_s.contentDirty=true;}
     for (const WriteDone& w : done) {
+        if(w.job.destination==WriteDestination::BeyondVrs||w.job.destination==WriteDestination::BeyondVrsPoll){
+            if(w.job.gen!=g_beyondVrsGeneration)continue;
+            if(!w.ok)g_s.lastWrite=w.err;else if(w.job.destination==WriteDestination::BeyondVrs)g_s.lastWrite="VRS request saved; active state unverified";
+            g_s.contentDirty=true;continue;
+        }
         if (w.job.destination == WriteDestination::Pairs) {   // F177: the aiming choice, no row owns it
             aimPromptWriteDone(w);
             continue;
@@ -3120,8 +3284,27 @@ void drainWrites() {
     }
 }
 
+void stepBeyondVrs(int field,int direction) {
+    if(field<0||field>2)return;
+    if(!g_beyondVrs.valid&&g_beyondVrs.error!=ERROR_FILE_NOT_FOUND&&g_beyondVrs.error!=ERROR_PATH_NOT_FOUND) {
+        g_s.lastWrite="VRS control file invalid/unavailable; no write";g_s.contentDirty=true;return;
+    }
+    const unsigned maximum=field==0?5u:2u;
+    const unsigned before=beyond_vrs::field(g_beyondVrs.value,unsigned(field));
+    const unsigned value=(before+(direction<0?maximum-1:1))%maximum;
+    beyond_vrs::setField(g_beyondVrs.value,unsigned(field),value);
+    g_beyondVrsPending=true;
+    WriteJob job;job.destination=WriteDestination::BeyondVrs;job.def=field;
+    job.dotted="beyond_vrs."+std::to_string(field);job.value=std::to_string(value);job.gen=++g_beyondVrsGeneration;
+    enqueueWrite(job);g_s.lastWrite="saving VRS request; active state unverified";g_s.contentDirty=true;
+}
+
 void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
+    if(isNativeInputScaleRow(d)) {
+        const int current=beyond_controls::inputPreset(std::atof(g_rows[defIndex].value.c_str()));
+        applyChange(defIndex,beyond_controls::inputPresets[beyond_controls::stepPreset(current,dir)].value);return;
+    }
     const std::string& cur = g_rows[defIndex].value;
     if (isDlssPresetRow(d) && dlssPresetDisabled()) {
         g_s.lastWrite = "DLSS preset is inactive: select DLSS or DLAA above first.";
@@ -3276,13 +3459,14 @@ void activateEntry() {
         s.contentDirty = true;
         return;
     }
+    if(e.kind==EntryKind::BeyondVrs){stepBeyondVrs(e.beyondControl,+1);return;}
     if (e.kind == EntryKind::PluginSetting) {
         stepPluginSetting(e.pluginSetting, +1);
         return;
     }
     if (e.kind == EntryKind::Setting) {
         const MenuRowDef& d = kMenuRows[e.def];
-        if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
+        if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice || isNativeInputScaleRow(d)) {
             stepRow(e.def, +1, 1);
         } else if (d.kind == MenuKind::Hotkey) {
             // A hotkey is never typed: the next key, pad button or HOTAS button is the value.
@@ -3984,6 +4168,8 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                 const auto& entry = p.entries[p.highlight];
                 if (entry.kind == EntryKind::Setting) {
                     stepRow(entry.def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+                } else if(entry.kind==EntryKind::BeyondVrs) {
+                    stepBeyondVrs(entry.beyondControl,nav==kNavLeft?-1:+1);
                 } else if (entry.kind == EntryKind::PluginSetting) {
                     stepPluginSetting(entry.pluginSetting, nav == kNavLeft ? -1 : +1);
                 }
@@ -5156,6 +5342,7 @@ void menuTick(ID3D11Device* dev) {
         tickHeldEdit(now);
         // Writes the worker finished since last frame.
         drainWrites();
+        tickBeyondControls(now);
         starGlowBloomTick();
 
         // The Hotkeys page's upkeep. A hotkey rebound anywhere (this page, the ini, a rewrite of
@@ -5495,7 +5682,7 @@ void menuTick(ID3D11Device* dev) {
         }
         if (s.open || s.alpha > 0.0f) {
             Page& p = s.pages[s.page];
-            if (p.status && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
+            if ((p.status || !strcmp(p.name,"Beyond")) && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
                 s.statusRefreshMs = stampMs();
                 s.contentDirty = true;
             }

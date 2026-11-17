@@ -552,7 +552,7 @@ void panelTable(const std::string& root, const std::string& gen) {
         const std::string stepRefused = mutated("    if (isOpenxrRenderScaleRow(d)) {\n        // A width for the worn headset", "    if (isStarGlowRow(d)) return;\n    if (isOpenxrRenderScaleRow(d)) {\n        // A width for the worn headset");
         const std::string everyFrame = mutated("    if (s.starGlowBloomGenSeen && generation == s.starGlowBloomGen) return;\n", "");
         const std::string noOpenRead = mutated("starGlowBloomMenuOpened();    // ... and so is the Bloom option", "// ... and so is the Bloom option");
-        const std::string noVrTick = mutated("        drainWrites();\n        starGlowBloomTick();\n", "        drainWrites();\n");
+        const std::string noVrTick = mutated("        drainWrites();\n        tickBeyondControls(now);\n        starGlowBloomTick();\n", "        drainWrites();\n        tickBeyondControls(now);\n");
         const std::string noVrConfigure = mutated("        s.configured = true;\n        starGlowBloomConfigure();\n", "        s.configured = true;\n");
         check(!noteEveryTab.empty() && !sourceSaysStarGlowBloom(noteEveryTab), "control: a note on every tab is caught");
         check(!noteInVr.empty() && !sourceSaysStarGlowBloom(noteInVr), "control: a note asked of a profile other than the running one is caught");
