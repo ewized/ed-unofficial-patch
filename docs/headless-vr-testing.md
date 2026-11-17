@@ -86,7 +86,7 @@ The optional `xr_sim_idle` tool requires a matching driver that advertises
 `idle_support.version = natural-idle-v1` and a transport catalog containing the
 tool. After acquiring the simulation lease with `xr_sim_start`, start with
 `{"action":"start","duration_ms":60000,"seed":17}`. Renew with
-`{"action":"renew"}` at least every five seconds; two-second renewals leave
+`{"action":"renew"}` before five seconds elapse; two-second renewals leave
 margin. Stop with `{"action":"stop"}`, then release the simulation lease.
 Start and renew require the verified game foreground; owned cancellation remains
 available after foreground or dashboard loss. Updating a catalog sidecar alone
@@ -99,6 +99,26 @@ lease stops the animation. Competing pose/eye/replay writes refuse; explicit
 safety cancellation takes priority. Eye origins and IPD stay fixed, and gaze
 rotations compensate for head rotation. This synthetic directional model does
 not model finite-distance vergence or establish physical calibration.
+
+Live `natural-idle-v1` checks passed 40-second and 60-second clips with a fresh
+native driver, keeping the existing 4000-square eye outputs. During the full
+clip, 29 independent runtime head observations spanned 42.3 mm position and
+15.5° rotation. Driver samples showed concurrent head/gaze changes, fixations
+and transitions; runtime optical origins stayed at 64 mm IPD. Both clips
+finished automatically with confirmed owned cleanup and no unknown commands.
+Two-second observations do not resolve every saccade or prove frame-by-frame
+smoothness; the native sampler and reference tests cover the continuous path.
+
+The full clip's 55.392-second native VRS snapshot interval records 900 valid
+pairs, zero invalid pairs, 880 updates per eye and 26,080 accepted world draws,
+with no driver errors. The separate 59.467-second FG lifecycle interval records
+966 source and generated pairs with zero busy/refused/repeated/empty deltas.
+These are sampled application counters, not independently observed gaze
+coordinates or physical display cadence. The graphics monitor still records
+57.5–65.5 ms long Present intervals. No complete 30-second benchmark window lies
+wholly inside the clip after clock uncertainty, so it has no qualified native
+percentile result. See [rendering validation](rendering-performance-optimization-2026-11-17.md)
+for the separate baseline/candidate comparison and remaining 90 Hz gap.
 
 Provisioning, interactive-session startup, game launch, normal runtime shutdown,
 and receipt restoration belong to an external supervisor. Keep host names,
