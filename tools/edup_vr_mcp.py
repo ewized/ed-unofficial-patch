@@ -52,6 +52,14 @@ def integer(value, low, high):
     return value
 
 
+def smooth_duration(value):
+    """Validate an optional existing driver transition; omission keeps immediate delivery."""
+    if 'smooth_seconds' in value:
+        duration = value['smooth_seconds']
+        require(type(duration) in (int,float) and math.isfinite(duration) and 0 <= duration <= 60,
+                'smooth_seconds must be finite seconds in 0..60')
+
+
 def pose(value, extra=()):
     fields(value, ('position','orientation','tracked',*extra))
     if 'tracked' in value:
@@ -687,13 +695,15 @@ class Host:
             self.runtime()
             return self.helper({'op':'capture','eye':eye,'max_edge':max_edge})  # Forward actual PNGs for native MCP image lifting.
         require(self.activated,'Start this host simulation before changing poses/eyes')
+        if name in ('xr_sim_set_pose','xr_sim_set_eyes'):
+            smooth_duration(args)
         self.runtime(True)
         if name == 'xr_sim_set_pose':
-            pose(args,('device',))
+            pose(args,('device','smooth_seconds'))
             require('device' in args,'device required')
             return self.helper.driver('update',**args)
         if name == 'xr_sim_set_eyes':
-            fields(args,('active','left','right'),('active',))
+            fields(args,('active','left','right','smooth_seconds'),('active',))
             require(type(args['active']) is bool,'active must be boolean')
             for eye in ('left','right'):
                 if eye in args: pose(args[eye])
@@ -1037,6 +1047,31 @@ class Tests(unittest.TestCase):
         helper.driver.side_effect = ValueError('actual driver rejection')
         with self.assertRaisesRegex(ValueError,'actual driver rejection'):
             host.dispatch('xr_sim_set_pose',{'device':'head','position':[0,1.6,0]})
+        helper.driver.side_effect = None
+        host.stop_driver()
+        self.assertFalse(host.activated)
+        self.assertEqual([c.args[0] for c in helper.driver.call_args_list][-2:],['cancel','stop'])
+
+    def test_existing_driver_smooth_duration_bounds_and_cleanup(self):
+        host,_,helper = self.fixture()
+        host.dispatch('xr_sim_start',{})
+        for name,arguments,operation in (
+                ('xr_sim_set_pose',{'device':'head','orientation':[0,0,0,1]},'update'),
+                ('xr_sim_set_eyes',{'active':True,'left':{'tracked':True}},'eyes')):
+            for seconds in (0,.25,60):
+                with self.subTest(tool=name,seconds=seconds):
+                    host.dispatch(name,{**arguments,'smooth_seconds':seconds})
+                    helper.driver.assert_called_with(operation,**arguments,smooth_seconds=seconds)
+            for seconds in (-.001,60.001,float('nan'),float('inf'),-float('inf'),True,'1',None):
+                with self.subTest(tool=name,rejected=seconds):
+                    helper.driver.reset_mock()
+                    with self.assertRaisesRegex(ValueError,'smooth_seconds'):
+                        host.dispatch(name,{**arguments,'smooth_seconds':seconds})
+                    helper.driver.assert_not_called()
+        # Driver conflicts remain visible; stopping still cancels that host's motion.
+        helper.driver.side_effect = ValueError('current smooth motion')
+        with self.assertRaisesRegex(ValueError,'current smooth motion'):
+            host.dispatch('xr_sim_set_pose',{'device':'head','smooth_seconds':.5})
         helper.driver.side_effect = None
         host.stop_driver()
         self.assertFalse(host.activated)
