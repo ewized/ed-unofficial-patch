@@ -146,26 +146,31 @@ struct ViewFailure {
     using Create = HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*, ID3D11Resource*, const D3D11_RENDER_TARGET_VIEW_DESC*, ID3D11RenderTargetView**);
     inline static ViewFailure* active = nullptr;
     ID3D11Device* device;
-    void** original;
-    std::array<void*, 43> table{};
+    void** slot;
+    Create original;
     bool fail = true;
     static HRESULT STDMETHODCALLTYPE create(ID3D11Device* d, ID3D11Resource* resource,
         const D3D11_RENDER_TARGET_VIEW_DESC* desc, ID3D11RenderTargetView** output) {
-        if (active->fail) { active->fail = false; if (output) *output = nullptr; return E_OUTOFMEMORY; }
-        return reinterpret_cast<Create>(active->original[9])(d, resource, desc, output);
+        if (d == active->device && active->fail) {
+            active->fail = false; if (output) *output = nullptr; return E_OUTOFMEMORY;
+        }
+        return active->original(d, resource, desc, output);
     }
-    void install(void** replacement) {
+    void install(void* replacement) {
         DWORD previous = 0, ignored = 0;
-        check(VirtualProtect(device, sizeof(void*), PAGE_READWRITE, &previous) != 0, "view failure device writable");
-        *reinterpret_cast<void***>(device) = replacement;
-        check(VirtualProtect(device, sizeof(void*), previous, &ignored) != 0, "view failure protection restored");
+        check(VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &previous) != 0, "view failure slot writable");
+        *slot = replacement;
+        check(VirtualProtect(slot, sizeof(void*), previous, &ignored) != 0, "view failure protection restored");
     }
-    explicit ViewFailure(ID3D11Device* d) : device(d), original(*reinterpret_cast<void***>(d)) {
+    explicit ViewFailure(ID3D11Device* d) : device(d), slot(*reinterpret_cast<void***>(d) + 9),
+        original(reinterpret_cast<Create>(*slot)) {
         check(!active, "one view failure owner");
-        std::memcpy(table.data(), original, sizeof(table)); table[9] = reinterpret_cast<void*>(&create);
-        active = this; install(table.data());
+        // Keep the runtime's complete table: CreateTexture2D can use entries
+        // beyond the public base interface while this failure is installed.
+        // Other devices sharing the table always forward to the saved method.
+        active = this; install(reinterpret_cast<void*>(&create));
     }
-    ~ViewFailure() { install(original); active = nullptr; }
+    ~ViewFailure() { install(reinterpret_cast<void*>(original)); active = nullptr; }
 };
 
 struct Device {
@@ -352,6 +357,7 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
         DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_TYPELESS,
         DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, DXGI_FORMAT_R16G16B16A16_FLOAT};
     for (auto format : formats) for (unsigned eye = 0; eye < 2; ++eye) {
+        std::printf("color_pixels format=%u eye=%u phase=begin\n", unsigned(format), eye);
         // Non-multiples of the 8x8 conversion group exercise edge coverage.
         const unsigned width = 13, height = 9;
         const auto original = pattern(format, width, height);
@@ -364,11 +370,14 @@ void pixels(Device& device, FrameGenerationColor& adapter, Sentinels& sentinels)
         ID3D11Texture2D* output = nullptr;
         {
             ColorCommandSpy calls(device.context.Get());
+            std::puts("color_pixels phase=spy-installed");
             check(adapter.normalize(device.context.Get(), eye, source.Get(), &output) && output,
                   "production adapter returns a typed color image");
+            std::printf("color_pixels phase=normalized copies=%u\n", calls.copies);
             check(calls.copies == (format == DXGI_FORMAT_R8G8B8A8_UNORM ? 0u : 1u),
                   "exact canonical color skips normalization copy; fallback preserves one copy");
         }
+        std::puts("color_pixels phase=spy-restored");
         check((output == source.Get()) == (format == DXGI_FORMAT_R8G8B8A8_UNORM),
               "only exact canonical RGBA8 borrows the original source");
         before.equal(ComputeSnapshot(device.context.Get()));
@@ -496,13 +505,16 @@ void emptyUiReuse(Device& device) {
         check(read(device, output) == expected, "reused empty identity preserves every pixel");
     }
     for (unsigned eye = 0; eye < 2; ++eye) for (bool multiply : {false, true}) {
+        std::printf("empty_ui_cache eye=%u multiply=%u phase=resize\n", eye, unsigned(multiply));
         ID3D11Texture2D* output = poison<ID3D11Texture2D>();
         const auto previous = calls.clears;
         {
             ViewFailure failure(device.device.Get());
+            std::puts("empty_ui_cache phase=failure-spy-installed");
             check(!adapter.emptyUi(device.context.Get(), eye, 7, 3, multiply, true, &output) && !output &&
                   adapter.failure() == Failure::Allocation, "failed resized view creation exposes no uninitialized plane");
             check(calls.clears == previous, "failed view creation does not issue a clear");
+            std::puts("empty_ui_cache phase=view-failed-retry");
             check(adapter.emptyUi(device.context.Get(), eye, 7, 3, multiply, true, &output) && output,
                   "retry initializes allocated empty plane after view creation failure");
         }
@@ -529,10 +541,15 @@ void gpu(bool emptyOnly) {
         check(adapter.initialize(true, device.device.Get(), device.context.Get(), GetCurrentThreadId()),
               "production adapter accepts authoritative immediate owner");
         Sentinels sentinels(device);
+        std::puts("color_gpu phase=pixels");
         pixels(device, adapter, sentinels);
+        std::puts("color_gpu phase=refusals");
         refusals(device, adapter);
+        std::puts("color_gpu phase=empty-ui");
         emptyUi(device, adapter);
+        std::puts("color_gpu phase=empty-ui-reuse");
         emptyUiReuse(device);
+        std::puts("color_gpu phase=cleanup");
         device.context->ClearState();
         device.context->Flush();
         device.noErrors();
@@ -542,6 +559,7 @@ void gpu(bool emptyOnly) {
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool runGpu = false, emptyOnly = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--gpu")) runGpu = true;
