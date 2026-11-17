@@ -34,7 +34,7 @@ KEYS = dict(zip(('UP','DOWN','LEFT','RIGHT','ENTER','ESCAPE','TAB','SPACE','W','
 KEYS.update({'SHIFT':0x2a,'BACKSPACE':0x0e,'COMMA':0x33,'PERIOD':0x34})
 TOOLS = {'get_state','xr_sim_status','xr_sim_start','xr_sim_stop','xr_sim_set_pose',
          'xr_sim_set_eyes','xr_sim_play','xr_sim_capture','keyboard_input','keyboard_sequence',
-         'mouse_click','capture_window'}
+         'mouse_click','capture_window','xr_sim_idle'}
 
 
 def require(condition, message):
@@ -58,6 +58,20 @@ def smooth_duration(value):
         duration = value['smooth_seconds']
         require(type(duration) in (int,float) and math.isfinite(duration) and 0 <= duration <= 60,
                 'smooth_seconds must be finite seconds in 0..60')
+
+
+def idle_arguments(value):
+    """Validate bounded idle actions before runtime calls or lease mutation."""
+    fields(value,('action','duration_ms','seed'),('action',))
+    action = value['action']
+    require(type(action) is str and action in ('start','renew','stop'),'Unknown idle action')
+    if action == 'start':
+        fields(value,('action','duration_ms','seed'),('action','duration_ms','seed'))
+        integer(value['duration_ms'],1,60000)
+        integer(value['seed'],0,2**32-1)
+    else:
+        fields(value,('action',),('action',))
+    return action
 
 
 def pose(value, extra=()):
@@ -694,6 +708,22 @@ class Host:
             integer(max_edge,256,768 if eye == 'both' else 1024)
             self.runtime()
             return self.helper({'op':'capture','eye':eye,'max_edge':max_edge})  # Forward actual PNGs for native MCP image lifting.
+        if name == 'xr_sim_idle':
+            action = idle_arguments(args)
+            require(self.activated,'Start this host simulation before changing idle animation')
+            if action == 'stop':
+                # Owned cancellation remains available after foreground/dashboard loss.
+                self.verify()
+                return self.helper.driver('idle',**args)
+            observed = self.runtime(True)
+            support = observed['driver']['response']['status'].get('idle_support',{})
+            require(support.get('version') == 'natural-idle-v1' and
+                    support.get('max_duration_ms') == 60000 and support.get('lease_timeout_ms') == 5000,
+                    'Driver does not support the bounded natural-idle-v1 contract')
+            self.verify()
+            require(self.windows.foreground_pid() == self.identity['pid'],
+                    'Game lost foreground focus; idle start/renew refused')
+            return self.helper.driver('idle',**args)
         require(self.activated,'Start this host simulation before changing poses/eyes')
         if name in ('xr_sim_set_pose','xr_sim_set_eyes'):
             smooth_duration(args)
@@ -1076,6 +1106,66 @@ class Tests(unittest.TestCase):
         host.stop_driver()
         self.assertFalse(host.activated)
         self.assertEqual([c.args[0] for c in helper.driver.call_args_list][-2:],['cancel','stop'])
+
+    def test_idle_schema_bounds_are_validated_before_runtime_effects(self):
+        host,_,helper = self.fixture()
+        host.activated = True
+        for arguments in ({}, {'action':'START'}, {'action':'start'},
+                {'action':'start','duration_ms':60000}, {'action':'start','seed':17},
+                {'action':'renew','seed':17}, {'action':'stop','duration_ms':1},
+                {'action':'start','duration_ms':1,'seed':0,'unexpected':True}):
+            with self.subTest(arguments=arguments):
+                helper.reset_mock()
+                with self.assertRaises(ValueError): host.dispatch('xr_sim_idle',arguments)
+                helper.assert_not_called()
+                helper.driver.assert_not_called()
+        for field,values in (('duration_ms',(0,60001,-1,True,None,'1',1.0,float('nan'),float('inf'))),
+                ('seed',(-1,2**32,True,None,'1',1.5,float('nan'),float('inf')))):
+            for value in values:
+                helper.reset_mock()
+                with self.assertRaises(ValueError):
+                    host.dispatch('xr_sim_idle',{'action':'start','duration_ms':60000,'seed':17,field:value})
+                helper.assert_not_called()
+                helper.driver.assert_not_called()
+
+    def test_idle_requires_own_lease_supported_driver_and_foreground(self):
+        host,windows,helper = self.fixture()
+        start = {'action':'start','duration_ms':60000,'seed':17}
+        helper.reset_mock()
+        with self.assertRaisesRegex(ValueError,'Start this host'): host.dispatch('xr_sim_idle',start)
+        helper.assert_not_called()
+        host.activated = True
+        observed = {'driver':{'response':{'status':{'idle_support':{
+            'version':'natural-idle-v1','max_duration_ms':60000,'lease_timeout_ms':5000}}}}}
+        with mock.patch.object(host,'runtime',return_value=observed) as runtime:
+            windows.foreground_pid.return_value = host.identity['pid']
+            for duration in (1,60000):
+                for seed in (0,2**32-1):
+                    host.dispatch('xr_sim_idle',{'action':'start','duration_ms':duration,'seed':seed})
+                    helper.driver.assert_called_with('idle',action='start',duration_ms=duration,seed=seed)
+            host.dispatch('xr_sim_idle',{'action':'renew'})
+            helper.driver.assert_called_with('idle',action='renew')
+            runtime.assert_called_with(True)
+            helper.driver.reset_mock()
+            windows.foreground_pid.return_value = 999
+            with self.assertRaisesRegex(ValueError,'foreground'): host.dispatch('xr_sim_idle',start)
+            helper.driver.assert_not_called()
+            windows.foreground_pid.return_value = host.identity['pid']
+            for support in ({},{'version':'old'}, {'version':'natural-idle-v1','max_duration_ms':60001,'lease_timeout_ms':5000}):
+                observed['driver']['response']['status']['idle_support'] = support
+                with self.assertRaisesRegex(ValueError,'does not support'): host.dispatch('xr_sim_idle',start)
+                helper.driver.assert_not_called()
+
+    def test_idle_stop_remains_available_after_focus_or_dashboard_loss(self):
+        host,windows,helper = self.fixture()
+        host.activated = True
+        windows.foreground_pid.return_value = 999
+        with mock.patch.object(host,'runtime',side_effect=AssertionError('stop must bypass active-input preflight')):
+            host.dispatch('xr_sim_idle',{'action':'stop'})
+            helper.driver.assert_called_with('idle',action='stop')
+        host.stop_driver()
+        self.assertEqual([call.args[0] for call in helper.driver.call_args_list][-2:],['cancel','stop'])
+        self.assertFalse(host.activated)
 
     def test_shift_backspace_scancode_delivery(self):
         windows = Windows.__new__(Windows)

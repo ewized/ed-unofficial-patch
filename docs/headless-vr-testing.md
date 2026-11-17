@@ -82,6 +82,24 @@ retain their existing 10-second action bound. Read-only tools do not settle.
 `get_state` and readiness JSON record the configured interval. This is an input
 reliability measure, not evidence that the game consumed queued events.
 
+The optional `xr_sim_idle` tool requires a matching driver that advertises
+`idle_support.version = natural-idle-v1` and a transport catalog containing the
+tool. After acquiring the simulation lease with `xr_sim_start`, start with
+`{"action":"start","duration_ms":60000,"seed":17}`. Renew with
+`{"action":"renew"}` at least every five seconds; two-second renewals leave
+margin. Stop with `{"action":"stop"}`, then release the simulation lease.
+Start and renew require the verified game foreground; owned cancellation remains
+available after foreground or dashboard loss. Updating a catalog sidecar alone
+does not update the native transport's embedded tool catalog.
+
+The driver samples continuous gentle head drift and independent gaze fixations
+and saccades in its frame loop. Renewals preserve the original anchor, seed,
+schedule and absolute lifetime of at most 60 seconds. Missing the five-second
+lease stops the animation. Competing pose/eye/replay writes refuse; explicit
+safety cancellation takes priority. Eye origins and IPD stay fixed, and gaze
+rotations compensate for head rotation. This synthetic directional model does
+not model finite-distance vergence or establish physical calibration.
+
 Provisioning, interactive-session startup, game launch, normal runtime shutdown,
 and receipt restoration belong to an external supervisor. Keep host names,
 account information, machine paths, scripts, and raw captures outside this repo.
