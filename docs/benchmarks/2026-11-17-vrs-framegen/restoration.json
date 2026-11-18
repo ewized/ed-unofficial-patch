@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "status": "partial_balanced_complete_final_sweep_pending",
+  "measured_code": "cfe5e8ca4241b7169eea524f6d50fc4c5f64c620",
+  "groups_completed": [
+    "balanced"
+  ],
+  "original_files": {
+    "ini": {
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
+      "bytes": 201014,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true
+    },
+    "mirror": {
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
+      "bytes": 201014,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true
+    },
+    "graphics": {
+      "sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b",
+      "bytes": 1462,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true
+    },
+    "driver": {
+      "sha256": "02a1fcf7e3491bab9c1cf6407154a2f2bb2f9b7a26fee3aa3627468d70161b80",
+      "bytes": 134,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true
+    }
+  },
+  "normal_stop_completed": true,
+  "keyboard_restoration_completed": true,
+  "game_runtime_census_empty": true,
+  "final_broader_preference_audit": "pending",
+  "private_completion_evidence_sha256": "16033efdb125bf70c09b3ae32817cd8918845aa89127c1f54b45f8425efb64be"
+}

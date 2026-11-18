@@ -1,0 +1,66 @@
+{
+  "compression": "gzip level9 with mtime0; SHA256 records identify both stored and uncompressed bytes",
+  "counts": {
+    "admissions": 3399,
+    "presentation_deltas": 1013,
+    "presentation_timeline": 1021,
+    "rows": 40,
+    "system_samples": 61,
+    "windows": 24
+  },
+  "files": {
+    "admissions.csv.gz": {
+      "bytes": 175879,
+      "sha256": "191d061be920a4584316e27e789a052c9c38e542a3528bbcbd41db644e1facbe",
+      "uncompressed_bytes": 1067056,
+      "uncompressed_name": "admissions.csv",
+      "uncompressed_sha256": "26fc2c6547b850a643eef117eae101e272b797f448459de630d0057d7a4f4feb"
+    },
+    "presentation_deltas.csv.gz": {
+      "bytes": 53445,
+      "sha256": "7409734d8f568a41e4605f2a5306a63f8f579b0a08e8f2916e389d72c2f3e484",
+      "uncompressed_bytes": 229422,
+      "uncompressed_name": "presentation_deltas.csv",
+      "uncompressed_sha256": "f3e076b145de45d3362335310a9ec0880273108bb0827751955e7c6368c595f1"
+    },
+    "presentation_timeline.csv.gz": {
+      "bytes": 53854,
+      "sha256": "5933705bf616d4246e1e61f6f31b0a999a1b8ecd1b6ee94d5315e2847b8f14b7",
+      "uncompressed_bytes": 228261,
+      "uncompressed_name": "presentation_timeline.csv",
+      "uncompressed_sha256": "92ef04f06d82d1d3a9b5a18c5ff7423058d86cb45debc71175b7235d3de8ea48"
+    },
+    "results.json.gz": {
+      "bytes": 328361,
+      "sha256": "4daab4b535c670c400843bede5ecf2bf7976bfbf6aad254d412993a44a5654c6",
+      "uncompressed_bytes": 6354704,
+      "uncompressed_name": "results.json",
+      "uncompressed_sha256": "d68b357be52f6c3c93295d8151fb50347808001dbadb210b836cb3e74f792a27"
+    },
+    "rows.csv": {
+      "bytes": 12590,
+      "sha256": "665e290bc7ba3b569256a60dd4f744d36fd5d446199bb65ede136130dec0d58b",
+      "uncompressed_bytes": 12590,
+      "uncompressed_name": "rows.csv",
+      "uncompressed_sha256": "665e290bc7ba3b569256a60dd4f744d36fd5d446199bb65ede136130dec0d58b"
+    },
+    "system_samples.csv": {
+      "bytes": 18044,
+      "sha256": "4ee5c15f4868b400c92b6561c062813abd9b59a70832fd34cc169ebb1b86f4ec",
+      "uncompressed_bytes": 18044,
+      "uncompressed_name": "system_samples.csv",
+      "uncompressed_sha256": "4ee5c15f4868b400c92b6561c062813abd9b59a70832fd34cc169ebb1b86f4ec"
+    },
+    "windows.csv": {
+      "bytes": 8275,
+      "sha256": "03090d8c2a8129e4630cd3cc64bac1c1a0ffb6f82a954b87b8e60f4e503fb41a",
+      "uncompressed_bytes": 8275,
+      "uncompressed_name": "windows.csv",
+      "uncompressed_sha256": "03090d8c2a8129e4630cd3cc64bac1c1a0ffb6f82a954b87b8e60f4e503fb41a"
+    }
+  },
+  "independent_private_string_check_passed": true,
+  "privacy_allowlist_passed": true,
+  "schema": 1,
+  "source_bytes_rechecked": true
+}

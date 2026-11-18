@@ -1,29 +1,28 @@
-# Parked Pilot Assessment benchmark — draft
+# Parked Pilot Assessment benchmark
 
 ## Status
 
 ```text
-Report status: DRAFT — FINAL RESULTS PENDING
-Experiment: parked Pilot Assessment, Mawson Dock
-Requested matrix: 40 rows
-Configurable rows: 32; measurements and qualification PENDING
-Unsupported rows: 8 requested FG 3x rows; never apply
-Runtime used for benchmark: virtual HMD, nominal 90 Hz
-Requested virtual eye target: 3892 × 3892 pixels per eye
-Physical display scanout qualified: NO
-Physical gaze qualified: NO
-Gaze used in benchmark: synthetic, forward, 64 mm eye separation
-Flight operation: NEVER TAKE OFF; no flight controls
-Final native/generated/repeated submission rates: PENDING
-Final CPU/GPU timing statistics and coverage: PENDING
-Final feature/mode qualification: PENDING
-Final byte/timestamp/input-profile restoration proof: PENDING
-Performance summary or recommendation: PENDING FINAL RAW STATISTICS
+Report status: PARTIAL — FULL SWEEP STILL RUNNING
+Measured code: cfe5e8ca4241b7169eea524f6d50fc4c5f64c620
+Experiment: parked Pilot Assessment, Mawson Dock; never take off
+Requested matrix: 40 rows; 32 configurable; 8 FG 3x unsupported
+Completed: Balanced 8/8; 24 accepted 30-second CPU/GPU windows
+Pending: Performance 8; Quality 8; Native/all-off 8
+Balanced native submissions: 32.59–32.62/s; generated: 0/s
+Balanced VRS: active in all four requested-on rows
+Balanced FG: Off verified; Auto/2x/4x inactive, camera refusal observed
+Runtime: virtual HMD, nominal 90 Hz, observed 3892 × 3892 per eye
+Physical headset metadata: Bigscreen Beyond, reported 90 Hz
+Physical scanout and physical gaze qualified: NO
+Gaze: synthetic forward, 64 mm eye separation; fixed head pose
+Balanced normal Stop, original bytes/timestamps/input restoration: PASS
+Final complete-matrix conclusions: PENDING
 ```
 
 Measured code commit: `cfe5e8ca4241b7169eea524f6d50fc4c5f64c620`. Its full native Windows build passed 211 job steps and 79 Python gates.
 
-This is a method and original-settings draft prepared while the sweep is in progress. It contains no final benchmark result. The results placeholders must be replaced only after the final raw logs, row qualifications, source identities and cleanup evidence have been reviewed. Earlier smoke runs do not populate the final matrix.
+This checkpoint contains the eight completed Balanced combinations and their raw measurements. Performance, Quality and Native/all-off remain pending. Earlier smoke runs and failed startups do not populate the result cells. Results describe this unattended virtual workload, rather than physical headset delivery.
 
 ## Hardware and runtime context
 
@@ -35,7 +34,7 @@ The saved physical-runtime preferences were global supersampling 2.1 (210%), com
 
 The actual benchmark uses a virtual HMD at a nominal 90 Hz, with a requested 3892 × 3892 target. Its gaze is synthetic and forward-facing, with a 64 mm eye separation. The recorded workload FOV is approximately ±0.78540 radians on both axes, or about 90 degrees across each full frustum. Final row reports must preserve their actual per-eye input/output dimensions and observed runtime metadata. Neither the virtual cadence nor a submission-counter rate proves physical headset scanout.
 
-The baseline desktop display configuration is 1280 × 720, windowed, VSync off, with a 240/1 desktop refresh preference. The frame limiter is disabled even though its saved maximum is 144. These are desktop settings, not the headset refresh or benchmark delivery rate.
+The baseline desktop display configuration is 1280 × 720, windowed, VSync off, with a 240/1 desktop refresh preference. The frame limiter is disabled even though its saved maximum is 144. These are desktop settings, not the headset refresh or benchmark delivery rate. The observed benchmark client window is 2032 × 2032.
 
 ## Original settings and controlled changes
 
@@ -63,7 +62,7 @@ The original game and mirror INIs are byte-equal, SHA256 `c5ea958581209d075718b6
 
 The FPS overlay is disabled because a smoke trial showed that the overlay itself asserts the runtime Menu admission gate and blocks FG even with F8 closed. This is a known product limitation and a controlled measurement condition. Original overlay-on and GPU-timing-off settings must be restored after the sweep.
 
-## Requested matrix and pending results
+## Requested matrix and current results
 
 P/B/Q mean requested Performance/Balanced/Quality upscaling modes. Model K is a reconstruction model, not a P/B/Q choice. The HMD multipliers below request ratios; both-eye dimensions and actual NGX mode must confirm the classification. NVIDIA's queried mode ranges and recommended dimensions can affect the selected mode.
 
@@ -73,45 +72,66 @@ P/B/Q mean requested Performance/Balanced/Quality upscaling modes. Model K is a 
 | Native | off | 1.000000 | on | PENDING | PENDING | PENDING | unsupported | PENDING |
 | Performance | dlss | 0.500000 | off | PENDING | PENDING | PENDING | unsupported | PENDING |
 | Performance | dlss | 0.500000 | on | PENDING | PENDING | PENDING | unsupported | PENDING |
-| Balanced | dlss | 0.580000 | off | PENDING | PENDING | PENDING | unsupported | PENDING |
-| Balanced | dlss | 0.580000 | on | PENDING | PENDING | PENDING | unsupported | PENDING |
+| Balanced | dlss | 0.580000 | off | 32.62 | 32.59 | 32.61 | unsupported | 32.61 |
+| Balanced | dlss | 0.580000 | on | 32.61 | 32.62 | 32.61 | unsupported | 32.61 |
 | Quality | dlss | 0.666667 | off | PENDING | PENDING | PENDING | unsupported | PENDING |
 | Quality | dlss | 0.666667 | on | PENDING | PENDING | PENDING | unsupported | PENDING |
 
-The [40-row results skeleton](matrix-results-pending.csv) deliberately leaves every supported measurement and qualification blank/PENDING. Eight FG 3x requests are unsupported and have no applicable payload. Native/AA-off lacks the successful native temporal producer needed by VRS/FG; seven supported native rows therefore carry explicit expected-inactive feature annotations. Requested settings must never be presented as proof those features ran.
+Balanced table cells give native XR submissions per second; all eight completed rows have zero generated delivery. The [40-row results CSV](rows.csv) records actual metrics and qualification for eight rows and leaves 24 pending. Eight FG 3x requests are unsupported and have no applicable payload. Native/AA-off lacks the successful native temporal producer needed by VRS/FG; seven supported native rows therefore carry explicit expected-inactive feature annotations. Requested settings must never be presented as proof those features ran.
 
-Final per-row fields remain PENDING: applied-file identity, observed AA/NGX mode, both-eye input/output sizes, accepted CPU/GPU windows, p50/p95/p99, valid/invalid/missing sample counts, native/generated/repeated submission rates and coverage, VRS readiness/activity/error deltas, FG admission/effective mode, Auto state durations/transitions, and scene/ownership qualification. Partial timing coverage, fallback, expected inactivity and blocked features need separate labels. A collected row is not automatically a qualified feature comparison.
+Completed rows include both-eye mode/dimension checks, CPU/GPU p50/p95/p99, accepted and rejected sample counts, actual native/generated/repeated submissions and coverage, VRS activity/error deltas, and FG/Auto admission state. Pending rows contain no invented measurements. A collected timing row does not prove requested FG activation.
+
+| VRS | FG request | Native/s | Generated/s | CPU p50 ms | GPU p50 ms | GPU p95 ms | Qualification |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| off | off | 32.615 | 0.000 | 6.803 | 12.56 | 13.73 | measured |
+| off | auto | 32.589 | 0.000 | 6.787 | 12.634 | 13.833 | measured_inactive |
+| off | 2x | 32.607 | 0.000 | 6.786 | 12.626 | 13.725 | measured_inactive |
+| off | 4x | 32.611 | 0.000 | 6.69 | 12.572 | 13.68 | measured_inactive |
+| on | off | 32.609 | 0.000 | 6.991 | 12.754 | 13.925 | measured |
+| on | auto | 32.621 | 0.000 | 7.003 | 12.75 | 13.921 | measured_inactive |
+| on | 2x | 32.608 | 0.000 | 6.883 | 12.747 | 13.972 | measured_inactive |
+| on | 4x | 32.607 | 0.000 | 6.916 | 12.729 | 13.875 | measured_inactive |
+
 
 ## Scene, ownership and timing method
 
 Each resolution group uses one owned game lifetime, with graphics XML changes only while stopped. Existing finite Training navigation reaches Pilot Assessment at Mawson Dock. The ship stays docked on the pad, waiting for Select Auto Launch. The controller never selects Auto Launch, sends flight controls, undocks or takes off. Fixed head-pose and calibrated cockpit checks guard the scene outside the timed interval. Parked tutorial lighting, NPC activity and other scene changes can still vary the workload.
 
-The initial gaze configuration is set once. A five-second tracking lease found during smoke testing is maintained using a 60,000 ms tracked-only head replay, renewed after at least 25 seconds. Replay steps contain only time, head device and tracked validity; they change no head position or orientation. Binocular validity, fixed neutral pose, dashboard state and exact owned process identity remain guarded. Replay is tracking maintenance, not a camera or ship movement. An uncertain replay completion fails the operation rather than authorizing a blind retry.
+Synthetic binocular gaze is set once. A tracked-only 60-second head replay, renewed after at least 25 seconds, keeps its five-second lease valid without position or orientation changes. Exact process identity, neutral head pose, binocular validity and closed dashboard remain guarded. Uncertain requests are not blindly replayed.
 
-The native group is initialized through native-resolution DLAA before its measured AA-off rows. One direct AA-off cold launch failed the compositor scene-ownership check; that attempt is retained as a startup failure, not benchmark data. Successful AA-off handoff remains to be proved.
+The native group is initialized through native-resolution DLAA before its measured AA-off rows. One direct AA-off cold launch failed the compositor scene-ownership check; that attempt is retained as a startup failure, not benchmark data. Successful AA-off handoff remains to be proved. In two failed starts, the first graphics log appeared about 181 seconds after game creation, just after the 180-second observation budget. The relationship to observer polling is unproven; longer and less frequent startup observations are being prepared without weakening readiness predicates.
 
-Every group is primed for 10 seconds with AA on, VRS on and FG off outside measurement. At the native group's 1.0 multiplier this is a DLAA setup phase, not the native/AA-off measurement. A further 60-second settle accommodates the tutorial elevator/scene transition. The actual requested row INI is restored before its 20-second row warmup and measurement. Priming activity must not be attributed to the measured row.
+Every group receives 10 seconds of AA-on/VRS-on/FG-off priming, then 60 seconds of scene settling, outside measurement. Native 1.0 priming uses DLAA. Each requested row is applied before its 20-second warmup; priming activity never counts toward the row.
 
-The target is three completed, nonoverlapping 30-second collector windows in the same game session per row, with the collector's two-second completion drain. The controller polls every 15 seconds and bounds each row to 160 seconds after applying that row. Its own 20-second row warmup is distinct from the collector's internal warmup. Windows crossing configuration/scope boundaries, incomplete windows and invalid/missing GPU coverage must not become qualified results. A timeout with fewer windows is partial coverage, not a fabricated three-window result.
+The target is three completed, nonoverlapping 30-second collector windows in the same game session per row, with the collector's two-second completion drain. The controller polls every 15 seconds and uses a 185-second polling deadline after applying that row; one in-flight poll may finish after that deadline. Its own 20-second row warmup is distinct from the collector's internal warmup. Windows crossing configuration/scope boundaries, incomplete windows and invalid/missing GPU coverage must not become qualified results. A timeout with fewer windows is partial coverage, not a fabricated three-window result.
 
-Application GPU timing stays on and the FPS overlay stays off for every measurement. F8, screenshots and other menu/capture activity stay outside the measurement windows. VRS coverage, work-reference and pixel-shader diagnostics stay off; no new workload claim is inferred from a diagnostic placeholder.
+GPU timing stays on and the FPS overlay stays off. F8/captures stay outside timed intervals; VRS coverage/work-reference/pixel-shader diagnostics remain off.
 
 ## Interpretation and known limits
 
-CPU timing is producer/pre-submit wall time, including the work span defined by the collector; it is not exclusive CPU execution time. GPU timing is an independent application-render GPU elapsed-time distribution. Do not sum them or invert their medians into a claimed frame rate. Final aggregate percentiles are medians of accepted per-window percentiles, not pooled percentiles. No native 1% low is invented from p99 or from the inverse of another timing statistic.
+CPU timing is producer/pre-submit wall time, including the work span defined by the collector; it is not exclusive CPU execution time. GPU timing is an independent application-render GPU elapsed-time distribution. Do not sum them or invert their medians into a claimed frame rate. Final aggregate percentiles are medians of accepted per-window percentiles, not pooled percentiles. Rows run in the fixed order Off, Auto, 2x, 4x with VRS off, then the same order with VRS on. They share process/cache history and are not randomized independent trials. No native 1% low is invented from p99 or from the inverse of another timing statistic.
 
-Native, generated and repeated submission rates come from actual fresh, same-context/generation counter deltas over their captured monotonic interval. Empty, failed and background submissions remain separate. Do not multiply native FPS by a selected FG multiplier. Submission rates describe application XR delivery, not compositor acceptance at a physical display or physical scanout. Counter freshness, coverage and identity changes must remain visible.
+Native/generated/repeated rates use fresh same-context/generation counter deltas over their captured monotonic intervals, including explicit coverage. Empty/failed/background submissions remain separate. Selected multipliers are never multiplied into FPS. These are application XR submissions, not physical scanout.
 
-VRS on needs valid binocular gaze, actual driver/world admission and increasing relevant counters without hidden errors. A configured flag or priming success is insufficient. FG similarly needs actual camera/backend admission and observed delivery. Auto may remain native or change effective mode; report its observed modes and durations.
+VRS activation requires valid binocular gaze, driver/world admissions and increasing counters without errors. FG requires actual admitted sources and generated delivery. Auto selections, durations and transitions remain separate from observed output.
 
-A corrected smoke run observed active VRS but FG camera refusal reason 5, mask `0x31`, with zero generated delivery. This is a known parked-scene limitation to examine in final data, not a final matrix result. The experiment never takes off to rescue FG admission. Actual full-sweep rows may be blocked, expected-inactive, partial or qualified; only their raw evidence decides.
+The completed Balanced rows observe active VRS but zero generated delivery for Auto/2x/4x, with actual producer camera refusal reason 5 and mask `0x31`. This limits conclusions for this specific captured configuration; it does not establish that every parked scene refuses FG. The experiment never takes off to rescue FG admission. Actual full-sweep rows may be blocked, expected-inactive, partial or qualified; only their raw evidence decides.
 
 ## Restoration and provenance
 
-Normal Stop must finish and authoritative stopped state must be proved before original settings are restored. Restoration uses exact last-applied byte guards and fresh receipts; configuration conflicts must be retained for inspection. Restore game/mirror INIs, game graphics, runtime preferences, original input profile and original selection-relevant timestamps. Final restoration verification is PENDING and must be joined to the completed report.
+Normal Stop must finish and authoritative stopped state must be proved before original settings are restored. Restoration uses exact last-applied byte guards and fresh receipts; configuration conflicts must be retained for inspection. Restore game/mirror INIs, game graphics, runtime preferences, original input profile and original selection-relevant timestamps. Balanced restoration passed for original game/mirror INIs, graphics selection, virtual-driver file and their exact timestamps, plus the original input preset. Later groups and the final broader preference audit remain pending. See [restoration evidence](restoration.json).
 
-[Source provenance](source-provenance.json) gives SHA256 and byte size for all 11 source inputs: the normalized original ED-UP settings snapshot, game/mirror INI snapshots, four graphics/display XML files, input preset, physical probe, initial environment and v2 matrix manifest. These hashes identify private immutable inputs; raw snapshots are not bundled. The v2 matrix manifest SHA256 is `b3ad41abc4127f1da801debf83de343257ae2ae865af12f1ec73bb823ebb9763`.
+[Source provenance](source-provenance.json) identifies the 11 private original inputs and v2 profile manifest by size and SHA256; raw personal snapshots are excluded. The manifest hash is `b3ad41abc4127f1da801debf83de343257ae2ae865af12f1ec73bb823ebb9763`.
 
-The candidate build identity supplied by the coordinator is `cfe5e8ca4241b7169eea524f6d50fc4c5f64c620`. Final reports still require their actual installed/runtime build verification and captured raw-file hashes. This offline draft does not establish the identity or completion of a live process.
+Both logs for every measured row are selected by verified process birth and PID where present, then checked through the project log reader against the installed candidate. Earlier same-build logs cannot substitute for a new process that has not initialized. The full build's receipt SHA256 is `48cf115d51940a194eedad0c0f9c49010178849800a61ab03b643d241ebe4a73`.
 
-The [privacy check](privacy-check.json) records export checks. The exports omit personal filesystem configuration, device identities, tracking coordinates, network addresses and account/game identity. The optional [offline export generator](prepare_exports.py) reads local snapshots only and refuses existing export filenames. Re-run it into a fresh directory when deliberate regeneration is required. No live machine access or tracked repository changes were used to prepare this draft.
+A diagnostic startup also loaded `CheekyOpenXRLayer.dll`; its effect is not isolated by this sweep. No third-party layer setting is changed for a treatment.
+
+## Raw data
+
+- [All requested rows and aggregates](rows.csv), [individual CPU/GPU windows](windows.csv), [GPU/process samples](system_samples.csv).
+- [Presentation counter timeline](presentation_timeline.csv.gz) and [actual counter deltas](presentation_deltas.csv.gz).
+- [FG/VRS admission observations](admissions.csv.gz) and [complete structured export](results.json.gz).
+- [Integrity and privacy checks](integrity.json) identify stored and uncompressed SHA256 values. Gzip uses a zero timestamp for reproducibility; `gzip -dc FILE.gz` reads the raw data without changing it.
+
+All percentiles remain per-window observations or explicitly labelled medians of those percentiles. Missing values stay empty/null. Raw source hashes identify retained private logs; account details, personal hosts/paths, device serials, screenshots and tracking coordinates are excluded from the published data.
