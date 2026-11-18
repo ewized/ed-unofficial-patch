@@ -1,10 +1,11 @@
 """Qualify a captured EDVR benchmark row using the reviewed parser's records.
 
 Acquisition and wire parsing stay with the controller. A capture receipt binds
-its selected streams to the guarded process and row; it is not a signature or
-proof that an untrusted producer parsed those bytes correctly. Runtime phase
-records remain with the parser: no phase is added to another or substituted
-for the raw DXGI Present measurement. See docs/benchmark-qualification.md.
+its selected streams to the guarded process and row. A qualification envelope
+binds the reviewed result to that capture when the controller computes it;
+neither is proof that an untrusted producer parsed those bytes correctly.
+Runtime phase records remain with the parser: no phase is added to another or
+substituted for the raw DXGI Present measurement. See docs/benchmark-qualification.md.
 """
 
 import argparse
@@ -17,7 +18,26 @@ import sys
 
 
 SUBMISSION_COUNTERS = ('native', 'generated', 'repeated')
+CUMULATIVE_COUNTERS = (*SUBMISSION_COUNTERS, 'empty', 'failed', 'background')
 SOURCE_ROLES = ('gfx', 'openxr')
+QUALIFICATION_SCHEMA = 2
+ADMISSION_OBSERVATIONS = {
+    'fg_source_refusal': ('gfx', 'producer_source_v1', (
+        'producer_reason', 'sequence', 'history', 'refused_count',
+    )),
+    'fg_camera_refusal': ('gfx', 'producer_camera_v1', (
+        'sequence', 'eye', 'upscaler_slot', 'camera_mask', 'camera_provenance',
+        'scene_frame', 'head_frame', 'eyes_frame', 'selected_eye', 'previous_eye',
+        'draws', 'input_width', 'input_height',
+    )),
+    'fg_lifecycle': ('openxr', 'runtime_lifecycle_v1', (
+        'generation', 'config', 'history', 'state', 'last_failure', 'requested_multiplier',
+        'active_multiplier', 'source_pairs', 'generated_pairs', 'refused_pairs', 'latest_source',
+        'active_sequence', 'displayed_endpoint', 'native_presented', 'generated_presented',
+        'refusal_mask', 'admission', 'enabled', 'scene_ready', 'loading', 'menu', 'caller_fresh',
+        'state_valid', 'generation_valid', 'config_valid',
+    )),
+}
 COLLECTION_STATUSES = ('complete', 'timeout', 'failed')
 FEATURE_STATUSES = frozenset({
     'active', 'expected_inactive', 'inactive', 'inconsistent', 'matched',
@@ -50,6 +70,28 @@ def _hex(value, size):
 
 def _digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _require_json_keys(value):
+    if isinstance(value, dict):
+        _require(all(isinstance(key, str) for key in value), 'Capture JSON keys must be strings')
+        for member in value.values():
+            _require_json_keys(member)
+    elif isinstance(value, (list, tuple)):
+        for member in value:
+            _require_json_keys(member)
+
+
+def _canonical_json(value):
+    _require_json_keys(value)
+    return json.dumps(value, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=True, allow_nan=False).encode('utf-8')
+
+
+def _qualification_binding(run, row, records, qualification, receipt, fingerprints):
+    bound = dict(schema=QUALIFICATION_SCHEMA, run=run, row=row, records=records,
+                 qualification=qualification, receipt=receipt, sources=fingerprints)
+    return _digest(_canonical_json(bound))
 
 
 def _dimensions(value):
@@ -111,6 +153,9 @@ def _verify_capture(run, receipt, records, sources):
             _require('gfx' in matches, 'Submission record is from the wrong source')
         if kind.startswith('runtime_'):
             _require('openxr' in matches, 'Runtime record is from the wrong source')
+        if kind in ADMISSION_OBSERVATIONS:
+            _require(ADMISSION_OBSERVATIONS[kind][0] in matches,
+                     'FG admission record is from the wrong source')
         line = record['line_number']
         _require(_uint(line) and line > 0 and any(
             line <= len(source_lines[role])
@@ -119,11 +164,97 @@ def _verify_capture(run, receipt, records, sources):
     return fingerprints
 
 
+def _verify_admission_observations(qualification, records, fingerprints, start, end):
+    """Resolve each embedded FG observation to a settled, source-verified record."""
+    details = qualification.get('treatments', {}).get('fg', {}).get('admission_details')
+    if details is None:
+        return
+    _require(type(details) is dict and type(details.get('schema')) is int and details['schema'] == 1
+             and details.get('observation_scope') == 'sparse_diagnostics_not_failure_rates',
+             'Unknown FG admission details schema')
+    for kind, (role, namespace, fields) in ADMISSION_OBSERVATIONS.items():
+        if kind not in details:
+            continue
+        group = details[kind]
+        _require(type(group) is dict and group.get('namespace') == namespace,
+                 'Unknown FG admission observation namespace')
+        observations = group.get('observations')
+        _require(type(observations) is list and bool(observations), 'FG admission observations required')
+        settled = {}
+        for record in records:
+            at = record.get('estimated_at_ms')
+            if (record['kind'] == kind and type(record.get('admission_schema')) is int
+                    and record['admission_schema'] == 1 and record.get('row_timestamp_qualified') is True
+                    and _uint(at) and start <= at <= end):
+                settled.setdefault((record['source_line_sha256'], at), []).append(record)
+        source_hash = fingerprints[role]['sha256']
+        for observation in observations:
+            _require(type(observation) is dict
+                     and set(observation) == {*fields, 'at_ms', 'source_sha256', 'source_line_sha256'},
+                     'Invalid FG admission observation fields')
+            _require(observation['source_sha256'] == source_hash
+                     and _hex(observation['source_line_sha256'], 64),
+                     'FG admission observation source differs')
+            at = observation.get('at_ms')
+            _require(_uint(at) and start <= at <= end, 'FG admission observation is outside the settled row')
+            candidates = settled.get((observation['source_line_sha256'], at), ())
+            _require(all(type(observation.get(field)) is int for field in fields) and any(
+                record['source_sha256'] == source_hash
+                and all(type(record.get(field)) is int and observation[field] == record[field]
+                        for field in fields)
+                for record in candidates), 'FG admission observation has no matching settled record')
+
+
+def produce_qualification(run, row, records, receipt, sources, *, aggregate_records, qualify_report):
+    """Compute and bind qualification to verified acquisition inputs.
+
+    The trusted adapter supplies aggregate_records(records, run), which returns
+    (summary, intervals), and qualify_report(report, row). Reaggregation must
+    preserve the supplied normalized records, including parser annotations.
+    Callbacks operate on copies; this function neither mutates caller inputs
+    nor authenticates the producer. It accepts no cached aggregate or detached result.
+    """
+    fingerprints = _verify_capture(run, receipt, records, sources)
+    inputs = dict(run=run, row=row, records=records)
+    snapshot = _canonical_json(inputs)
+    copied = deepcopy(inputs)
+    report = dict(schema=1, run=copied['run'], records=copied['records'])
+
+    def require_unchanged_inputs():
+        _require(_canonical_json(dict(run=report['run'], row=copied['row'], records=report['records'])) == snapshot,
+                 'Qualification callbacks changed the normalized inputs')
+
+    summary, intervals = aggregate_records(report['records'], report['run'])
+    require_unchanged_inputs()
+    _require(type(summary) is dict and type(intervals) is list, 'Invalid recomputed benchmark aggregate')
+    summary = summary | {'source_hashes': sorted({source['sha256'] for source in fingerprints.values()})}
+    report.update(aggregate=summary, submission_intervals=intervals)
+    qualification = qualify_report(report, copied['row'])
+    require_unchanged_inputs()
+    _require(type(qualification) is dict, 'Invalid reviewed qualification')
+    _verify_admission_observations(qualification, records, fingerprints, *_bounds(run))
+    binding = _qualification_binding(run, row, records, qualification, receipt, fingerprints)
+    return dict(schema=QUALIFICATION_SCHEMA, qualification=deepcopy(qualification), binding=binding)
+
+
+def _verify_qualification(envelope, run, row, records, receipt, fingerprints):
+    _require(type(envelope) is dict and set(envelope) == {'schema', 'qualification', 'binding'}
+             and type(envelope['schema']) is int and envelope['schema'] == QUALIFICATION_SCHEMA
+             and type(envelope['qualification']) is dict and _hex(envelope['binding'], 64),
+             'Bound qualification schema 2 required')
+    qualification = envelope['qualification']
+    _require(envelope['binding'] == _qualification_binding(run, row, records, qualification, receipt, fingerprints),
+             'Qualification binding differs from capture')
+    _verify_admission_observations(qualification, records, fingerprints, *_bounds(run))
+    return qualification
+
+
 def submission_summary(records, start, end):
     """Use fresh same-session receiver deltas; report each counter's observed span.
 
-    An unknown endpoint cannot bridge a gap. Total uses the shared span where
-    all three submission components are known, not a sum of unlike rates.
+    An unknown endpoint cannot bridge a gap. A regression in any available
+    cumulative counter invalidates the interval. Total uses the shared span
+    where all three reported submission components are known.
     """
     packets = sorted((item for item in records if item['kind'] == 'presentation'),
                      key=lambda item: item['now_ms'])
@@ -149,7 +280,7 @@ def submission_summary(records, start, end):
         if span <= 0 or prior['captured_at_ms'] < last_end or packet['sequence'] <= prior['sequence']:
             continue
         deltas = {}
-        for counter in SUBMISSION_COUNTERS:
+        for counter in CUMULATIVE_COUNTERS:
             old, new = prior.get(counter), packet.get(counter)
             _require(all(value is None or _uint(value) for value in (old, new)),
                      'Invalid submission counter')
@@ -157,6 +288,7 @@ def submission_summary(records, start, end):
                 deltas[counter] = new - old
         if any(delta < 0 for delta in deltas.values()):
             continue
+        deltas = {counter: deltas[counter] for counter in SUBMISSION_COUNTERS if counter in deltas}
         if sum(deltas.values()) > packet['sequence'] - prior['sequence']:
             continue
         if len(deltas) == len(SUBMISSION_COUNTERS):
@@ -277,7 +409,7 @@ def _feature_activity(qualification, requested, windows, row, submissions):
             result['fg']['status'] = 'unavailable'
         elif generated > 0 and (requested['fg'] == 'off' or requested['aa'] == 'native'):
             result['fg']['status'] = 'inconsistent'
-        elif status == 'active' and not generated:
+        elif status == 'active' and generated == 0 and coverage == 1:
             result['fg']['status'] = 'inconsistent'
         elif (not generated or status != 'active') and coverage < 1:
             result['fg']['status'] = 'partial'
@@ -305,12 +437,14 @@ def qualify_capture(run, row, records, qualification, receipt, sources, *, colle
 
     The receipt has before/after process identities, an owned session ID and
     a hash/length for each exact parser input. The caller must obtain those
-    identities from live checks bracketing source acquisition.
+    identities from live checks bracketing source acquisition. Qualification
+    must be the envelope created by produce_qualification during acquisition.
     """
     _require(collection_status in COLLECTION_STATUSES, 'Unknown collection outcome')
     start, end = _bounds(run)
     build = run['expected_build']
     fingerprints = _verify_capture(run, receipt, records, sources)
+    qualification = _verify_qualification(qualification, run, row, records, receipt, fingerprints)
     requested = dict(aa=row['nominal_mode'], vrs=row['vrs'], fg=row['frame_generation'])
     _require(all(requested[name] in allowed for name, allowed in REQUESTS.items())
              and (run['aa'], run['vrs'], run['fg']) == (
