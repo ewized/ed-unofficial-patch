@@ -82,6 +82,7 @@ struct Op {
     Rgb          rgb{};
     float        alpha = 1.0f;   // fills only
     std::wstring str;
+    bool         ellipsis = true;
     UINT         align = 0;      // DT_LEFT / DT_RIGHT / DT_CENTER, DT_WORDBREAK for wrapping
     Font         font = Font::Row;
     bool         top = false;    // draw from the rect's top, unclipped, rather than centred
@@ -109,6 +110,7 @@ struct Raster {
     std::vector<LineRect> lines;
     float    cardFrac = 1.0f;    // how much of the width the menu card spans
     int      popupScrollMax = 0; // line-steps the tooltip's body can be scrolled
+    MenuBodyScroll bodyScroll;
     double   ms = 0.0;
     uint8_t  slotOwner = 0;      // MenuContent::slotOwner of the content this was drawn from
 };
@@ -267,6 +269,79 @@ int measureWrapped(const std::wstring& s, int widthPx, int emPx) {
     return r.bottom - r.top;
 }
 
+// Break at measured word boundaries, and within an overlong token. The same
+// text and font are then measured and drawn, so no source suffix is discarded.
+std::wstring wrapRowText(const std::wstring& text, int width, int em) {
+    if (text.empty() || width <= 0) return text;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HFONT font = dc ? makeFont(em, false) : nullptr;
+    if (!dc || !font) { if (dc) DeleteDC(dc); return text; }
+    HGDIOBJ old = SelectObject(dc, font);
+    std::wstring out;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find(L'\n', pos);
+        if (end == std::wstring::npos) end = text.size();
+        while (pos < end) {
+            int fit = 0;
+            SIZE size{};
+            GetTextExtentExPointW(dc, text.data() + pos, static_cast<int>(end - pos), width, &fit, nullptr, &size);
+            size_t count = static_cast<size_t>((std::max)(1, fit));
+            if (count > end - pos) count = end - pos;
+            if (pos + count < end) {
+                const size_t space = text.rfind(L' ', pos + count);
+                if (space != std::wstring::npos && space > pos) count = space - pos;
+                // Do not split a UTF-16 surrogate pair at a hard token break.
+                if (text[pos + count - 1] >= 0xd800 && text[pos + count - 1] <= 0xdbff &&
+                    text[pos + count] >= 0xdc00 && text[pos + count] <= 0xdfff) {
+                    count = count > 1 ? count - 1 : 2;
+                }
+            }
+            out.append(text, pos, count);
+            pos += count;
+            while (pos < end && text[pos] == L' ') ++pos;
+            if (pos < end) out += L'\n';
+        }
+        if (end < text.size()) { out += L'\n'; pos = end + 1; }
+    }
+    SelectObject(dc, old);
+    DeleteObject(font);
+    DeleteDC(dc);
+    return out;
+}
+
+struct RowLayout {
+    int split = 0, primaryH = 0, height = 0;
+    Font leftFont = Font::Row;
+    std::wstring left, right;
+};
+
+// One source of row geometry for measurement, drawing, badges and hit testing.
+RowLayout rowLayout(const MenuContent& c, const MenuLine& line, int cardW, int rowPitch, int primaryH, int badgeH) {
+    RowLayout row;
+    const int cap = c.capPx, pad = cap * 8 / 10;
+    const bool note = line.style == kMenuNote || line.style == kMenuHeading;
+    row.split = note ? cardW - pad : line.style == kMenuInfo ? (c.infoSplitPx > 0 ? c.infoSplitPx : cardW * 26 / 100) : cardW * 6 / 10;
+    row.leftFont = line.style == kMenuHeading ? Font::Small : line.style == kMenuNote ? Font::Hint : Font::Row;
+    row.left = widen(line.left);
+    row.right = widen(line.right);
+    const bool secondary = line.badge != kBadgeNone || line.reserveBadge;
+    row.primaryH = secondary ? primaryH : rowPitch;
+    if (c.wrapRows) {
+        const int leftEm = row.leftFont == Font::Small ? cap : row.leftFont == Font::Hint ? cap * 8 / 7 : (c.rowFontPx > 0 ? c.rowFontPx : cap * 10 / 7);
+        const int leftRight = line.style == kMenuHeading ? cardW - pad / 2 : row.split - (note || line.style == kMenuInfo ? 0 : cap / 2);
+        const int rightEm = c.rowFontPx > 0 ? c.rowFontPx : cap * 10 / 7;
+        const int switchW = (rowPitch * 55 / 100) * 19 / 10;
+        const int rightWidth = cardW - pad - row.split - (line.toggle ? switchW + cap / 2 : 0) - (line.style == kMenuRowEdit ? cap / 3 : 0);
+        row.left = wrapRowText(row.left, leftRight - pad, leftEm);
+        row.right = wrapRowText(row.right, rightWidth, rightEm);
+        row.primaryH = (std::max)(row.primaryH, measureWrapped(row.left, leftRight - pad, leftEm));
+        row.primaryH = (std::max)(row.primaryH, measureWrapped(row.right, rightWidth, rightEm));
+    }
+    row.height = row.primaryH + (secondary ? badgeH : 0);
+    return row;
+}
+
 // The footer's box is ALWAYS two lines tall. The model composes a legend
 // line and, when there is one, a status line after a '\n' (menu_keys.h,
 // menuComposeFooter): the pending count, a shared-keys warning. Sizing the
@@ -287,7 +362,7 @@ constexpr int kFooterLines = 2;
 // reads both).
 void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& lines, int* outH,
             int popupBodyH, int* outPopupScrollMax, RECT* outFootRect = nullptr,
-            int* outFootLines = nullptr) {
+            int* outFootLines = nullptr, MenuBodyScroll* outBody = nullptr) {
     if (outPopupScrollMax) *outPopupScrollMax = 0;
     if (outFootRect) *outFootRect = {-1, -1, -1, -1};
     if (outFootLines) *outFootLines = 0;
@@ -307,9 +382,10 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int primaryH = (std::max)(rowPitch, fontLineHeight(c.rowFontPx > 0 ? c.rowFontPx : cap * 10 / 7));
     const int badgeH = fontLineHeight(cap * 8 / 10);
     int rowsH = 0;
+    std::vector<RowLayout> rowLayouts;
     for (int i = 0; i < rows; ++i) {
-        const MenuLine& line = c.lines[i];
-        rowsH += line.badge != kBadgeNone || line.reserveBadge ? primaryH + badgeH : rowPitch;
+        rowLayouts.push_back(rowLayout(c, c.lines[i], cardW, rowPitch, primaryH, badgeH));
+        rowsH += rowLayouts.back().height;
     }
     // The tile grid: caption, big value, a two-line sub, in a box five
     // tile-units tall, the unit being nine tenths of a cap. Each box is
@@ -340,8 +416,27 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     // A locked FPS readout sits above the tabs so it stays visible while
     // the menu is scrolled or a tooltip is up.
     const int overlayH = (c.toast || !c.overlayLine[0]) ? 0 : cap * 16 / 10;
-    const int H = pad + overlayH + tabH + tilesH + rowsH + (c.toast ? cap * 2 / 10 : 0) +
-                  graphH + (hintReserved ? hintH : 0) + footH + pad;
+    const int chromeH = pad + overlayH + tabH + (c.toast ? cap * 2 / 10 : 0) + (hintReserved ? hintH : 0) + footH + pad;
+    const int naturalBodyH = tilesH + rowsH + graphH;
+    int bodyH = naturalBodyH;
+    MenuBodyScroll body;
+    if (c.wrapRows) {
+        const int budget = (std::max)(1, 2048 - chromeH);
+        bodyH = (std::min)(naturalBodyH, c.bodyMaxPx > 0 ? (std::min)(budget, c.bodyMaxPx) : budget);
+        body.maxPx = (std::max)(0, naturalBodyH - bodyH);
+        body.offsetPx = (std::max)(0, (std::min)(c.bodyScrollPx, body.maxPx));
+        if (c.focusLine >= 0 && c.focusLine < rows) {
+            int top = tilesH;
+            for (int i = 0; i < c.focusLine; ++i) top += rowLayouts[i].height;
+            const int bottom = top + rowLayouts[c.focusLine].height;
+            if (top < body.offsetPx) body.offsetPx = top;
+            if (bottom > body.offsetPx + bodyH) body.offsetPx = bottom - bodyH;
+            body.offsetPx = (std::max)(0, (std::min)(body.offsetPx, body.maxPx));
+        }
+    }
+    body.viewportPx = bodyH;
+    if (outBody) *outBody = body;
+    const int H = chromeH + bodyH;
     *outH = H;
 
     // Background.
@@ -413,6 +508,8 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         }
         y += tabH;
     }
+    const int bodyTop = y;
+    const size_t bodyOpsBegin = ops.size();
     if (tileRows > 0) {
         const int gridW = cardW - 2 * pad;
         const int tileW = (gridW - (columns - 1) * tileGap) / columns;
@@ -460,9 +557,9 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     int popupRowTop = -1, popupRowBottom = -1;
     for (int i = 0; i < rows; ++i) {
         const MenuLine& l = c.lines[i];
-        const bool secondary = l.badge != kBadgeNone || l.reserveBadge;
-        const int textH = secondary ? primaryH : rowPitch;
-        const int rowH = secondary ? primaryH + badgeH : rowPitch;
+        const RowLayout& measured = rowLayouts[i];
+        const int textH = measured.primaryH;
+        const int rowH = measured.height;
         const RECT rr = {pad / 2, y, cardW - pad / 2, y + rowH};
         if (i == c.popupLine) {
             popupRowTop = rr.top;
@@ -494,17 +591,16 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
         // column ended -- the Debug tab's "For bug reports. Both are off
         // unless you turn them on." read as "Both are off unl..." -- with
         // half the card sitting empty beside the cut.
-        const int split = l.style == kMenuNote || l.style == kMenuHeading ? cardW - pad
-                          : l.style == kMenuInfo                          ? (c.infoSplitPx > 0 ? c.infoSplitPx : cardW * 26 / 100)
-                                                                          : cardW * 6 / 10;
+        const int split = measured.split;
         Op left;
         left.text = true;
-        left.str = widen(l.left);
+        left.str = measured.left;
         // Info's split already includes its measured caption/value gap.
         const int gutter = l.style == kMenuInfo ? 0 : cap / 2;
         left.rect = {pad, y, split - (l.style == kMenuNote || l.style == kMenuHeading ? 0 : gutter), y + textH};
-        left.align = DT_LEFT;
-        left.font = l.style == kMenuHeading ? Font::Small : l.style == kMenuNote ? Font::Hint : Font::Row;
+        left.align = DT_LEFT | (c.wrapRows ? DT_WORDBREAK : 0);
+        left.ellipsis = !c.wrapRows;
+        left.font = measured.leftFont;
         left.rgb = l.style == kMenuHeading        ? kHeading
                    : l.style == kMenuDim || l.dim ? kDimText
                    : l.style == kMenuNote         ? kHint
@@ -560,9 +656,10 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 ops.push_back(edge);
             }
             right.text = true;
-            right.str = widen(l.right);
+            right.str = measured.right;
             right.rect = {split, y, cardW - pad, y + textH};
-            right.align = l.style == kMenuInfo ? DT_LEFT : DT_RIGHT;
+            right.align = (l.style == kMenuInfo ? DT_LEFT : DT_RIGHT) | (c.wrapRows ? DT_WORDBREAK : 0);
+            right.ellipsis = !c.wrapRows;
             right.font = Font::Row;
             right.rgb = l.style == kMenuInfo               ? kLabel
                         : l.style == kMenuDim || l.dim      ? kDimText
@@ -580,7 +677,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                     : l.badge == kBadgeClash   ? L"also in Elite"
                     : l.badge == kBadgeStopped ? L"stopped"
                                                : L"?";
-            b.rect = {split, y + primaryH, cardW - pad, y + rowH};
+            b.rect = {split, y + textH, cardW - pad, y + rowH};
             b.align = DT_RIGHT;
             b.font = Font::Badge;
             b.rgb = l.badge == kBadgeUnknown ? kDimText : kBadge;
@@ -643,6 +740,42 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             ops.push_back(t);
         }
         y += graphOneH;
+    }
+    if (c.wrapRows) {
+        const RECT clip = {0, bodyTop, cardW, bodyTop + bodyH};
+        for (size_t i = bodyOpsBegin; i < ops.size(); ++i) {
+            Op& op = ops[i];
+            op.rect.top -= body.offsetPx;
+            op.rect.bottom -= body.offsetPx;
+            op.clipped = true;
+            op.clip = clip;
+            if (!op.text) {
+                op.rect.top = (std::max)(op.rect.top, clip.top);
+                op.rect.bottom = (std::min)(op.rect.bottom, clip.bottom);
+            }
+        }
+        for (LineRect& line : lines) {
+            const float top = (std::max)(float(bodyTop), line.y0 * H - body.offsetPx);
+            const float bottom = (std::min)(float(bodyTop + bodyH), line.y1 * H - body.offsetPx);
+            line.selectable = line.selectable && bottom > top;
+            line.y0 = top / H;
+            line.y1 = bottom / H;
+        }
+        popupRowTop -= body.offsetPx;
+        popupRowBottom -= body.offsetPx;
+        if (popupRowBottom <= bodyTop || popupRowTop >= bodyTop + bodyH) popupRowTop = -1;
+        else popupRowTop = (std::max)(popupRowTop, bodyTop);
+        y = bodyTop + bodyH;
+        if (body.maxPx > 0) {
+            const int trackH = bodyH;
+            const int thumbH = (std::max)(cap / 2, trackH * bodyH / naturalBodyH);
+            const int thumbY = bodyTop + (trackH - thumbH) * body.offsetPx / body.maxPx;
+            Op thumb;
+            thumb.rect = {cardW - (std::max)(2, pad / 3), thumbY, cardW - (std::max)(1, pad / 6), thumbY + thumbH};
+            thumb.rgb = kHint;
+            thumb.alpha = 0.55f;
+            ops.push_back(thumb);
+        }
     }
     if (!c.toast) {
         if (c.hint[0]) {
@@ -820,11 +953,12 @@ void execute(Dib& d, const std::vector<Op>& ops, bool coverage, HFONT fonts[kFon
         RECT r = o.rect;
         UINT fmt = o.align | DT_NOPREFIX;
         if (!(o.align & DT_WORDBREAK)) {
-            fmt |= DT_SINGLELINE | DT_END_ELLIPSIS;
+            fmt |= DT_SINGLELINE;
+            if (o.ellipsis) fmt |= DT_END_ELLIPSIS;
             // Centred in the box, or set from its top and never clipped: a
             // big number's descender room may reach past its box.
             fmt |= o.top ? DT_NOCLIP : DT_VCENTER;
-        } else {
+        } else if (o.ellipsis) {
             fmt |= DT_END_ELLIPSIS;
         }
         DrawTextW(d.dc, o.str.c_str(), -1, &r, fmt);
@@ -848,12 +982,13 @@ bool rasterise(const MenuContent& c, Raster& out) {
                                     c.capPx * 78 / 100);
     }
     int popupScrollMax = 0;
-    layout(c, ops, lines, &H, popupBodyH, &popupScrollMax);
+    MenuBodyScroll body;
+    layout(c, ops, lines, &H, popupBodyH, &popupScrollMax, nullptr, nullptr, &body);
     const int W = c.widthPx;
     // The width is bounded upstream (the model clamps the CARD, and the
     // strip is a fixed fraction of it), but say so here too: this is the
     // twin of the height guard, and the DIBs below are sized from it.
-    if (W < 64 || W > 2600 || H < 32 || H > 2048) {
+    if (W < 64 || W > 3200 || H < 32 || H > 2048) {
         // Loud, once: the worker keeps the previous bitmap when this
         // refuses, so a page that stopped updating (the fifteen-line Status
         // page at a large cap) would otherwise look exactly like one that
@@ -861,7 +996,7 @@ bool rasterise(const MenuContent& c, Raster& out) {
         static std::atomic<bool> refusedLogged{false};
         if (!refusedLogged.exchange(true)) {
             Log::get().note("menu panel: a %dx%d layout (%d lines, %d tiles, cap %d px) is outside the "
-                            "raster's 64..2600 by 32..2048 box; the panel keeps its previous bitmap "
+                            "raster's 64..3200 by 32..2048 box; the panel keeps its previous bitmap "
                             "until the content fits.", W, H, c.lineCount, c.tileCount, c.capPx);
         }
         return false;
@@ -917,6 +1052,7 @@ bool rasterise(const MenuContent& c, Raster& out) {
     out.cardFrac = c.cardPx > 0 && c.cardPx <= W ? static_cast<float>(c.cardPx) / static_cast<float>(W)
                                                  : 1.0f;
     out.popupScrollMax = popupScrollMax;
+    out.bodyScroll = body;
     out.ms = qpcFrequency() > 0
                  ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(qpcFrequency())
                  : 0.0;
@@ -945,6 +1081,7 @@ struct Worker {
     int                     liveW = 0, liveH = 0;
     float                   liveCardFrac = 1.0f;
     int                     livePopupScrollMax = 0;
+    MenuBodyScroll          liveBodyScroll;
     double                  lastMs = 0.0;
 };
 // The OS ends the worker before DLL process-detach. A static Worker would
@@ -1832,7 +1969,11 @@ void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int
     // layout() records each row as a fraction of the height; the line's own
     // text op is the one that starts at that row's top.
     const int rowTop = static_cast<int>(lines[i].y0 * h + 0.5f);
-    const std::wstring text = widen(c.lines[i].left);
+    const int cardW = c.cardPx > 0 && c.cardPx <= c.widthPx ? c.cardPx : c.widthPx;
+    const int pitch = c.compact ? c.capPx * 17 / 10 : c.capPx * 2;
+    const RowLayout measured = rowLayout(c, c.lines[i], cardW, pitch,
+        (std::max)(pitch, fontLineHeight(c.rowFontPx > 0 ? c.rowFontPx : c.capPx * 10 / 7)), fontLineHeight(c.capPx * 8 / 10));
+    const std::wstring& text = measured.left;
     for (const Op& o : ops) {
         if (!o.text || o.rect.top != rowTop || o.str != text) continue;
         if (x0) *x0 = o.rect.left;
@@ -1843,6 +1984,51 @@ void menuPanelLineRectForTest(const MenuContent& c, int i, int* x0, int* y0, int
     }
 }
 
+MenuBodyScroll menuPanelBodyScrollForTest(const MenuContent& c) {
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int height = 0;
+    MenuBodyScroll body;
+    layout(c, ops, lines, &height, 0, nullptr, nullptr, nullptr, &body);
+    return body;
+}
+
+bool menuPanelHardWrapKeepsTextForTest(const wchar_t* text, int width, int em) {
+    const std::wstring wrapped = wrapRowText(text, width, em);
+    std::wstring joined;
+    for (size_t i = 0; i < wrapped.size(); ++i) {
+        const wchar_t ch = wrapped[i];
+        if (ch >= 0xd800 && ch <= 0xdbff &&
+            (i + 1 == wrapped.size() || wrapped[i + 1] < 0xdc00 || wrapped[i + 1] > 0xdfff)) return false;
+        if (ch != L'\n') joined += ch;
+    }
+    return joined == text;
+}
+
+bool menuPanelRowTextFitsForTest(const MenuContent& c, int row, bool right, const wchar_t* suffix) {
+    if (row < 0 || row >= c.lineCount) return false;
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int height = 0;
+    layout(c, ops, lines, &height, 0, nullptr);
+    const int cardW = c.cardPx > 0 && c.cardPx <= c.widthPx ? c.cardPx : c.widthPx;
+    const int pitch = c.compact ? c.capPx * 17 / 10 : c.capPx * 2;
+    const RowLayout measured = rowLayout(c, c.lines[row], cardW, pitch,
+        (std::max)(pitch, fontLineHeight(c.rowFontPx > 0 ? c.rowFontPx : c.capPx * 10 / 7)), fontLineHeight(c.capPx * 8 / 10));
+    const std::wstring& text = right ? measured.right : measured.left;
+    const std::wstring tail = suffix ? suffix : L"";
+    if (text.size() < tail.size() || text.compare(text.size() - tail.size(), tail.size(), tail) != 0) return false;
+    for (const Op& op : ops) {
+        if (!op.text || op.str != text || op.ellipsis) continue;
+        const int em = op.font == Font::Small ? c.capPx : op.font == Font::Hint ? c.capPx * 8 / 7 : c.rowFontPx > 0 ? c.rowFontPx : c.capPx * 10 / 7;
+        const int needed = measureWrapped(op.str, op.rect.right - op.rect.left, em);
+        const int end = op.rect.top + needed;
+        const bool suffixVisible = !op.clipped || (end <= op.clip.bottom && end - fontLineHeight(em) >= op.clip.top);
+        if (needed <= op.rect.bottom - op.rect.top && suffixVisible) return true;
+    }
+    return false;
+}
+
 MenuPanelRowRectsForTest menuPanelRowRectsForTest(const MenuContent& c, int i) {
     MenuPanelRowRectsForTest result;
     if (i < 0 || i >= c.lineCount) return result;
@@ -1850,6 +2036,10 @@ MenuPanelRowRectsForTest menuPanelRowRectsForTest(const MenuContent& c, int i) {
     std::vector<LineRect> lines;
     int height = 0;
     layout(c, ops, lines, &height, 0, nullptr);
+    const int cardW = c.cardPx > 0 && c.cardPx <= c.widthPx ? c.cardPx : c.widthPx;
+    const int pitch = c.compact ? c.capPx * 17 / 10 : c.capPx * 2;
+    const RowLayout measured = rowLayout(c, c.lines[i], cardW, pitch,
+        (std::max)(pitch, fontLineHeight(c.rowFontPx > 0 ? c.rowFontPx : c.capPx * 10 / 7)), fontLineHeight(c.capPx * 8 / 10));
     const LineRect& hit = lines[i];
     result.hitTop = static_cast<int>(hit.y0 * height + 0.5f);
     result.hitBottom = static_cast<int>(hit.y1 * height + 0.5f);
@@ -1857,8 +2047,8 @@ MenuPanelRowRectsForTest menuPanelRowRectsForTest(const MenuContent& c, int i) {
     for (const Op& op : ops) {
         if (!op.text || op.rect.top < result.hitTop || op.rect.top >= result.hitBottom) continue;
         int* rect = op.font == Font::Badge ? result.badge
-                    : op.str == widen(c.lines[i].left) ? result.label
-                    : op.str == widen(c.lines[i].right) ? result.value : nullptr;
+                    : op.str == measured.left ? result.label
+                    : op.str == measured.right ? result.value : nullptr;
         if (!rect) continue;
         rect[0] = op.rect.left;
         rect[1] = op.rect.top;
@@ -1918,6 +2108,7 @@ void menuPanelTick(ID3D11Device* dev) {
         g_w.liveH = r.h;
         g_w.liveCardFrac = r.cardFrac;
         g_w.livePopupScrollMax = r.popupScrollMax;
+        g_w.liveBodyScroll = r.bodyScroll;
         g_w.lastMs = r.ms;
     });
 }
@@ -1928,6 +2119,11 @@ void menuPanelSetGeometry(const MenuGeometry& g) {
 }
 
 float menuPanelAspect() { return g_panelAspect.load(); }
+
+MenuBodyScroll menuPanelBodyScroll() {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    return g_w.liveBodyScroll;
+}
 
 int menuPanelPopupScrollMax() {
     std::lock_guard<std::mutex> lock(g_w.m);

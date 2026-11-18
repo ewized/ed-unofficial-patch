@@ -79,17 +79,43 @@ inline const char* nativeFgMeasureWord(NativeFgMeasureState state) noexcept {
 }
 // The runtime's current pump selection and observed generated count are kept
 // distinct. A warmed backend does not imply that a generated frame was used.
+enum class NativeFgModeKind {Native,Active,Waiting,Failed,Unavailable};
+struct NativeFgModeSelection {NativeFgModeKind kind;uint32_t multiplier=0;};
+inline NativeFgModeSelection nativeFgModeSelection(const NativeFgReadout& r) noexcept {
+    if(r.failed)return {NativeFgModeKind::Failed};
+    if(r.backendUnavailable)return {NativeFgModeKind::Unavailable};
+    const bool fresh=r.measurement==NativeFgMeasureState::Counting||r.measurement==NativeFgMeasureState::Measuring;
+    if(fresh&&r.totals.fgEnabled&&(r.totals.activeMultiplier==2||r.totals.activeMultiplier==4))
+        return {NativeFgModeKind::Active,r.totals.activeMultiplier};
+    if(r.selectedMultiplier)return {NativeFgModeKind::Waiting,r.selectedMultiplier};
+    return {NativeFgModeKind::Native};
+}
 inline void formatNativeFgMode(const NativeFgReadout& r,char* text,size_t size) {
     if(!text||!size)return;
-    if(r.failed){std::snprintf(text,size,"%sfailed",r.automatic?"Auto: ":"");return;}
-    if(r.backendUnavailable){std::snprintf(text,size,"%sunavailable",r.automatic?"Auto: ":"");return;}
-    const bool live=r.measurement==NativeFgMeasureState::Counting||r.measurement==NativeFgMeasureState::Measuring;
-    if(live&&r.totals.fgEnabled&&r.totals.activeMultiplier){
-        std::snprintf(text,size,"%s%ux",r.automatic?"Auto: ":"",r.totals.activeMultiplier);
-    }else if(r.selectedMultiplier){
-        std::snprintf(text,size,"%s%ux waiting",r.automatic?"Auto: ":"",r.selectedMultiplier);
-    }else std::snprintf(text,size,"%s",r.automatic?"Auto: native":"Off");
+    const auto mode=nativeFgModeSelection(r);
+    const char* prefix=r.automatic?"Auto: ":"";
+    switch(mode.kind){
+    case NativeFgModeKind::Failed:std::snprintf(text,size,"%sfailed",prefix);break;
+    case NativeFgModeKind::Unavailable:std::snprintf(text,size,"%sunavailable",prefix);break;
+    case NativeFgModeKind::Active:std::snprintf(text,size,"%s%ux",prefix,mode.multiplier);break;
+    case NativeFgModeKind::Waiting:std::snprintf(text,size,"%s%ux waiting",prefix,mode.multiplier);break;
+    case NativeFgModeKind::Native:std::snprintf(text,size,"%s",r.automatic?"Auto: native":"Off");break;
+    }
 }
+// A tile's large face has room for a short value. Full mode and decision text
+// stay in the wrapping Monitor note instead of ellipsizing the big number.
+inline void formatNativeFgTileValue(const NativeFgReadout& r,char* text,size_t size) {
+    if(!text||!size)return;
+    const auto mode=nativeFgModeSelection(r);
+    switch(mode.kind){
+    case NativeFgModeKind::Failed:std::snprintf(text,size,"--");break;
+    case NativeFgModeKind::Unavailable:std::snprintf(text,size,"--");break;
+    case NativeFgModeKind::Active:std::snprintf(text,size,"%ux",mode.multiplier);break;
+    case NativeFgModeKind::Waiting:std::snprintf(text,size,"--");break;
+    case NativeFgModeKind::Native:std::snprintf(text,size,"%s",r.automatic?"1x":"Off");break;
+    }
+}
+
 inline void formatNativeFgRates(const NativeFgReadout& r,char* text,size_t size,bool compact=false) {
     if(!text||!size)return;
     if(r.measurement!=NativeFgMeasureState::Counting){
@@ -117,7 +143,7 @@ inline void formatNativeFgCompact(const NativeFgReadout& r,char* text,size_t siz
     if(r.totals.available)std::snprintf(text,size,"%s | %s | gen total %llu",rates,mode,(unsigned long long)r.totals.generatedFrames);
     else std::snprintf(text,size,"%s | %s",rates,mode);
 }
-// The native compact panel stores at most 95 text characters. Keep all frame
+// Limit the compact readout to 95 characters for readability. Keep all frame
 // metrics intact; timings remain on the detailed card when the line is full.
 constexpr size_t kNativeFgCompactMaxChars=95;
 inline void formatNativeFgOverlay(const NativeFgReadout& r,double renderFps,const char* timings,char* text,size_t size) {

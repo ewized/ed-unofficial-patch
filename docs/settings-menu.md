@@ -899,6 +899,19 @@ it was explaining (flown 2026-09-07).
 bumpers change page, watched through `xinput_watch` and masked from the
 game through door 4.
 
+## Wider VR menu (2026-11-17)
+
+The VR F8 card defaults to 36 degrees instead of 30, at the same 1.1-degree
+text size. The tooltip safety limit remains 36 degrees. The card raster can
+grow to 1920 pixels, with a 3200-by-2048 limit including the tooltip strip,
+so a high-resolution headset gains text space as well as angular width.
+
+VR setting labels, values and status notes wrap at measured font boundaries.
+A bounded body viewport keeps tabs, hints and footer fixed. PageUp/PageDown
+scroll an overflowing body after the tooltip scroll is exhausted; Tab still
+changes pages. Returning to a setting reveals its full row before an edit.
+Flat-screen layout retains its existing sizing and row rules.
+
 ## Native VRS and frame-generation counters (2026-11-17)
 
 Native VR's Performance page places **Native eye-tracked VRS** and **VRS sharp
@@ -906,8 +919,9 @@ region** beside **Frame generation**. The external Magic file controls and the
 separate VRS/Beyond page are removed. The native VRS configuration names remain
 `experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
 
-Monitor adds a **GENERATED** tile with generated FPS and the session total,
-and a **FRAME GENERATION** tile with the runtime mode and Auto decision.
+Monitor adds a **GENERATED** tile with generated FPS and an **FG MODE** tile
+with the runtime mode and Auto selection (1x means native cadence). Full session totals and the Auto
+decision appear in the wrapping note below the gauges.
 The compact and detailed FPS readouts show the same counters. For example,
 `90 submit fps (45 native + 45 gen) | Auto: 2x | gen total 145` describes
 observed app submissions, not a predicted multiplier or a headset benchmark.

@@ -61,7 +61,9 @@ template<class Check> void nativeFgReadoutCases(Check check) {
     check(formatCompactLine(card,text,sizeof(text))&&std::string(text).find("render 58 fps | gen unavailable")!=std::string::npos,"native FG: compact mixed-version readout preserves the known rendered rate");
     r={};r.visible=true;r.automatic=true;r.selectedMultiplier=2;formatNativeFgMode(r,text,sizeof(text));
     check(std::string(text)=="Auto: 2x waiting","native FG: selecting Auto 2x does not claim generated output before the XR pump is active");
+    formatNativeFgTileValue(r,text,sizeof(text));check(std::string(text)=="--","native FG: big tile value is short while full waiting mode remains in the note");
     r.selectedMultiplier=0;formatNativeFgMode(r,text,sizeof(text));check(std::string(text)=="Auto: native","native FG: Auto native mode remains visible rather than looking manually Off");
+    formatNativeFgTileValue(r,text,sizeof(text));check(std::string(text)=="1x","native FG: Auto native mode fits the large tile face without ellipsis");
     r.failed=true;formatNativeFgMode(r,text,sizeof(text));check(std::string(text)=="Auto: failed","native FG: Auto failure is explicit");
     r.failed=false;r.backendUnavailable=true;formatNativeFgMode(r,text,sizeof(text));check(std::string(text)=="Auto: unavailable","native FG: unavailable backend is explicit");
     r.backendUnavailable=false;r.totals.available=true;r.totals.generatedFrames=r.totals.repeatedFrames=std::numeric_limits<uint64_t>::max();

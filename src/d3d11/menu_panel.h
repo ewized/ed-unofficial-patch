@@ -49,7 +49,7 @@ enum MenuLineStyle : uint8_t {
     kMenuHeading = 2,   // a group heading
     kMenuInfo = 3,      // status text: label left, value right, no highlight
     kMenuDim = 4,       // a read-only row
-    kMenuNote = 5,      // one full-width line of small text, `left` only
+    kMenuNote = 5,      // full-width small text, `left` only; VR may wrap it
     kMenuRowEdit = 6,   // the row whose value is being typed: a field and a caret
 };
 
@@ -63,8 +63,8 @@ enum MenuBadge : uint8_t {
 };
 
 struct MenuLine {
-    char    left[96];
-    char    right[64];
+    char    left[256];
+    char    right[256];
     uint8_t style;
     uint8_t badge;
     uint8_t toggle;   // 0 none; 1 off, 2 on: a switch is drawn in place of `right`
@@ -178,6 +178,12 @@ struct MenuContent {
     int      popupScroll = 0;   // lines of the body scrolled past
     bool     toast = false; // a one-line panel instead of the menu
     bool     compact = false;   // info pages: a tighter row pitch
+    // VR menu rows keep their complete text and scroll inside a bounded body.
+    // Flat panels, toasts and the aiming prompt retain their existing layout.
+    bool     wrapRows = false;
+    int      bodyMaxPx = 0;      // zero uses the raster's height budget
+    int      bodyScrollPx = 0;
+    int      focusLine = -1;     // automatically reveal this logical row, unless reading the body
     // Sizing, decided by the model from the channel: the bitmap's width in
     // pixels, the MENU CARD's width within it, and the cap height of row
     // text. The bitmap is wider than the card so the tooltip has somewhere
@@ -324,6 +330,21 @@ int menuPanelTabWidth(const char* utf8, int emPx);
 // status. At large VR text sizes fewer entries fit the raster; the model
 // uses this count with its existing scrolling window.
 int menuPanelEntryRows(const MenuContent& c, int requested);
+
+struct MenuBodyScroll {
+    int offsetPx = 0;
+    int maxPx = 0;
+    int viewportPx = 0;
+};
+// Read the uploaded raster's bounded body window; the model uses it for PageUp/PageDown.
+MenuBodyScroll menuPanelBodyScroll();
+#ifdef EDVR_MENU_TEST
+MenuBodyScroll menuPanelBodyScrollForTest(const MenuContent& c);
+// Non-whitespace hard-token fixture: no glyph code units may be lost or split.
+bool menuPanelHardWrapKeepsTextForTest(const wchar_t* text, int width, int em);
+bool menuPanelRowTextFitsForTest(const MenuContent& c, int row, bool right, const wchar_t* suffix);
+#endif
+
 
 void menuPanelShutdown();
 

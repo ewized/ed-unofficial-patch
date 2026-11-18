@@ -1523,7 +1523,10 @@ NativeFgReadout nativeFgReadout(uint64_t now) {
     out.selectedMultiplier=status.requestedMultiplier;
     out.failed=status.state==EDVR_FG_FAILED;
     out.backendUnavailable=status.state==EDVR_FG_UNAVAILABLE;
-    if(out.automatic)out.reason=fg_auto::reasonName(nativeFgAutoStatus().reason);
+    if(out.automatic) {
+        const auto policy=nativeFgAutoStatus();out.reason=fg_auto::reasonName(policy.reason);
+        out.failed=out.failed||policy.reason==fg_auto::Reason::Fault;
+    }
     else if(out.failed)out.reason="generation failed";
     else if(out.backendUnavailable)out.reason="generation unavailable";
     else if(out.selectedMultiplier&&!out.totals.fgEnabled)out.reason="waiting for generated frames";
@@ -1780,13 +1783,22 @@ int perfMonitorTiles(PerfTile* out, int max) {
         }
         tile("DISPLAY", v, sub);
         const auto fg=nativeFgReadout(historyNow);
-        if(fg.measurement==NativeFgMeasureState::Counting)snprintf(v,sizeof(v),"%.1f fps",fg.generatedFps);
-        else snprintf(v,sizeof(v),"%s",nativeFgMeasureWord(fg.measurement));
-        if(fg.totals.available)snprintf(sub,sizeof(sub),"total %llu",(unsigned long long)fg.totals.generatedFrames);
-        else snprintf(sub,sizeof(sub),"submitted count unavailable");
+        if(fg.measurement==NativeFgMeasureState::Counting) {
+            snprintf(v,sizeof(v),"%.1f",fg.generatedFps);
+            snprintf(sub,sizeof(sub),"fps; last 1 s");
+        } else {
+            snprintf(v,sizeof(v),"--");
+            snprintf(sub,sizeof(sub),"%s",nativeFgMeasureWord(fg.measurement));
+        }
         tile("GENERATED",v,sub);
-        formatNativeFgMode(fg,v,sizeof(v));
-        tile("FRAME GENERATION",v,fg.reason);
+        formatNativeFgTileValue(fg,v,sizeof(v));
+        const auto mode=nativeFgModeSelection(fg);
+        const char* modeWord=mode.kind==NativeFgModeKind::Failed?"failed":
+            mode.kind==NativeFgModeKind::Unavailable?"unavailable":
+            mode.kind==NativeFgModeKind::Waiting?"waiting":
+            mode.kind==NativeFgModeKind::Native?"native":"active";
+        snprintf(sub,sizeof(sub),"%s: %s",fg.automatic?"Auto":"Fixed",modeWord);
+        tile("FG MODE",v,sub);
     }
     return n;
 }
@@ -2049,7 +2061,7 @@ void perfMonitorNativeFrameGenerationLine(char* buf,size_t len) {
     const auto fg=nativeFgReadout(GetTickCount64());
     char rates[112],totals[112];
     formatNativeFgRates(fg,rates,sizeof(rates));formatNativeFgTotals(fg,totals,sizeof(totals));
-    snprintf(buf,len,"%s | %s",rates,totals);
+    snprintf(buf,len,"%s | %s | %s",rates,totals,fg.reason);
 }
 
 void perfMonitorOverlayLine(char* buf, size_t bufLen) {

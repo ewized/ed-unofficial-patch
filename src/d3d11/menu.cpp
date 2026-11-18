@@ -130,7 +130,7 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 constexpr uint64_t kResetArmMs = 3000;
 
 enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice };
-static_assert(kNativeFgCompactMaxChars+1==sizeof(MenuLine{}.left), "native FG readout text budget matches the panel");
+static_assert(kNativeFgCompactMaxChars+1<=sizeof(MenuLine{}.left), "native FG compact readability budget fits the panel");
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
@@ -148,10 +148,12 @@ struct Page {
     std::vector<Entry> entries;
     int                highlight = 0;   // an entry index; never a heading when one exists
     int                scroll = 0;
+    int                bodyScrollPx = 0;
+    bool               readingBody = false;
     bool               status = false;    // an information page: no rows to pick
     bool               monitor = false;   // ...and this one is the performance monitor
     bool               prompt = false;    // F177: the aiming choice page, which exists only while it is up
-    int                visibleRows = 0;   // rows drawn at once; 0 is kVisibleRows
+    int                visibleRows = 0;   // preferred rows; VR uses their height as its scroll viewport
 };
 
 struct Action {
@@ -217,7 +219,7 @@ struct State {
     float distance = 1.4f;
     float curve = 0.2f;
     float textDeg = 1.1f;
-    float widthDeg = 30.0f;
+    float widthDeg = 36.0f;
     int   idleSeconds = 0;
     int   aimMode = 2;   // 0 head, 1 keys, 2 both
     // The tooltip beside the highlighted row: how long a row must be held
@@ -2390,7 +2392,7 @@ float cardWidthDeg() { return g_s.aimPromptWide ? aimprompt::kWidthDeg : g_s.wid
 // width_degrees asks, plus the strip beside it. Scaled in metres and not in
 // degrees, because the bitmap maps linearly onto the surface while tan does
 // not -- multiplying the ANGLE by the ratio would draw the card 3.6% wider
-// than it was asked for at the default, and 9% at width_degrees 45.
+// than it was asked for at width_degrees 30, and 9% at width_degrees 45.
 float panelHalfW(float widthDeg, bool withTip) {
     const float card = g_s.distance * tanf(widthDeg * 0.5f * 0.0174532925f);
     return withTip ? card * kTipRatio : card;
@@ -2552,7 +2554,7 @@ void sizeContent(MenuContent& c, float widthDeg, float textDeg, bool withTip = f
     if (ppd > 80.0f) ppd = 80.0f;
     int card = static_cast<int>(ppd * widthDeg + 0.5f);
     if (card < 480) card = 480;
-    if (card > 1600) card = 1600;
+    if (card > 1920) card = 1920;
     // The ratio is applied AFTER the card is clamped, so the strip is
     // always exactly its fraction of the card and the anchor's offset,
     // which is computed from the ratio alone, stays exact.
@@ -2644,6 +2646,7 @@ void buildContent(MenuContent& c) {
     c.popupLine = -1;
     // F177: the aiming choice page has its own, wider card, with no strip beside it, and its text is shrunk (never grown) until its widest line fits that card.
     const bool promptPage = s.aimPromptUp && !s.pages.empty() && s.pages[s.page].prompt;
+    c.wrapRows = !runtimeFlatProfile() && !promptPage;
     if (promptPage) {
         sizeContent(c, aimprompt::kWidthDeg, s.textDeg, false);
         static double widestEm = 0.0;   // the face is fixed, so the measure is taken once
@@ -2740,14 +2743,11 @@ void buildContent(MenuContent& c) {
         buildMonitor(c);
     } else if (p.status) {
         buildStatus(c);
-        // Fifteen lines on the native path. At the raster's row pitch of
-        // two caps the bitmap's 2048-px height guard (menu_panel.cpp,
-        // rasterise) trips from a 51-px cap, which is the Pimax at the
-        // default 1.1 deg (~46-50 ppd); the Monitor page's pitch of 1.7
-        // moves that to 56, and the guard now logs when it does trip.
+        // Compact information rows retain the flat layout; VR measures their
+        // wrapped height and scrolls the body within the raster's height budget.
         c.compact = true;
         snprintf(c.hint, sizeof(c.hint), "%s",
-                 "The page a support thread will ask to see. Tab or PageDown for the next page.");
+                 "PageUp/PageDown scroll this page; Tab changes page.");
         if (runtimeFlatProfile()) {
             // The flat page has no VR notice to share this slot with, and no PageDown.
             snprintf(c.hint, sizeof(c.hint), "%s", "The page a support thread will ask to see. Tab for the next page.");
@@ -2775,11 +2775,12 @@ void buildContent(MenuContent& c) {
         // it is an explanation for someone who has stopped, not something
         // to flick past.
         const bool showTip =
-            tooltipsOn() &&
+            !p.readingBody && tooltipsOn() &&
             s.tickMs >= s.highlightSinceMs + static_cast<uint64_t>(s.tooltipDelayS * 1000.0f);
         // Keep the highlight in the window.
         const int requestedRows = p.visibleRows > 0 ? p.visibleRows : kVisibleRows;
-        const int visibleRows = p.prompt ? requestedRows : menuPanelEntryRows(c, requestedRows);
+        const int visibleRows = c.wrapRows ? kMenuMaxLines : p.prompt ? requestedRows : menuPanelEntryRows(c, requestedRows);
+        if (c.wrapRows) c.bodyMaxPx = requestedRows * c.capPx * 2;
         if (p.prompt) c.compact = true;   // F177: fifteen lines in the height guard
         const int total = static_cast<int>(p.entries.size());
         if (p.highlight >= total) p.highlight = total ? total - 1 : 0;
@@ -3194,7 +3195,8 @@ void buildContent(MenuContent& c) {
         // bitmap's height and push the page nearer the raster's 2048-px bound.
         if (!p.prompt && c.lineCount > 0) {
             c.reserveHint = true;
-            for (int i = c.lineCount; i < visibleRows && i < kMenuMaxLines; ++i) {
+            const int paddedRows = c.wrapRows ? requestedRows : visibleRows;
+            for (int i = c.lineCount; i < paddedRows && i < kMenuMaxLines; ++i) {
                 c.lines[i].style = kMenuInfo;   // an empty, non-selectable row: presence only, not a setting
                 c.lineCount++;
             }
@@ -3213,10 +3215,15 @@ void buildContent(MenuContent& c) {
         s.tooltipUp = showTip;
     }
 
+    if (c.wrapRows) {
+        c.bodyScrollPx = p.bodyScrollPx;
+        c.focusLine = p.status || p.readingBody ? -1 : p.highlight - p.scroll;
+    }
+
     // The footer: a legend line and at most one status line, composed
     // against the raster's own ruler so what is drawn is what fits.
     // MEASURED 2026-09-11: the old 115-character legend was 1520 px in a
-    // 770 px line at the default width 30 / text 1.1, cut after about 55
+    // 770 px line at the former default width 30 / text 1.1, cut after about 55
     // characters, so "Tab page", the pending count and KEYS SHARED WITH
     // THE GAME had never been visible -- the likeliest root of "how do I
     // change tabs". The width is the card less the raster's pad either
@@ -3688,6 +3695,7 @@ void noteHighlightMoved() {
     g_s.highlightSinceMs = g_s.tickMs;
     g_s.tooltipUp = false;
     g_s.tooltipScroll = 0;
+    if (!g_s.pages.empty()) g_s.pages[g_s.page].readingBody = false;
 }
 
 // Scroll the tooltip's body. Returns whether it moved -- when it did not,
@@ -3708,10 +3716,28 @@ bool scrollTooltip(int lines) {
     return true;
 }
 
+// PageUp/PageDown read the measured VR body without editing an off-screen row.
+// Tab remains the page switch; a directional selection reveals its row again.
+bool scrollMenuBody(int direction) {
+    State& s = g_s;
+    Page& p = s.pages[s.page];
+    if (runtimeFlatProfile() || p.prompt) return false;
+    const MenuBodyScroll body = menuPanelBodyScroll();
+    if (body.maxPx <= 0) return false;
+    const int step = (std::max)(1, body.viewportPx * 3 / 4);
+    const int current = p.readingBody ? p.bodyScrollPx : body.offsetPx;
+    p.bodyScrollPx = (std::max)(0, (std::min)(body.maxPx, current + direction * step));
+    p.readingBody = true;
+    s.tooltipUp = false;
+    s.contentDirty = true;
+    return true;
+}
+
 void moveHighlight(int dir) {
     State& s = g_s;
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
+    if (p.readingBody) { p.readingBody = false; s.contentDirty = true; }
     int h = p.highlight;
     const int n = static_cast<int>(p.entries.size());
     for (int tries = 0; tries < n; ++tries) {
@@ -4376,6 +4402,7 @@ void dispatchNav(MenuNav nav, uint64_t now) {
         case kNavDown: moveHighlight(+1); break;
         case kNavLeft:
         case kNavRight:
+            if (p.readingBody) { noteHighlightMoved(); s.contentDirty = true; break; }
             if (!p.status && !p.entries.empty()) {
                 const auto& entry = p.entries[p.highlight];
                 if (entry.kind == EntryKind::Setting) {
@@ -4385,7 +4412,10 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                 }
             }
             break;
-        case kNavSelect: activateEntry(); break;
+        case kNavSelect:
+            if (p.readingBody) { noteHighlightMoved(); s.contentDirty = true; }
+            else activateEntry();
+            break;
         case kNavBack: closeMenu("UI_Back"); break;
         case kNavPageNext: changePage(+1); break;
         case kNavPagePrev: changePage(-1); break;
@@ -4393,10 +4423,10 @@ void dispatchNav(MenuNav nav, uint64_t now) {
         // there is more of it than fits. Tab is what changes the page,
         // so these only fall back to that when nothing can scroll.
         case kNavReadBack:
-            if (!scrollTooltip(-3)) changePage(-1);
+            if (!scrollTooltip(-3) && !scrollMenuBody(-1)) changePage(-1);
             break;
         case kNavReadOn:
-            if (!scrollTooltip(+3)) changePage(+1);
+            if (!scrollTooltip(+3) && !scrollMenuBody(+1)) changePage(+1);
             break;
         case kNavHome:
             if (!p.status) { p.highlight = 0; moveHighlight(0); if (p.entries.size() && p.entries[0].kind == EntryKind::Heading) moveHighlight(+1); noteHighlightMoved(); s.contentDirty = true; }
@@ -5201,13 +5231,13 @@ static void menuReadMenuKeys(Config& cfg) {
         s.overlayTextMs = 0;
     }
     s.textDeg = t;
-    float w = cfg.getFloat("menu.width_degrees", 30.0f);
-    if (!(w >= 16.0f) || w > 45.0f) w = 30.0f;
+    float w = cfg.getFloat("menu.width_degrees", 36.0f);
+    if (!(w >= 16.0f) || w > 45.0f) w = 36.0f;
     s.idleSeconds = cfg.getIntInRange("menu.idle_dismiss", 0, 0, 600);
     s.tooltipDelayS = menuReadTooltipDelay(cfg);
     // With a tooltip beside it, the panel reaches out to
-    // atan(2.14 * tan(w/2)) on the right -- 29.8 degrees at the default
-    // width, 41.5 at the widest. Past about 35 the strip leaves one eye's
+    // atan(2.14 * tan(w/2)) on the right -- 34.8 degrees at the default
+    // 36-degree width, 41.5 at the widest. Past about 35 the strip leaves one eye's
     // frustum on most headsets and the card renders to one eye only, which
     // is the worst possible thing to do to text somebody has stopped to
     // read. So the card is held to 36 degrees while tooltips are on.

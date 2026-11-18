@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include "readability_layout_tests.h"
 #include <atomic>
 #include <algorithm>
 #include <functional>
@@ -286,7 +287,7 @@ int wmain(int argc, wchar_t** argv) {
             std::ifstream in("src/d3d11/menu.cpp");
             std::string menu((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
             const std::string guard = "if (!p.prompt && c.lineCount > 0) {";
-            const std::string padLoop = "for (int i = c.lineCount; i < visibleRows && i < kMenuMaxLines; ++i)";
+            const std::string padLoop = "for (int i = c.lineCount; i < paddedRows && i < kMenuMaxLines; ++i)";
             const size_t g = menu.find(guard);
             const size_t set = menu.find("c.reserveHint = true;");
             const size_t loop = menu.find(padLoop);
@@ -634,6 +635,7 @@ int wmain(int argc, wchar_t** argv) {
             check(edvr::kMenuMaxGraphs >= 3, "the panel holds the flat Monitor's three strips");
             check(edvr::kMenuMaxTiles >= 11, "the panel holds the flat Monitor's eleven tiles");
         }
+        menuReadabilityLayoutCases(checks, fails);
         std::printf("native_menu_test: layout %u checks, %u failures (heading %dpx in a %dpx rect)\n",
                     checks, fails, headingW, headingBoxW);
         return fails ? 1 : 0;
