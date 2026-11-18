@@ -1886,12 +1886,14 @@ def self_test():
               "audit: the salt exception does not exempt another value in the same header")
         check(any(": known: " in p for p in audited("draw_record_other.h", "constexpr uint32_t kSalt = 0x00A5C35Au;")),
               "audit: the salt exception does not exempt its value in another file")
-        check(audited("native_vrs.cpp", "auto init = query(0x0150e828);") == [],
-              "audit: native owner public NvAPI_Initialize ID is not a game address")
-        check(any(": known: " in p for p in audited("native_vrs.cpp", "auto other = query(0x0150e829);")),
-              "audit: native NVAPI exception does not exempt adjacent IDs")
-        check(any(": known: " in p for p in audited("native_vrs_other.cpp", "auto init = query(0x0150e828);")),
-              "audit: native NVAPI exception does not exempt another source file")
+        for name, other_name in (("native_vrs.cpp", "native_vrs_other.cpp"),
+                                 ("native_reflex_nvapi.h", "native_reflex_nvapi_other.h")):
+            check(audited(name, "auto init = query(0x0150e828);") == [],
+                  f"audit: {name} may use the public NvAPI_Initialize ID")
+            check(any(": known: " in p for p in audited(name, "auto other = query(0x0150e829);")),
+                  f"audit: the NVAPI exception in {name} does not exempt adjacent IDs")
+            check(any(": known: " in p for p in audited(other_name, "auto init = query(0x0150e828);")),
+                  f"audit: the NVAPI exception in {name} does not extend to {other_name}")
         (s / "d3d11" / "openvr026_official").mkdir()
         priorities = "constexpr int kMin=0x01000000, kMax=0x01FFFFFF, kReserved=0x02000000;"
         check(audited("openvr026_official/openvr.h", priorities) == [],
@@ -2022,6 +2024,8 @@ AUDIT_NOT_ADDRESSES = (
     ("d3d11/perf_monitor.cpp", (0x150E828,), "an NVAPI function id"),
     ("d3d11/native_vrs.cpp", (0x0150E828,),
      "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h, pinned SDK 51e5aae4; not an Elite RVA"),
+    ("d3d11/native_reflex_nvapi.h", (0x0150E828,),
+     "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h"),
     ("d3d11/openvr026_official/openvr.h", (0x01000000, 0x01FFFFFF, 0x02000000),
      "OpenVR 2.15.6 official SDK action-set overlay min/max and reserved priority constants; byte-pinned header, not Elite RVAs"),
     ("d3d11/kinematic_eval_probe.cpp", (0x4301234, 0x4305678), "the probe self-test's made-up vtable RVAs"),
