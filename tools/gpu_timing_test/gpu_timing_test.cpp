@@ -547,6 +547,96 @@ void controllerCases(Device& d,Runtime& runtime,GpuFramePollMode mode) {
           "native measurement after legacy frame still excludes gaps");
     gpuFrameConfigure(false);gpuFramePresent(f.ctx(),924);gpuFrameAbandon();f.finish();
 }
+void controllerAdmissionFailure(Device& d, GpuFramePollMode mode, bool standalone) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = 16;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> texture;
+    hr(d.dev->CreateTexture2D(&td, nullptr, &texture));
+    Fixture f(d);
+    check(gpuFrameBind(d.dev.Get(), f.ctx(), true), "bind native admission controller");
+    gpuFramePresent(f.ctx(), 301, mode);
+    auto closePair = [&](uint64_t sequence) {
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            check(event(GpuFrameEvent::SegmentPause, sequence) == 1 &&
+                  event(GpuFrameEvent::SubmitBegin, sequence, eye, 0, texture.Get()) == 1 &&
+                  event(GpuFrameEvent::SegmentEnd, sequence, eye, 1, texture.Get()) == 1 &&
+                  event(GpuFrameEvent::SubmitEnd, sequence, eye, 1) == 1,
+                  "valid neighboring native frame retains both eye markers");
+            if (eye == 0)
+                check(event(GpuFrameEvent::SegmentResume, sequence) == 1,
+                      "valid neighboring native frame readmits between-eye work");
+        }
+    };
+
+    std::array<GpuFrameSnapshot, 16> completed{};
+    uint64_t cursor = 0, dropped = 0;
+    gpuFrameReadCompletions(cursor, completed.data(), static_cast<unsigned>(completed.size()), dropped);
+    dropped = 0; // This fixture starts after the previous controller's floor.
+    auto drain = [&] {
+        return gpuFrameReadCompletions(cursor, completed.data(), static_cast<unsigned>(completed.size()), dropped);
+    };
+
+    f.ops.pendingAll = true;
+    const auto prior = poses();
+    gpuFrameCommand(f.ctx());
+    closePair(prior);
+    check(drain() == 0, "older valid stereo frame remains pending");
+
+    if (standalone)
+        check(f.begin(0), "standalone timer holds the shared disjoint clock across first command");
+    else
+        f.ops.failStamp = true;
+    const auto rejected = poses();
+    gpuFrameCommand(f.ctx());
+    f.ops.failStamp = false;
+    const auto failure = gpuFrameSnapshot().result;
+    check(failure.sequence == rejected && failure.reason == GpuSpanReason::DriverFailure &&
+          failure.source == GpuSpanSource::ApplicationRender && !failure.outerMs,
+          "first native admission failure is reported immediately with its original reason");
+    const unsigned commands = f.ops.commands, reads = f.ops.dataCalls;
+    for (unsigned i = 0; i < 8192; ++i) gpuFrameCommand(f.ctx());
+    check(f.ops.commands == commands && f.ops.dataCalls == reads,
+          "draws after a failed admission neither retry the span nor poll the clock");
+    check(event(GpuFrameEvent::SegmentResume, rejected) == 0 &&
+          event(GpuFrameEvent::SubmitBegin, rejected, 0, 0, texture.Get()) == 0 &&
+          event(GpuFrameEvent::SubmitEnd, rejected, 0, 1) == 0 &&
+          event(GpuFrameEvent::SegmentResume, rejected) == 0,
+          "same-sequence producer and submit callbacks cannot reopen the failed admission");
+    if (standalone)
+        check(f.timers[0].end(f.ctx()), "release the independent standalone clock");
+    f.ops.pendingAll = false;
+    gpuFramePresent(f.ctx(), 302);
+    check(drain() == 2 && !dropped && completed[0].result.sequence == rejected &&
+          completed[0].result.reason == GpuSpanReason::DriverFailure &&
+          completed[1].result.sequence == prior && completed[1].result.reason == GpuSpanReason::Valid,
+          "exactly one admission failure retires without poisoning or displacing older pending work");
+
+    gpuFrameConfigure(false);
+    gpuFrameConfigure(true);
+    check(event(GpuFrameEvent::SegmentResume, rejected) == 0 &&
+          event(GpuFrameEvent::SubmitBegin, rejected, 0, 0, texture.Get()) == 0,
+          "toggling query timing cannot readmit the failed token");
+    gpuFrameCommand(f.ctx());
+    check(!gpuFrameSnapshot().haveResult, "reconfiguration leaves the failed token settled");
+
+    const auto next = poses();
+    gpuFrameCommand(f.ctx());
+    closePair(next);
+    gpuFramePresent(f.ctx(), 303);
+    check(drain() == 1 && !dropped && completed[0].result.sequence == next &&
+          completed[0].result.sourceFrame == 302 &&
+          completed[0].result.reason == GpuSpanReason::Valid && completed[0].result.outerMs == 3,
+          "following native frame publishes its full sample and source identity");
+
+    gpuFrameConfigure(false);
+    gpuFrameAbandon();
+    f.finish();
+}
+
 unsigned controllerReadbackCalls(Device& d, GpuFramePollMode mode) {
     D3D11_TEXTURE2D_DESC td{};
     td.Width=td.Height=16;td.MipLevels=td.ArraySize=1;
@@ -1144,6 +1234,9 @@ void hdrSeedProbeCases(Device& d) {
 void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);
     controllerCases(device,runtime,GpuFramePollMode::Full);
     controllerCases(device,runtime,GpuFramePollMode::FrameBoundaries);
+    controllerAdmissionFailure(device, GpuFramePollMode::Full, true);
+    controllerAdmissionFailure(device, GpuFramePollMode::FrameBoundaries, true);
+    controllerAdmissionFailure(device, GpuFramePollMode::FrameBoundaries, false);
     const auto full = controllerReadbackCalls(device,GpuFramePollMode::Full);
     const auto boundaries = controllerReadbackCalls(device,GpuFramePollMode::FrameBoundaries);
     check(boundaries<full,"frame-boundary readback issues fewer stalled GetData calls");

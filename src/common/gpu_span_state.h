@@ -67,7 +67,7 @@ private:
     enum class State { Free, Open, Pending, Failed };
     struct Slot {
         State state = State::Free;
-        bool created = false;
+        bool created = false, failureReported = false;
         GpuSpanReason reason = GpuSpanReason::Valid;
         uint64_t sequence = 0, sourceFrame = 0, closedAtMs = 0;
         unsigned begun = 0, ended = 0, order[2]{}, orderCount = 0;
@@ -212,8 +212,11 @@ public:
     // Application rendering mode brackets only producer GPU work. The
     // disjoint scope stays open while keyed transfers/runtime calls are out
     // of scope; each actual producer run is a separate timestamp pair.
+    // A caller that publishes an admission failure immediately can still let
+    // poll() retire the failed queries without returning a second completion.
     GpuSpanReason beginApplicationFrame(uint64_t sequence, uint64_t sourceFrame,
-                                        uint64_t now, const GpuSpanOwner& owner) noexcept {
+                                        uint64_t now, const GpuSpanOwner& owner,
+                                        bool callerReportsFailure = false) noexcept {
         const auto checked = gate(owner);
         if (checked != GpuSpanReason::Valid) return checked;
         if (!sequence || sequence <= lastSequence_) return GpuSpanReason::OldSequence;
@@ -239,6 +242,7 @@ public:
         s.sequence = sequence;
         s.sourceFrame = sourceFrame;
         if (!driver_.begin(i)) {
+            s.failureReported = callerReportsFailure;
             s.state = State::Failed;
             s.reason = GpuSpanReason::DriverFailure;
             s.closedAtMs = now;
@@ -248,7 +252,10 @@ public:
         open_ = static_cast<int>(i);
         s.segmentCount = 1;
         s.segmentOpen = driver_.timestamp(i, 0);
-        if (!s.segmentOpen) return closeApplication(GpuSpanReason::DriverFailure, now);
+        if (!s.segmentOpen) {
+            s.failureReported = callerReportsFailure;
+            return closeApplication(GpuSpanReason::DriverFailure, now);
+        }
         return GpuSpanReason::Valid;
     }
     GpuSpanReason endApplicationSegment(uint64_t now, const GpuSpanOwner& owner) noexcept {
@@ -359,6 +366,10 @@ public:
                 if (status == GpuSpanPoll::Failed) reason = GpuSpanReason::DriverFailure;
                 else if (reason == GpuSpanReason::Valid && !s.application)
                     reason = validate(s, raw);
+            }
+            if (s.failureReported) {
+                retire(i, true);
+                continue;
             }
             GpuSpanResult& result = out[count++];
             result = GpuSpanResult{}; // Invalid results never retain old values.

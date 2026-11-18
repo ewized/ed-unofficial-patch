@@ -74,6 +74,7 @@ struct Controller {
     GpuSpanState ring;
     std::atomic<bool> enabled{false};
     uint64_t seenToken = 0, activeSequence = 0, startedAt = 0;
+    uint64_t failedAdmissionSequence = 0;
     uint64_t lastBoundaryPollAt = 0;
     GpuFramePollMode pollMode = GpuFramePollMode::Full;
     std::atomic<uint64_t> sourceFrame{1};
@@ -338,14 +339,23 @@ void gpuFrameCommand(ID3D11DeviceContext* ctx) noexcept {
     }
     c->applicationMode = application;
     const auto reason = application ? c->ring.beginApplicationFrame(sequence, c->sourceFrame, now,
-        c->driver.currentOwner()) : c->ring.beginFrame(sequence,c->sourceFrame,now,c->driver.currentOwner());
+        c->driver.currentOwner(), /*callerReportsFailure=*/true) :
+        c->ring.beginFrame(sequence, c->sourceFrame, now, c->driver.currentOwner());
     if (reason == GpuSpanReason::Valid) {
         c->activeSequence = sequence;
         c->startedAt = now;
         c->begun = c->ended = 0;
         c->segmentOpen = true;
         c->segmentAdmitted = false;
-    } else c->immediate(reason, sequence, now);
+    } else {
+        if (application) {
+            // This token already attempted admission. A later draw or
+            // producer callback waits for the next token to try again.
+            c->segmentAdmitted = false;
+            c->failedAdmissionSequence = sequence;
+        }
+        c->immediate(reason, sequence, now);
+    }
 }
 void gpuFramePresent(ID3D11DeviceContext* ctx, uint64_t nextSourceFrame,
                      GpuFramePollMode pollMode) noexcept {
@@ -462,7 +472,7 @@ uint64_t gpuFrameEvent(unsigned protocol, unsigned eventValue, uint64_t sequence
         c->sync(token, now);
         if (token != ((sequence << 1) | 1) || c->segmentOpen ||
             c->segmentAdmitted || (c->activeSequence && c->activeSequence != sequence) ||
-            c->ended == 3 ||
+            c->ended == 3 || c->failedAdmissionSequence == sequence ||
             g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
         // Mark the new token as synchronized here. The first command will
         // consume the admission below without sync() clearing it as stale.
@@ -507,7 +517,8 @@ uint64_t gpuFrameEvent(unsigned protocol, unsigned eventValue, uint64_t sequence
     // ready results first so that this diagnostic remains the latest one.
     const auto point = event == GpuFrameEvent::SubmitBegin ? SyncPoint::SubmitBegin : SyncPoint::Callback;
     c->sync(token, now, point);
-    if (token != ((sequence << 1) | 1) || g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
+    if (token != ((sequence << 1) | 1) || c->failedAdmissionSequence == sequence ||
+        g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
     if (event == GpuFrameEvent::SubmitBegin) {
         // Never start at the submit itself and pretend it included rendering.
         if (!c->activeSequence) {
