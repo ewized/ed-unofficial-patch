@@ -33,6 +33,7 @@ struct Internal {
 SRWLOCK g_snapshotLock = SRWLOCK_INIT;
 GpuFrameSnapshot g_snapshot;
 constexpr unsigned kCompletionCapacity = 256;
+constexpr uint64_t kReadbackHeartbeatMs = 50;
 struct Completion { uint64_t ordinal = 0; GpuFrameSnapshot snapshot{}; };
 std::array<Completion, kCompletionCapacity> g_completions{};
 uint64_t g_nextCompletion = 1;
@@ -66,12 +67,15 @@ __forceinline DWORD currentThreadIdCached() noexcept {
     }
     return id;
 }
+enum class SyncPoint { Callback, Command, SubmitBegin };
 struct Controller {
     GpuTimingFrameDriver driver;
     const GpuSpanOwner owner;
     GpuSpanState ring;
     std::atomic<bool> enabled{false};
     uint64_t seenToken = 0, activeSequence = 0, startedAt = 0;
+    uint64_t lastBoundaryPollAt = 0;
+    GpuFramePollMode pollMode = GpuFramePollMode::Full;
     std::atomic<uint64_t> sourceFrame{1};
     unsigned begun = 0, ended = 0, commandBudget = 0;
     bool segmentOpen = false, segmentAdmitted = false;
@@ -161,6 +165,7 @@ struct Controller {
         publish(result, now);
     }
     void poll(uint64_t now) noexcept {
+        if (pollMode == GpuFramePollMode::FrameBoundaries) lastBoundaryPollAt = now;
         GpuSpanState::Results results{};
         const unsigned n = ring.poll(now, driver.currentOwner(), results);
         for (unsigned i = 0; i < n; ++i) publish(results[i], now);
@@ -172,13 +177,22 @@ struct Controller {
         begun = ended = 0;
         segmentOpen = segmentAdmitted = false;
     }
-    void sync(uint64_t token, uint64_t now) noexcept {
+    // Every caller still synchronizes its marker state. In boundary mode the
+    // first admitted command frees ready slots before the ring consumes that
+    // sequence. The heartbeat progresses readback during long frames.
+    void sync(uint64_t token, uint64_t now, SyncPoint point = SyncPoint::Callback) noexcept {
         if (seenToken != token || (activeSequence &&
             (g_poisoned.load(std::memory_order_acquire) >= activeSequence ||
              now - startedAt > GpuSpanState::kMaxAgeMs))) {
             invalidate(now);
         }
-        poll(now);
+        if (pollMode != GpuFramePollMode::FrameBoundaries ||
+            g_applicationSequence.load(std::memory_order_acquire) != (token >> 1) ||
+            (!activeSequence && ((point == SyncPoint::Command && segmentAdmitted) ||
+                                 point == SyncPoint::SubmitBegin)) ||
+            now - lastBoundaryPollAt >= kReadbackHeartbeatMs) {
+            poll(now);
+        }
     }
 };
 // This pointer is detached only during quiescent cleanup, before device owners
@@ -303,7 +317,7 @@ void gpuFrameCommand(ID3D11DeviceContext* ctx) noexcept {
     }
     Internal internal;
     const uint64_t now = GetTickCount64();
-    c->sync(token, now);
+    c->sync(token, now, SyncPoint::Command);
     if (c->seenToken == token && !c->segmentAdmitted) return;
     // The native producer explicitly admits the first segment after the pose
     // route returns. Commands observed before that admission remain outside
@@ -333,7 +347,8 @@ void gpuFrameCommand(ID3D11DeviceContext* ctx) noexcept {
         c->segmentAdmitted = false;
     } else c->immediate(reason, sequence, now);
 }
-void gpuFramePresent(ID3D11DeviceContext* ctx, uint64_t nextSourceFrame) noexcept {
+void gpuFramePresent(ID3D11DeviceContext* ctx, uint64_t nextSourceFrame,
+                     GpuFramePollMode pollMode) noexcept {
     auto* c = g_controller.load(std::memory_order_acquire);
     if (!c || ctx != c->context()) return;
     if (!c->owns(ctx)) {
@@ -348,6 +363,7 @@ void gpuFramePresent(ID3D11DeviceContext* ctx, uint64_t nextSourceFrame) noexcep
     const uint64_t now = GetTickCount64();
     c->invalidate(now); // Missing eye / bypassed submit cannot span a Present.
     c->seenToken = g_token.load(std::memory_order_acquire);
+    if (pollMode != GpuFramePollMode::Unchanged) c->pollMode = pollMode;
     c->poll(now);
     c->sourceFrame = nextSourceFrame;
 }
@@ -487,7 +503,10 @@ uint64_t gpuFrameEvent(unsigned protocol, unsigned eventValue, uint64_t sequence
     Internal internal;
     const uint64_t now = GetTickCount64();
     const uint64_t token = g_token.load(std::memory_order_acquire);
-    c->sync(token, now);
+    // A late duplicate can report NoOpenFrame for a closed pair. Read back
+    // ready results first so that this diagnostic remains the latest one.
+    const auto point = event == GpuFrameEvent::SubmitBegin ? SyncPoint::SubmitBegin : SyncPoint::Callback;
+    c->sync(token, now, point);
     if (token != ((sequence << 1) | 1) || g_poisoned.load(std::memory_order_acquire) >= sequence) return 0;
     if (event == GpuFrameEvent::SubmitBegin) {
         // Never start at the submit itself and pretend it included rendering.

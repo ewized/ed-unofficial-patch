@@ -12,7 +12,11 @@ bool gpuFrameBind(ID3D11Device*, ID3D11DeviceContext*, bool enabled) noexcept;
 void gpuFrameConfigure(bool enabled) noexcept;
 void gpuFrameCommand(ID3D11DeviceContext*) noexcept;
 bool gpuFrameInternal() noexcept;
-void gpuFramePresent(ID3D11DeviceContext*, uint64_t nextSourceFrame) noexcept;
+enum class GpuFramePollMode { Unchanged, Full, FrameBoundaries };
+// A validated Present can select readback cadence on the bound owner. Auto
+// uses Full to preserve the freshness of samples it reads before Present.
+void gpuFramePresent(ID3D11DeviceContext*, uint64_t nextSourceFrame,
+                     GpuFramePollMode = GpuFramePollMode::Unchanged) noexcept;
 void gpuFrameAbandon() noexcept;
 // Built v13.6 (the GPU pass profiler's yield, gpu_timing.h): while the profiler holds the clock, no application frame opens (gpuFrameCommand
 // returns, counted per frame). gpuFrameYieldBegin, called by the profiler on the owner context at its boundary, ends an application frame that is

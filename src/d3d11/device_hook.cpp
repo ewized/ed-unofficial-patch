@@ -1982,6 +1982,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     const bool ownerPresent = timingContext && SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST) &&
                               renderBoundaryValidateOwner(dev, timingContext);
     if (timingContext) {
+        auto gpuPollMode = GpuFramePollMode::Unchanged;
         if (ownerPresent) {
             static uint32_t fgConfigGeneration = UINT32_MAX;
             static bool fgWasFlat = false;
@@ -1999,7 +2000,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 fgConfigGeneration = generation;
                 fgWasFlat = flat;
             }
-            if(nativeFgAutoRequested()){
+            const bool automatic = nativeFgAutoRequested();
+            gpuPollMode = automatic ? GpuFramePollMode::Full : GpuFramePollMode::FrameBoundaries;
+            if(automatic){
                 const auto cpu=nativeTimingSnapshot();const auto gpu=gpuFrameSnapshot();
                 const uint64_t now=GetTickCount64();
                 static uint64_t autoSession=0,firstAutoPresent=0;
@@ -2018,7 +2021,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 nativeFgAutoObserve(sample);
             }
         }
-        gpuFramePresent(timingContext, g_state->frameCounter + 1);
+        gpuFramePresent(timingContext, g_state->frameCounter + 1, gpuPollMode);
         timingContext->Release();
     }
     frameTick("gpu_frame_present");

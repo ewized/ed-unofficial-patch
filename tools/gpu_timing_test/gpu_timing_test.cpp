@@ -41,6 +41,7 @@ struct Ops {
                   uint64_t tick=0;unsigned reads=0;};
     std::vector<Query> queries;
     unsigned allocated=0,released=0,creates=0,commands=0,active=0;
+    unsigned dataCalls=0,timestampEnds=0;
     int failCreate=-1, pendingQuery=-1, failedQuery=-1;
     bool abandoning=false, failStamp=false, disjoint=false, pendingAll=false, faultNextStamp=false;
     uint64_t frequency=1000;
@@ -70,6 +71,7 @@ struct Ops {
         if(x->kind==D3D11_QUERY_TIMESTAMP_DISJOINT){
             if(!x->open||s.active!=1){s.bad=true;return E_FAIL;}x->open=false;--s.active;
         }else if(!s.active){s.bad=true;return E_FAIL;}
+        else ++s.timestampEnds;
         x->issued=true;x->tick=++s.tick;x->reads=0;c->End(q);
         return ((s.failEnd&&x->kind==D3D11_QUERY_TIMESTAMP_DISJOINT) ||
                 (s.failStamp&&x->kind==D3D11_QUERY_TIMESTAMP)) ? E_FAIL : S_OK;
@@ -77,6 +79,7 @@ struct Ops {
     static HRESULT data(void* p,ID3D11DeviceContext* c,ID3D11Asynchronous* q,void* out,UINT size,UINT flags){
         auto& s=*static_cast<Ops*>(p);++s.commands;auto* x=s.find(q);
         if(!x||!x->issued||x->open||flags!=D3D11_ASYNC_GETDATA_DONOTFLUSH){s.bad=true;return E_FAIL;}
+        ++s.dataCalls;
         const int index=static_cast<int>(x-s.queries.data());++x->reads;
         if(s.pendingAll||index==s.pendingQuery)return S_FALSE;
         if(index==s.failedQuery)return s.failedStatus;
@@ -437,7 +440,7 @@ uint64_t poses() {
           "producer return admits rendering only with GPU timing enabled");
     return seq;
 }
-void controllerCases(Device& d,Runtime& runtime) {
+void controllerCases(Device& d,Runtime& runtime,GpuFramePollMode mode) {
     D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=16;td.MipLevels=td.ArraySize=1;
     td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;td.BindFlags=D3D11_BIND_RENDER_TARGET;
     ComPtr<ID3D11Texture2D> tex;hr(d.dev->CreateTexture2D(&td,nullptr,&tex));
@@ -461,7 +464,7 @@ void controllerCases(Device& d,Runtime& runtime) {
         if(reason!=GpuSpanReason::Valid) check(snap.result.outerMs==0,"invalid result has no duration");
         return snap;
     };
-    gpuFramePresent(f.ctx(),900);
+    gpuFramePresent(f.ctx(),900,mode);
     auto seq=poses();const auto commands=f.ops.commands;
     check(!edvrGpuFrameEvent(999,0,0,0,0,nullptr)&&f.ops.commands==commands,"version mismatch issues nothing");
     check(f.ops.commands==commands,"pose mailbox never issues D3D work");
@@ -543,6 +546,94 @@ void controllerCases(Device& d,Runtime& runtime) {
     check(nativeResult.source==GpuSpanSource::ApplicationRender&&nativeResult.outerMs==3,
           "native measurement after legacy frame still excludes gaps");
     gpuFrameConfigure(false);gpuFramePresent(f.ctx(),924);gpuFrameAbandon();f.finish();
+}
+unsigned controllerReadbackCalls(Device& d, GpuFramePollMode mode) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width=td.Height=16;td.MipLevels=td.ArraySize=1;
+    td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.SampleDesc.Count=1;
+    ComPtr<ID3D11Texture2D> texture;
+    hr(d.dev->CreateTexture2D(&td,nullptr,&texture));
+    Fixture f(d);
+    check(gpuFrameBind(d.dev.Get(),f.ctx(),true),"bind producer readback controller");
+    gpuFramePresent(f.ctx(),101,mode);
+    auto start = [&] {
+        const auto sequence = poses();
+        gpuFrameCommand(f.ctx());
+        check(f.ops.active == 1,"first render command admits a sample");
+        return sequence;
+    };
+    auto close = [&](uint64_t sequence, bool betweenEyeWork = false) {
+        for (unsigned eye=0; eye<2; ++eye) {
+            check(event(GpuFrameEvent::SegmentPause,sequence)==1 &&
+                  event(GpuFrameEvent::SubmitBegin,sequence,eye,0,texture.Get())==1 &&
+                  event(GpuFrameEvent::SegmentEnd,sequence,eye,1,texture.Get())==1 &&
+                  event(GpuFrameEvent::SubmitEnd,sequence,eye,1)==1,
+                  "own both eyes on the native readback schedule");
+            if (eye==0) {
+                check(event(GpuFrameEvent::SegmentResume,sequence)==1,
+                      "admit work after the first eye");
+                if (betweenEyeWork) gpuFrameCommand(f.ctx());
+            }
+        }
+    };
+    auto checkReady = [](uint64_t sequence, double expected) {
+        const auto sample = gpuFrameSnapshot();
+        check(sample.haveResult && sample.result.sequence==sequence &&
+              sample.result.reason==GpuSpanReason::Valid && sample.result.outerMs==expected,
+              "readback publishes complete native work with its original identity");
+    };
+    f.ops.pendingAll = true;
+    uint64_t previous = 0;
+    for (unsigned i=0; i<GpuSpanState::kSlots; ++i) {
+        previous = start();
+        close(previous, (i & 1u) != 0);
+    }
+    const auto readbackCalls = f.ops.dataCalls;
+    check(f.ops.timestampEnds==GpuSpanState::kSlots*7 && !gpuFrameSnapshot().haveResult,
+          "delayed reads preserve all three- and four-segment markers without Present");
+    f.ops.pendingAll = false;
+    const auto ninth = start();
+    checkReady(previous, 4.0); // Ready slots reclaimed before admitting the ninth frame.
+    f.ops.pendingAll = true;
+    close(ninth);
+
+    const auto tenth = start();
+    f.ops.pendingAll = false;
+    Sleep(75);
+    for (unsigned i=0; i<1024; ++i) gpuFrameCommand(f.ctx());
+    checkReady(ninth, 3.0); // Existing owner command heartbeat progresses a long frame.
+    f.ops.pendingAll = true;
+    close(tenth);
+
+    const auto legacy = event(GpuFrameEvent::WaitBegin);
+    check(event(GpuFrameEvent::WaitEnd,legacy,0,1)==1,"arm legacy readback route");
+    gpuFrameCommand(f.ctx());
+    const auto beforeLegacySubmit = f.ops.dataCalls;
+    check(event(GpuFrameEvent::SubmitBegin,legacy,0,0,texture.Get())==1 &&
+          f.ops.dataCalls>beforeLegacySubmit,"legacy route still polls at Submit");
+    for (unsigned eye=0; eye<2; ++eye) {
+        if (eye != 0)
+            check(event(GpuFrameEvent::SubmitBegin,legacy,eye,0,texture.Get())==1,
+                  "legacy second eye begins");
+        check(event(GpuFrameEvent::SubmitEnd,legacy,eye,1)==1,"legacy eye closes");
+    }
+    f.ops.pendingAll = false;
+    gpuFramePresent(f.ctx(),102,GpuFramePollMode::Full);
+    const auto legacySample = gpuFrameSnapshot();
+    check(legacySample.haveResult && legacySample.result.sequence==legacy &&
+          legacySample.result.source==GpuSpanSource::RenderToSubmit,
+          "Present drains the pending legacy result");
+
+    f.ops.pendingAll = true;
+    close(start());
+    const auto full = start();
+    const auto beforeFullPause = f.ops.dataCalls;
+    check(event(GpuFrameEvent::SegmentPause,full)==1 && f.ops.dataCalls>beforeFullPause,
+          "switch to the Auto readback schedule restores native mid-frame polls");
+    gpuFrameConfigure(false);
+    gpuFrameAbandon();
+    f.finish();
+    return readbackCalls;
 }
 void hdrDrawRouteCases(Device& d) {
     // This is the same scope helper called after the live HDR target bind and
@@ -1050,7 +1141,13 @@ void hdrSeedProbeCases(Device& d) {
         frame.consume(); frame.finish(); probe.reset(f.ctx()); f.finish();
     }
 }
-void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);controllerCases(device,runtime);nativeWork(device);nativeFrameWork(device);hdrDrawRouteCases(device);hdrSeedProbeCases(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
+void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);
+    controllerCases(device,runtime,GpuFramePollMode::Full);
+    controllerCases(device,runtime,GpuFramePollMode::FrameBoundaries);
+    const auto full = controllerReadbackCalls(device,GpuFramePollMode::Full);
+    const auto boundaries = controllerReadbackCalls(device,GpuFramePollMode::FrameBoundaries);
+    check(boundaries<full,"frame-boundary readback issues fewer stalled GetData calls");
+    nativeWork(device);nativeFrameWork(device);hdrDrawRouteCases(device);hdrSeedProbeCases(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
