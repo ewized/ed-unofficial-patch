@@ -1,0 +1,2641 @@
+{
+  "schema": 1,
+  "status": "ORIGINAL_BASELINE_VALUES_ONLY",
+  "settings": [
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.night_vision_stability",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.weapon_stability",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.black_void",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.vscreen_res_width",
+      "value": "auto",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.panel_distance",
+      "value": "1.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.panel_curvature",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.intro_backdrop",
+      "value": "splash",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.loading_dim",
+      "value": "screen",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.sun_glare",
+      "value": "vivid",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.particle_billboard",
+      "value": "steady",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.witchspace_stars",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.supercruise_dust",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.normal_space_dust",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_turn_style",
+      "value": "snap",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_snap_turn_deg",
+      "value": "15",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim_smoothing_ms",
+      "value": "50",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim_ads_vertical",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_eye_distance_cm",
+      "value": "21",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_sight_eye",
+      "value": "right",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_head_aim",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_scope_zoom",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_eye_height_cm",
+      "value": "15.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_weapon_view_offset_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_weapon_eye_forward_cm",
+      "value": "10.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_breathable_visor",
+      "value": "up",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_visor_axis",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_distance",
+      "value": "0.4",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_size",
+      "value": "3.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_element_scale",
+      "value": "1.05",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_room",
+      "value": "1.00",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_spread",
+      "value": "0.07",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_left_x",
+      "value": "0.00",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_left_y",
+      "value": "0.02",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_top_x",
+      "value": "0.00",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_top_y",
+      "value": "-0.09",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_right_x",
+      "value": "-0.07",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_right_y",
+      "value": "0.00",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_centre_x",
+      "value": "0.02",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_centre_y",
+      "value": "0.00",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_follow",
+      "value": "body",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_follow_smoothing_ms",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_view_bob",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_panel_mouse",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_panel_cursor_test",
+      "value": "drawn",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_panel_cursor_fix",
+      "value": "panel",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_panel_cursor_follow",
+      "value": "panel",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_reticle_follow",
+      "value": "aim",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hide_fp_body",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_cull",
+      "value": "game",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_unclip",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_mode",
+      "value": "game",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_hybrid",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim_yaw_sign",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim_comp_delay",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_look_to_aim_comp_sign",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.training_connect_probe",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.connection_retry",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_world_markers",
+      "value": "forward_lead",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_world_markers_lead",
+      "value": "2.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.now_pose",
+      "value": "next",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align",
+      "value": "body",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_rot_calibrate",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_head_aim_yaw_sign",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_head_aim_pitch_sign",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align_anchor",
+      "value": "neck",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align_vertical",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_pose_freeze",
+      "value": "probe",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ik",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_spine_bend",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_spine_bend_amount",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_close_left_eye",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_eye_steady",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_eye_hold",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_weapon_eye_right_cm",
+      "value": "2",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_weapon_eye_body",
+      "value": "follow",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_pistol_readout_forward_cm",
+      "value": "13",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_pistol_readout_left_cm",
+      "value": "3.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_pistol_readout_up_cm",
+      "value": "-3",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_pistol_readout_toward_eye_cm",
+      "value": "3",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_rifle_ads_readout_forward_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_rifle_ads_readout_left_cm",
+      "value": "3.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_rifle_ads_readout_up_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_rifle_ads_readout_toward_eye_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_game_sight",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_sight_up_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_ads_sight_right_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_full_outfit",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_stand_armed",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_standing_height_settle_s",
+      "value": "0.1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align_trim_right_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align_trim_up_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_align_trim_forward_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_marker_probe",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_marker_fix",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_marker_ref",
+      "value": "temporal",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_method",
+      "value": "gate",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_panels",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_mesh",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_mesh_world",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_hud_follow_order",
+      "value": "after",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_reticle_probe",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_cb_probe",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_view_probes",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_visor_shift",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_sharp_hud",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_fit_weapon",
+      "value": "0.7",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_fit_lateral",
+      "value": "0.25",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_raise_fp",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_body_raise_cm",
+      "value": "10",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_fp_shoulder_drop_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_weapon_eye_up_cm",
+      "value": "7.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_elbow_out_cm",
+      "value": "3.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_elbow_swivel_trim_deg",
+      "value": "2",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_square_amount",
+      "value": "0.75",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_square_amount",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_elbow_out_cm",
+      "value": "6",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_swivel_trim_deg",
+      "value": "3",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_shoulder_raise_cm",
+      "value": "5.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_shoulder_forward_cm",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_on_foot_arm_ads_lean_deg",
+      "value": "8",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_up",
+      "value": "1.68",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_forward",
+      "value": "0.10",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_right",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_trim_up",
+      "value": "0.15",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_trim_forward",
+      "value": "-0.08",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_eye_trim_right",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.explorer_cam_follow_smoothing_ms",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.remlok_lines",
+      "value": "outer",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.remlok_line_angle",
+      "value": "46",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.holo_pattern",
+      "value": "steady",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.temporal_aa",
+      "value": "dlss",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.temporal_aa_model",
+      "value": "k",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.wake_pulse",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.ui_quality",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.hud_antialiasing",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.optimized_stations",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.station_window_distance",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.skip_rooms_behind_doors",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.turbo_mode",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.camera_nearest",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.camera_jump_guard",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.openxr_resolution",
+      "value": "steamvr-openxr/steamvr-openxr-cv:3200, steamvr-openxr/steamvr-openxr-lighthouse:4000",
+      "note": "Saved override list, not proof of the benchmark runtime target; use observed dimensions.",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.render_sharpness",
+      "value": "0.2",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.native_input_scale",
+      "value": "0.5",
+      "note": "Legacy/inert setting; never infer active render scale from this value.",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "fix.frame_generation",
+      "value": "auto",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.world_scale",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.desktop_window",
+      "value": "right_eye",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.desktop_window_aspect",
+      "value": "full",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.desktop_window_crop",
+      "value": "native",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.desktop_window_vertical_shift",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.desktop_window_style",
+      "value": "window",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.intro_video",
+      "value": "skip",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.star_glow",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.cockpit_glass",
+      "value": "odyssey",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.cockpit_glass_dirt",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "visual.cockpit_glass_lights",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.menu",
+      "value": "F8",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.explorer_cam",
+      "value": "F5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.compare_aa",
+      "value": "F7",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.dump_camera",
+      "value": "PAUSE",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.on_foot_mark",
+      "value": "F9",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "hotkey.read_game_bindings",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.flat_origin_capture",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.sky_ring",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_cull",
+      "value": "auto",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_keep",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_pane_mode",
+      "value": "mirror-steady",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_panes",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_clear_share",
+      "value": "auto",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_mirror_beyond",
+      "value": "100",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_backdrop_radius",
+      "value": "600",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_glass",
+      "value": "0.92,0.97,0.96,0.03,0.25,0.25",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "diag.concourse_glow",
+      "value": "0.5,0.5,1,0.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.keyboard",
+      "value": "private",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.aim",
+      "value": "keys",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.distance",
+      "value": "1.4",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.curve",
+      "value": "0.2",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.text_degrees",
+      "value": "1.1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.width_degrees",
+      "value": "36",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.idle_dismiss",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.tooltip_delay",
+      "value": "1.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.toasts",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.aim_choice_prompt",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.fps_overlay",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.fps_overlay_yaw",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.fps_overlay_pitch",
+      "value": "15.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.fps_overlay_lock",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "menu.developer",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "log.enabled",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "d3d11.journal_watch",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "d3d11.focus_on_launch",
+      "value": "1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.eye_depth_capture",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.app_gpu_timing",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.exposure_shader",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.vr_camera_census",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.texture_lod_bias",
+      "value": "auto",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "advanced.vrs_coverage_diagnostic",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.foveation_focus",
+      "value": "normal",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.eye_tracked_foveation",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.night_vision_realistic",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.night_vision_brightness",
+      "value": "8.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.fov_trim_vertical",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.fov_trim_outer",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.fov_trim_nasal",
+      "value": "",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_weapon_ui_forward_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_weapon_ui_left_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_weapon_ui_up_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_weapon_ui_toward_eye_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_ads_eye_offset_cm",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_crouch_ads_body_forward_cm",
+      "value": "1.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_crouch_ads_body_left_cm",
+      "value": "23.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_stand_ads_body_forward_cm",
+      "value": "4.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_stand_ads_body_left_cm",
+      "value": "23.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_stand_ads_spine_straighten",
+      "value": "0.9",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_neck_guard_cm",
+      "value": "2.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_hip_elbow_swivel_max_deg",
+      "value": "25.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_ads_left_reach",
+      "value": "0.92",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_crouch_ads_square",
+      "value": "0.0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_pistol_sprint_swing_phase",
+      "value": "0.5",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_ads_scope_zoom_fov",
+      "value": "56.3",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_ads_scope_zoom_full_detail",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_view_follows_body_moving",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_body_follows_view",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_hud_stays_with_view",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_steady_body_in_turns",
+      "value": "on",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.native_on_foot_body_draw_hide",
+      "value": "-1",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_camera_back",
+      "value": "80",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_hud_forward",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_radar_forward",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_panels_back",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_radar_back",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_systems_near",
+      "value": "80",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_hud_up",
+      "value": "10",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_gunner_up",
+      "value": "35",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_cards_up",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_hud_gap",
+      "value": "0",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_hud_depth",
+      "value": "game",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_hud_scissor",
+      "value": "game",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.srv_turret_radar_anchor",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "edvr_values",
+      "group": "edvr",
+      "key": "experimental.cockpit_glass_probe",
+      "value": "off",
+      "note": "",
+      "source_sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.attribute.PresetName",
+      "value": "Custom",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.attribute.MajorVersion",
+      "value": "4",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.attribute.MinorVersion",
+      "value": "4",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.BlurEnabled",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.TerrainCheckerboardRenderingEnabled",
+      "value": "true",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.DirectionalShadowQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.SpotShadowQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.UpscalingQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.TextureQualityEx",
+      "value": "2",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.AAMode",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.TextureFilterQuality",
+      "value": "4",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.SurfaceSamplerQuality",
+      "value": "3",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.PerformanceQualitySetting",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.ResolutionSetting",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.AOQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.DOFEnabled",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.BloomQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.EnvmapQuality",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.MaterialQuality",
+      "value": "2",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.EnvironmentQuality",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.FXQuality",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.ParticleEffectsQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.GalaxyMapQuality",
+      "value": "2",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.GUIColourQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.TerrainQuality",
+      "value": "2",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.TerrainLodBlendingQuality",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.SurfaceMaterialQuality",
+      "value": "3",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.JetConeQuality",
+      "value": "2",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.VolumetricsQuality",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.LODDistanceScale",
+      "value": "1.000000",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.HMDRenderTargetMultiplier",
+      "value": "0.580000",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.SSAAMultiplier",
+      "value": "1.000000",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.GpuSchedulerMultiplier",
+      "value": "0.000000",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "custom_graphics",
+      "group": "game",
+      "key": "Root.FFXCASIntensity",
+      "value": "0.500000",
+      "note": "",
+      "source_sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.ScreenWidth",
+      "value": "1280",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.ScreenHeight",
+      "value": "720",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.VSync",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.FullScreen",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.PresentInterval",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.Adapter",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.Monitor",
+      "value": "0",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.DX11_RefreshRateNumerator",
+      "value": "240",
+      "note": "Desktop display preference; not headset refresh.",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.DX11_RefreshRateDenominator",
+      "value": "1",
+      "note": "Desktop display preference; not headset refresh.",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.LimitFrameRate",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "display",
+      "group": "game",
+      "key": "DisplayConfig.MaxFramesPerSecond",
+      "value": "144",
+      "note": "",
+      "source_sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.Version",
+      "value": "1",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.PresetName",
+      "value": "Custom",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.StereoscopicMode",
+      "value": "3",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.IPDAmount",
+      "value": "0.001000",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.AMDCrashFix",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.FOV",
+      "value": "54.320000",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.HumanoidFOV",
+      "value": "56.249001",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.HighResScreenCapAntiAlias",
+      "value": "3",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.HighResScreenCapScale",
+      "value": "4",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.GammaOffset",
+      "value": "0.000000",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.DisableGuiEffects",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.StereoFocalDistance",
+      "value": "22.150000",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.StencilDump",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.ShaderWarming",
+      "value": "true",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.VehicleMotionBlackout",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.VehicleMaintainHorizonCamera",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.DisableCameraShake",
+      "value": "false",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.HeadBobScale",
+      "value": "1.000000",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_options",
+      "group": "game",
+      "key": "GraphicsOptions.TerrainCheckerboardRenderingEnabled",
+      "value": "true",
+      "note": "",
+      "source_sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+    },
+    {
+      "source": "graphics_override",
+      "group": "game",
+      "key": "GraphicsConfig.has_overrides",
+      "value": false,
+      "note": "",
+      "source_sha256": "e6f0687980534771b821abbba5485160db88b1dc38709004d49f438be7b818a7"
+    },
+    {
+      "source": "input_preset",
+      "group": "game_input",
+      "key": "original_preset_name",
+      "value": "High",
+      "note": "",
+      "source_sha256": "c4ebc6d4a5832cd9415f906ad03661110c705a72381c8b8b145761d02e2dd23a"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "runtime.gpu_speed_render_target_scale",
+      "value": 1.5,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "application.preferred_refresh_hz",
+      "value": 90,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "application.resolution_percent",
+      "value": 100,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "steamvr.motion_smoothing",
+      "value": false,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "steamvr.global_preferred_refresh_hz",
+      "value": 144,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "steamvr.supersample_manual_override",
+      "value": true,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "steamvr.supersample_scale",
+      "value": 2.1,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_preferences",
+      "key": "steamvr.compositor_supersample_scale",
+      "value": 2.5,
+      "note": "Saved preference; not a measured per-axis scale or delivered cadence.",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_observation",
+      "key": "runtime_version",
+      "value": "2.19.3",
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_runtime_observation",
+      "key": "recommended_eye_size_px",
+      "value": [
+        3892,
+        3892
+      ],
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "model",
+      "value": "Beyond",
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "manufacturer",
+      "value": "Bigscreen",
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "refresh_hz",
+      "value": 90.0,
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "pose_valid",
+      "value": false,
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "connected",
+      "value": true,
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "physical_probe",
+      "group": "physical_headset_observation",
+      "key": "tracking_result",
+      "value": 101,
+      "note": "",
+      "source_sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de"
+    },
+    {
+      "source": "initial_environment",
+      "group": "hardware_observation",
+      "key": "gpu_model",
+      "value": "NVIDIA GeForce RTX 5090",
+      "note": "",
+      "source_sha256": "784653bf469d50163501a236c5820f2835f29ced2413fffa019586c9cdc3df01"
+    },
+    {
+      "source": "initial_environment",
+      "group": "hardware_observation",
+      "key": "gpu_driver",
+      "value": "621.24",
+      "note": "",
+      "source_sha256": "784653bf469d50163501a236c5820f2835f29ced2413fffa019586c9cdc3df01"
+    },
+    {
+      "source": "initial_environment",
+      "group": "hardware_observation",
+      "key": "gpu_reported_memory_mib",
+      "value": 32607,
+      "note": "",
+      "source_sha256": "784653bf469d50163501a236c5820f2835f29ced2413fffa019586c9cdc3df01"
+    }
+  ],
+  "omitted_filesystem_setting_count": 2,
+  "coordinator_observation": {
+    "cpu_model": "AMD Ryzen 9 9950X3D",
+    "cpu_cores": 16,
+    "cpu_logical_processors": 32,
+    "os_visible_ram_bytes": 33407524864,
+    "provenance": "Coordinator handoff; not independently sampled by this offline exporter."
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "observed_utc": "2026-11-18T06:19:31.7899773Z",
+  "cpu": {
+    "Name": "AMD Ryzen 9 9950X3D 16-Core Processor          ",
+    "NumberOfCores": 16,
+    "NumberOfLogicalProcessors": 32,
+    "MaxClockSpeed": 4300
+  },
+  "os": {
+    "Caption": "Microsoft Windows 11 Pro",
+    "Version": "10.0.26300",
+    "BuildNumber": "26300",
+    "OSArchitecture": "64-bit"
+  },
+  "memory_modules": [
+    {
+      "Capacity": 17179869184,
+      "Speed": 7400,
+      "ConfiguredClockSpeed": 7400,
+      "Manufacturer": "CORSAIR",
+      "PartNumber": "CMP32GX5M2X7200C34"
+    },
+    {
+      "Capacity": 17179869184,
+      "Speed": 7400,
+      "ConfiguredClockSpeed": 7400,
+      "Manufacturer": "CORSAIR",
+      "PartNumber": "CMP32GX5M2X7200C34"
+    }
+  ],
+  "os_visible_memory_bytes": 33407524864,
+  "runtime_libraries": {
+    "nvngx_dlssg.dll": {
+      "product_version": "310,9,16,0",
+      "sha256": "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7",
+      "file_version": "310,9,16,0"
+    },
+    "libxell.dll": {
+      "product_version": "1.3.2.10",
+      "sha256": "d2030dcd694fda8f2ec7e044b13e6db8f0b56d4ba9113a5efad334e3f3ded8c7",
+      "file_version": "1.3.2.10"
+    },
+    "nvngx_dlss.dll": {
+      "product_version": "310,9,1,0",
+      "sha256": "3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983",
+      "file_version": "310,9,1,0"
+    },
+    "libxess_fg.dll": {
+      "product_version": "1.3.1.78",
+      "sha256": "ec5e0c65e075570c6ede72618bb666d0be0c2e10b2ea9762c0fe8cb8e375ab27",
+      "file_version": "1.3.1.78"
+    }
+  }
+}

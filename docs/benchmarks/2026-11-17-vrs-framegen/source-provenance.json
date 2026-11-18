@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "sources": {
+    "edvr_values": {
+      "snapshot": "baseline-edvr-settings.json",
+      "sha256": "1346975e34dd986b1947610e7417ed1118500959b4a2d049480155d975e5d2c2",
+      "bytes": 9819
+    },
+    "game_ini": {
+      "snapshot": "baseline-game.ini",
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
+      "bytes": 201014
+    },
+    "mirror_ini": {
+      "snapshot": "baseline-mirror.ini",
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
+      "bytes": 201014
+    },
+    "custom_graphics": {
+      "snapshot": "Custom.4.4.fxcfg",
+      "sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b",
+      "bytes": 1462
+    },
+    "display": {
+      "snapshot": "DisplaySettings.xml",
+      "sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc",
+      "bytes": 494
+    },
+    "graphics_options": {
+      "snapshot": "Settings.xml",
+      "sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c",
+      "bytes": 927
+    },
+    "graphics_override": {
+      "snapshot": "GraphicsConfigurationOverride.xml",
+      "sha256": "e6f0687980534771b821abbba5485160db88b1dc38709004d49f438be7b818a7",
+      "bytes": 61
+    },
+    "input_preset": {
+      "snapshot": "StartPreset.start",
+      "sha256": "c4ebc6d4a5832cd9415f906ad03661110c705a72381c8b8b145761d02e2dd23a",
+      "bytes": 4
+    },
+    "physical_probe": {
+      "snapshot": "physical-probe/result.json",
+      "sha256": "5861ea53115867f021e4f9ae8a846ad5173c86335b899ddcb8df708454ca18de",
+      "bytes": 5342
+    },
+    "initial_environment": {
+      "snapshot": "initial-environment.json",
+      "sha256": "784653bf469d50163501a236c5820f2835f29ced2413fffa019586c9cdc3df01",
+      "bytes": 47666
+    },
+    "matrix_manifest": {
+      "snapshot": "controller/generated-profiles-v2/manifest.json",
+      "sha256": "b3ad41abc4127f1da801debf83de343257ae2ae865af12f1ec73bb823ebb9763",
+      "bytes": 45785
+    }
+  },
+  "limits": "Hashes identify immutable private snapshots; raw source files are not included.",
+  "hardware_software_inventory": {
+    "file": "hardware-software.json",
+    "sha256": "1f013290cb9484cc73a7d1eeff44829a25fd0a8618b8ab51edf9844f35e860a2",
+    "claim": "live Windows inventory and installed library file-version/hash properties"
+  }
+}
