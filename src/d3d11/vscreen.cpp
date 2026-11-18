@@ -6817,6 +6817,7 @@ static void vScreenRefreshConfigBody(bool forced) {
     pixelProbeConfigure(cfg);
     nativeVrsConfigureFocus(cfg.getBool("experimental.eye_tracked_foveation",false),
         cfg.getString("experimental.foveation_focus","normal").c_str());
+    nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));
@@ -7924,6 +7925,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     pixelProbeConfigure(cfg);
     nativeVrsConfigureFocus(cfg.getBool("experimental.eye_tracked_foveation",false),
         cfg.getString("experimental.foveation_focus","normal").c_str());
+    nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));

@@ -124,6 +124,7 @@ struct LegacyContract {
 #include "fixed_srv_turret_variants.h"
 #include "fixed_galaxy_map_variants.h"
 #include "fixed_cockpit_glass_variants.h"
+#include "../../src/d3d11/native_vrs_highlight_shader.h"
 #include "../../src/d3d11/cockpit_glass_core.h"   // the game canopy shader's input signature, which the replacement must carry
 #include "../../src/d3d11/srv_turret_math.h"
 
@@ -359,6 +360,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), galaxyMap.begin(), galaxyMap.end());
     const auto cockpitGlass = cockpitGlassVariants();
     variants.insert(variants.end(), cockpitGlass.begin(), cockpitGlass.end());
+    variants.push_back({"kNativeVrsHighlightBytecode","native_vrs_highlight_cs","main",nullptr,{},false,
+                        edvr::kNativeVrsHighlightHlsl,"cs_5_0"});
     return variants;
 }
 
@@ -677,13 +680,31 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 107 && coreLegacy.size() + 60 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders, the VR maps' twelve (five transcribed vertex shaders, the probe's vertex and pixel shader, the sprites' depth issue's two pixel shaders, the System Map's marker vertex shader and the cut-out's vertex and pixel shader) and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 108 && coreLegacy.size() + 61 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders, the VR maps' twelve (five transcribed vertex shaders, the probe's vertex and pixel shader, the sprites' depth issue's two pixel shaders, the System Map's marker vertex shader and the cut-out's vertex and pixel shader) and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay), and the VRS zone highlight are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
     const auto reflect = reinterpret_cast<ReflectFn>(GetProcAddress(compiler.module, "D3DReflect"));
     check(reflect != nullptr, "system compiler reflection available");
+    {
+        auto& highlight = coreFixed.back();
+        const bool built = !std::strcmp(highlight.symbol, "kNativeVrsHighlightBytecode") &&
+                           compile(compiler.fn, highlight.alternate, highlight, true);
+        check(built, "VRS zone highlight compiles as its own fixed compute payload");
+        ComPtr<ID3D11ShaderReflection> reflection;
+        D3D11_SHADER_DESC desc{};
+        const bool reflected = built && reflect && SUCCEEDED(reflect(highlight.bytes.data(), highlight.bytes.size(),
+            __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()))) &&
+            reflection && SUCCEEDED(reflection->GetDesc(&desc));
+        UINT x=0,y=0,z=0;
+        check(reflected && reflection->GetThreadGroupSize(&x,&y,&z)==256 && x==16 && y==16 && z==1 &&
+              desc.BoundResources==4, "VRS highlight uses its declared dispatch geometry and exactly four bindings");
+        D3D11_SHADER_INPUT_BIND_DESC map{};
+        check(reflected && SUCCEEDED(reflection->GetResourceBindingDescByName("RateMap", &map)) &&
+              map.Type==D3D_SIT_TEXTURE && map.BindPoint==1 && map.ReturnType==D3D_RETURN_TYPE_UINT,
+              "VRS zone highlight reads the unsigned tile map at t1");
+    }
     for (size_t i = 0; i < coreFixed.size() && i < coreLegacy.size(); ++i) {
         auto& shader = coreFixed[i]; const auto& legacy = coreLegacy[i];
         Fnv1a64 sourceFingerprint; sourceFingerprint.add(shader.alternate, std::strlen(shader.alternate));

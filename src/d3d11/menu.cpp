@@ -1995,6 +1995,7 @@ Page makePage(const MenuPageDef& d) {
             if (d.token && !strcmp(d.token, "performance") && d.tier == MenuPageTier::Fix) {
                 moveRowAfter(p,"experimental","eye_tracked_foveation","fix","frame_generation");
                 moveRowAfter(p,"experimental","foveation_focus","experimental","eye_tracked_foveation");
+                moveRowAfter(p,"experimental","foveation_highlight","experimental","foveation_focus");
                 addNativePerformanceStatus(p);
             }
             break;

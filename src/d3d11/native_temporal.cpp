@@ -13,6 +13,7 @@
 #include "vscreen.h"           // vScreenClearRenderTargetViewRaw: the black frame's one clear
 #include "journal_watch.h"      // journalGuiFocus: the map gate (a map open: no jitter, no history)
 #include "flat_stationary_camera_capture.h"   // mapCameraAnyOpen: the map camera's stage is named (the gate's other term, and the pass's signal)
+#include "native_vrs.h"
 #include "vr_camera_census.h"   // nativeTemporalEyeGeometry's declaration, so its definition below is checked against it
 #include "terrain_cull_cover_hook.h"   // the terrain cull cover (docs/terrain-culling.md): begin() tells it the frusta the game is handed
 #include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter, and whether eye 0 is zoomed
@@ -87,6 +88,7 @@ struct State {
   // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but Intel's XeSS, whose ratio sets it.
   uint32_t jitterCycle[2]{};
   bool treated[2]{};
+  uint64_t vrsInputSequence[2]{};
   History history[2];
   uint64_t continuity[2]{};
   bool verdictPending[2]{};
@@ -226,7 +228,7 @@ void reset(State& s) {
   gazeReadyEpoch.store(0,std::memory_order_release);
   s.gazeReadiness.reset(++gazeEpoch);
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
-  for(unsigned e=0;e<2;++e){s.continuity[e]=0;s.verdictPending[e]=false;s.verdictWaits[e]=0;}
+  for(unsigned e=0;e<2;++e){s.continuity[e]=0;s.vrsInputSequence[e]=0;s.verdictPending[e]=false;s.verdictWaits[e]=0;}
 }
 bool sameHistorySettings(const Settings& a,const Settings& b) {
   // engine is compared explicitly: dlss and fsr read identically on
@@ -520,6 +522,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   if(!edvr::supersampleRegionFromBounds(d.Width,d.Height,box,region,&fu,&fv))return E_INVALIDARG;
   const uint32_t w=region[2]-region[0],h=region[3]-region[1];if(!w||!h)return E_INVALIDARG;
   if (s->flipped[eye] != (flipU||flipV)) { s->history[eye]={}; s->flipped[eye]=(flipU||flipV); }
+  s->vrsInputSequence[eye]=0;
   s->width[eye]=w;s->height[eye]=h;s->pendingSettings=readConfig();
   // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
   // this eye, the one authority on which eye is which.
@@ -631,6 +634,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   s->treated[eye]=true;
   if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;gazeReadyEpoch.store(0,std::memory_order_release);edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;
+  if(region[0]==0&&region[1]==0&&w==d.Width&&h==d.Height)s->vrsInputSequence[eye]=seq;
   s->gazeReadiness.succeeded(seq,eye);
   if(s->gazeReadiness.pairReady)gazeReadyEpoch.store(s->gazeReadiness.epoch,std::memory_order_release);
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
@@ -697,6 +701,15 @@ NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device* device,unsigne
   return {gazeEpoch,current?current->gazeReadiness.pairSequence:0,gazeOwner(device,thread)};
 }
 uint64_t nativeTemporalGazeEpoch() noexcept {return gazeReadyEpoch.load(std::memory_order_acquire);}
+bool nativeTemporalVrsInput(uint64_t sequence,unsigned eye,unsigned& width,unsigned& height,float (&jitter)[2]) {
+  if(t_insideTreat||!sequence||eye>1)return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if(!current||!current->active||!current->begun||current->thread!=GetCurrentThreadId()||
+     current->sequence!=sequence||current->vrsInputSequence[eye]!=sequence)return false;
+  width=current->width[eye];height=current->height[eye];
+  std::memcpy(jitter,current->renderedJitter[eye],sizeof(jitter));
+  return width&&height&&std::isfinite(jitter[0])&&std::isfinite(jitter[1]);
+}
 bool nativeTemporalWithGazeReady(ID3D11Device* device,unsigned long thread,uint64_t epoch,
                                 NativeGazeReadyCallback callback,void* user) {
   if(t_insideTreat||!callback)return false;

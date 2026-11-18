@@ -5,6 +5,8 @@
 struct ID3D11DeviceContext;
 struct ID3D11RenderTargetView;
 struct ID3D11DepthStencilView;
+struct ID3D11Device;
+struct ID3D11Texture2D;
 
 namespace edvr {
 enum class NativeVrsFailure:uint32_t {
@@ -30,6 +32,22 @@ struct NativeVrsStatus {
 // new owning-frame Tick before coarse shading is eligible.
 void nativeVrsConfigure(bool enabled,float hqRadius=.15f,float midRadius=.45f) noexcept;
 void nativeVrsConfigureFocus(bool enabled,const char* profile) noexcept;
+// The live toggle adds a diagnostic only to eligible native eye images.
+void nativeVrsConfigureHighlight(bool enabled) noexcept;
+bool nativeVrsHighlightRequested() noexcept;
+// Borrow the map and its immediate context for this eye on the owning thread.
+// Returns false if this frame had no acknowledged native world map, the
+// geometry differs, or the context cannot be restored to full rate.
+bool nativeVrsHighlightMap(ID3D11Device*,uint64_t sequence,unsigned eye,
+    unsigned width,unsigned height,ID3D11DeviceContext*&,ID3D11Texture2D*&) noexcept;
+// Borrow the native temporal input geometry for the submitted sequence. Only
+// a successful full, unflipped eye is available to the highlight pass.
+bool nativeTemporalVrsInput(uint64_t sequence,unsigned eye,unsigned& width,
+    unsigned& height,float (&jitter)[2]);
+// Returns a private tinted copy with one reference for the caller. A null
+// result leaves the clean eye ready for the normal UI and submit paths.
+ID3D11Texture2D* nativeVrsHighlightEye(uint64_t sequence,unsigned eye,
+    ID3D11Texture2D*,const uint32_t region[4]) noexcept;
 // Cheap draw gate. Remains true after OFF once a driver was initialized, so
 // full-rate/reset boundaries remain reachable.
 extern std::atomic<bool> g_nativeVrsLive;

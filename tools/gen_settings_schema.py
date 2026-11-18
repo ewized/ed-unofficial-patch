@@ -202,7 +202,8 @@ MENU_ADVANCED_EXCEPTIONS = ('advanced.flat_cpu_timing', 'advanced.flat_refusal_v
 # These native VRS settings keep their persisted [experimental] names but are
 # normal Performance rows. Other experimental settings still belong to the developer page.
 MENU_EXPERIMENTAL_PERFORMANCE = ('experimental.eye_tracked_foveation',
-                                 'experimental.foveation_focus')
+                                 'experimental.foveation_focus',
+                                 'experimental.foveation_highlight')
 MENU_PUBLIC_EXCEPTIONS = MENU_ADVANCED_EXCEPTIONS + MENU_EXPERIMENTAL_PERFORMANCE
 # Settings that were taken off every menu on purpose, and must stay off.
 #
@@ -1902,31 +1903,34 @@ def self_test():
                 {'a.cpp': debug_reads['a.cpp'].replace('flat_cpu_timing', 'other_timing')}, 1)
     expect_in(name, said, 'advanced.other_timing')
 
-    # Native VRS remains in the persisted experimental section while both settings
+    # Native VRS remains in the persisted experimental section while its settings
     # appear once on Performance for everyone. This exception does not expose other probes.
     vrs_ini = ('[fix]\n# A switch. Live.\n# ui: Alpha | live | menu performance\nalpha = on\n\n'
                '[experimental]\n# Native VRS. Live.\n'
                '# ui: Native eye-tracked VRS | live | menu performance\neye_tracked_foveation = 0\n\n'
                '# The sharp region. Live.\n'
                '# ui: VRS sharp region | choices normal, wide | live | menu performance\nfoveation_focus = normal\n\n'
+               '# The zone highlight. Live.\n'
+               '# ui: VRS zone highlight | live | menu performance\nfoveation_highlight = off\n\n'
                '# A separate probe. Live.\nsome_probe = off\n')
     vrs_reads = {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
                           'bool v = cfg.getBool("experimental.eye_tracked_foveation", false);\n'
                           'auto f = cfg.getString("experimental.foveation_focus", "normal");\n'
+                          'bool h = cfg.getBool("experimental.foveation_highlight", false);\n'
                           'bool p = cfg.getBool("experimental.some_probe", false);\n')}
     name = 'native-vrs-performance-rows'
     wrote = case(name, vrs_ini, vrs_reads, 0)
-    for key in ('eye_tracked_foveation', 'foveation_focus'):
+    for key in ('eye_tracked_foveation', 'foveation_focus', 'foveation_highlight'):
         if wrote.count('"%s"' % key) != 1:
             failures.append('%s: expected one normal row for %s' % (name, key))
-    if wrote.count('MenuTier::Fix, "performance"') != 3 or wrote.count('MenuTier::Experimental') != 1:
-        failures.append('%s: Alpha and both native VRS rows are normal Performance rows; only the unrelated probe is developer tier' % name)
+    if wrote.count('MenuTier::Fix, "performance"') != 4 or wrote.count('MenuTier::Experimental') != 1:
+        failures.append('%s: Alpha and all native VRS rows are normal Performance rows; only the unrelated probe is developer tier' % name)
     expect_not_in(name, wrote, 'MenuTier::Experimental, "performance"')
     name = 'native-vrs-token-refused-elsewhere'
     said = case(name, vrs_ini.replace('eye_tracked_foveation', 'other_vrs'),
                 {'a.cpp': vrs_reads['a.cpp'].replace('eye_tracked_foveation', 'other_vrs')}, 1)
     expect_in(name, said, 'experimental.other_vrs')
-    for key in ('eye_tracked_foveation', 'foveation_focus'):
+    for key in ('eye_tracked_foveation', 'foveation_focus', 'foveation_highlight'):
         name = 'native-vrs-wrong-page-' + key
         changed = vrs_ini.replace('menu performance\n' + key, 'menu debug\n' + key)
         said = case(name, changed, vrs_reads, 1)

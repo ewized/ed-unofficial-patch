@@ -45,7 +45,7 @@ constexpr int kCallFault=INT_MIN;
 struct Shared {
     std::mutex configMutex; // configuration only; never acquired by draw calls
     std::atomic<uint64_t> configVersion{0},invalidateVersion{0};
-    std::atomic<bool> enabled{false};
+    std::atomic<bool> enabled{false},highlight{false};
     std::atomic<float> hq{.15f},mid{.45f};
     std::atomic<ID3D11DeviceContext*> owner{nullptr};
     std::atomic<DWORD> thread{0};
@@ -65,7 +65,7 @@ struct EyeMap {
     ComPtr<ID3D11RenderTargetView> target;
     ComPtr<ID3D11DepthStencilView> depth;
     unsigned worldW=0,worldH=0,mapW=0,mapH=0;
-    uint64_t frame=0;
+    uint64_t frame=0,highlightFrame=0;
     NativeVrsProjection projection{};
     std::vector<uint8_t> cpu;
 };
@@ -413,8 +413,32 @@ bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11Render
         if(s.gazeEpoch!=nativeTemporalGazeEpoch()){fullRate(s);return false;}
         const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
         if(!activateMap(s,view))return false;
+        if(a.highlight.load(std::memory_order_relaxed))s.eyes[eye].highlightFrame=s.frame;
         ++a.accepted;return true;
     }catch(...){auto& s=state();refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
+}
+void nativeVrsConfigureHighlight(bool enabled) noexcept {
+    shared().highlight.store(enabled,std::memory_order_relaxed);
+}
+bool nativeVrsHighlightRequested() noexcept {
+    return shared().highlight.load(std::memory_order_relaxed);
+}
+bool nativeVrsHighlightMap(ID3D11Device* device,uint64_t sequence,unsigned eye,
+    unsigned width,unsigned height,ID3D11DeviceContext*& context,ID3D11Texture2D*& texture) noexcept {
+    context=nullptr;texture=nullptr;
+    try {
+        auto& a=shared();
+        if(!nativeVrsHighlightRequested()||!a.enabled.load(std::memory_order_acquire)||
+           !device||!sequence||eye>1||a.thread.load(std::memory_order_acquire)!=GetCurrentThreadId())return false;
+        auto& s=state();const auto& map=s.eyes[eye];
+        if(device!=s.device.Get()||s.failed||s.config!=a.configVersion.load(std::memory_order_acquire)||
+           !s.gazeEpoch||s.gazeEpoch!=nativeTemporalGazeEpoch()||map.frame!=s.frame||
+           map.highlightFrame!=s.frame||map.projection.sequence!=sequence||
+           map.worldW!=width||map.worldH!=height||!map.texture)return false;
+        syncInvalidation(s);
+        if(s.failed||!fullRate(s))return false;
+        context=s.context.Get();texture=map.texture.Get();return true;
+    }catch(...){return false;}
 }
 void nativeVrsFullRate(ID3D11DeviceContext* context) noexcept {
     try {

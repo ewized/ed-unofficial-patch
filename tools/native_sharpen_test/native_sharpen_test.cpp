@@ -8,6 +8,7 @@
 #include <thread>
 #include <string>
 #include "../../src/common/native_sharpen.h"
+#include "../../src/d3d11/native_vrs.h"
 #include "../../src/common/config.h"
 #include "../../src/openxr/native_sharpen_client.h"
 #include "../../src/common/system_d3d11.h"
@@ -36,8 +37,13 @@ unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9; bool d
 unsigned finalCalls=0; ID3D11Texture2D* finalTexture=nullptr;
 uint64_t finalSequence=0;uint32_t finalEye=9,finalRegion[4]{};
 bool finalComposite=false,finalFlipU=false,finalFlipV=false;
+ID3D11Texture2D* highlightOut=nullptr;
 ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{}; float lastUv[4]{};
 namespace edvr {
+ID3D11Texture2D* nativeVrsHighlightEye(uint64_t,uint32_t,ID3D11Texture2D*,const uint32_t[4]) noexcept {
+  if(highlightOut){order+='V';highlightOut->AddRef();}
+  return highlightOut;
+}
 void breadcrumb(const char*) {} // production guard.cpp's crash-channel dependency
 void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* texture,const uint32_t region[4],bool composite,bool flipU,bool flipV){
   ++finalCalls;finalSequence=seq;finalEye=eye;finalTexture=texture;std::memcpy(finalRegion,region,sizeof(finalRegion));finalComposite=composite;finalFlipU=flipU;finalFlipV=flipV;
@@ -188,6 +194,14 @@ void run() {
     check(door.treatEye(door.context,3,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
           "nothing in the layer and sharpening off: the eye passes through exactly as before");
     check(finalTexture==source.Get()&&!finalComposite&&finalRegion[2]==32,"off empty-layer final hook captures unchanged source");
+    auto highlight=device.texture();
+    highlightOut=highlight.Get();doorFromPassAnswer=true;order.clear();
+    check(door.treatEye(door.context,4,0,source.Get(),nullptr,&out,box)==S_OK&&out==highlight.Get()&&
+          order=="VC"&&lastFrame==highlight.Get()&&lastOwned&&refs(highlight.Get())==2&&
+          finalTexture==highlight.Get()&&!finalComposite,
+          "VRS highlight replaces the clean passthrough before HUD and retains an output reference with no HUD draws");
+    if(out)out->Release();out=nullptr;
+    highlightOut=nullptr;doorFromPassAnswer=false;
     const auto seenInvalid=doorSeen;
     const auto finalInvalid=finalCalls;
     check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==E_INVALIDARG&&doorSeen==seenInvalid,
