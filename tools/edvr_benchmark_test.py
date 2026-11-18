@@ -18,7 +18,7 @@ def digest(data):
 
 def packet(sequence, time_ms, native, generated, repeated, session_key='a'):
     return dict(kind='presentation', now_ms=time_ms, captured_at_ms=time_ms, fresh=True,
-                sequence=sequence, session_key=session_key, native=native,
+                active=True, available=True, sequence=sequence, session_key=session_key, native=native,
                 generated=generated, repeated=repeated)
 
 
@@ -95,6 +95,41 @@ class BenchmarkQualificationTests(unittest.TestCase):
         args['qualification']['treatments']['fg']['status'] = 'active'
         result = qualify_capture(**args, sources=sources)
         self.assertEqual(result['features']['fg']['status'], 'inconsistent')
+
+    def test_inactive_unavailable_and_stale_packets_break_coverage(self):
+        for invalid in ({'active': 0}, {'available': False}, {'captured_at_ms': 3500, 'now_ms': 5501}):
+            with self.subTest(invalid=invalid):
+                args, sources = capture([
+                    packet(1, 2000, 1, 0, None), packet(5, 3000, 5, 0, None),
+                    packet(25, 5000, 15, 10, None) | invalid,
+                    packet(45, 6000, 35, 10, None), packet(50, 7000, 40, 10, None),
+                ])
+                result = qualify_capture(**args, sources=sources)['submission']
+                self.assertEqual(result['counts'], dict(native=9, generated=0, repeated=None, total=None))
+                self.assertEqual(result['observed_intervals'], 2)
+                self.assertEqual(result['observed_seconds'], 2)
+
+    def test_camera_and_backend_evidence_survive_status_override_without_aliasing(self):
+        args, sources = capture()
+        original = args['qualification']['treatments']['fg']
+        original.update(reasons=['no_observed_generated_submission_camera_refusal_observed'],
+                        generated_count=0, activation_observed=False,
+                        backend_failure_codes=[5], admission_details={
+                            'fg_camera_refusal': {'namespace': 'producer_camera_v1', 'camera_masks': [0x31]},
+                            'fg_lifecycle': {'namespace': 'runtime_lifecycle_v1', 'admission_values': [2]},
+                        })
+        result = qualify_capture(**args, sources=sources)['features']['fg']
+        self.assertEqual(result['status'], 'unavailable')
+        self.assertIsNone(result['generated_count'])
+        self.assertIsNone(result['activation_observed'])
+        self.assertEqual(result['reasons'], original['reasons'])
+        self.assertEqual(result['backend_failure_codes'], [5])
+        camera = result['admission_details']['fg_camera_refusal']
+        self.assertEqual(camera, {'namespace': 'producer_camera_v1', 'camera_masks': [49]})
+        self.assertEqual(result['admission_details']['fg_lifecycle']['namespace'], 'runtime_lifecycle_v1')
+        camera['camera_masks'].clear()
+        self.assertEqual(original['admission_details']['fg_camera_refusal']['camera_masks'], [49])
+        self.assertEqual(original['status'], 'expected_inactive')
 
     def test_reused_session_or_reordered_packets_cannot_inflate_coverage(self):
         args, sources = capture([packet(1, 2000, 1, 0, 0), packet(11, 4000, 11, 0, 0),

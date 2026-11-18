@@ -8,6 +8,7 @@ for the raw DXGI Present measurement. See docs/benchmark-qualification.md.
 """
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -37,6 +38,10 @@ def _require(condition, message):
 
 def _uint(value):
     return type(value) is int and value >= 0
+
+
+def _flag(value):
+    return value is True or type(value) is int and value == 1
 
 
 def _hex(value, size):
@@ -133,7 +138,8 @@ def submission_summary(records, start, end):
         now, captured = packet['now_ms'], packet['captured_at_ms']
         _require(all(_uint(value) for value in (now, captured, packet['sequence'])),
                  'Invalid submission timestamp or sequence')
-        if not (start <= captured <= now <= end and packet['fresh'] in (True, 1)):
+        if not (start <= captured <= now <= end and now - captured <= 2000
+                and all(_flag(packet.get(key)) for key in ('active', 'available', 'fresh'))):
             previous = None
             continue
         prior, previous = previous, packet
@@ -227,13 +233,15 @@ def row_diagnostics(records, start, end):
 
 
 def _feature_activity(qualification, requested, windows, row, submissions):
-    """Retain reviewed feature conclusions subject to dimension and delivery proof."""
+    """Copy the reviewed qualifier's allowlisted evidence, then apply stricter checks."""
     treatments = qualification.get('treatments', {})
     result = {}
     for feature in REQUESTS:
-        value = treatments.get(feature, {}).get('status', 'unavailable')
+        evidence = deepcopy(treatments.get(feature, {}))
+        value = evidence.get('status', 'unavailable')
         _require(value in FEATURE_STATUSES, 'Unknown feature status')
-        result[feature] = {'status': value}
+        evidence['status'] = value
+        result[feature] = evidence
     output = row.get('expected_output_dimensions')
     declared_input = row.get('expected_input_dimensions')
     _require(_dimensions(output), 'Declared stereo output dimensions required')
@@ -251,6 +259,8 @@ def _feature_activity(qualification, requested, windows, row, submissions):
     result['aa']['benchmark_dimensions_match'] = dimension_match if windows else None
     result['aa']['expected_output_dimensions'] = list(output)
     result['aa']['expected_input_dimensions'] = list(declared_input) if declared_input else None
+    if not dimension_match:
+        result['aa']['dimensions_verified'] = False
     if windows and not dimension_match:
         result['aa']['status'] = 'wrong_mode'
     elif not windows:
@@ -259,6 +269,8 @@ def _feature_activity(qualification, requested, windows, row, submissions):
     coverage = submissions['known_counter_coverage']['generated']['fraction_of_observed']
     result['fg']['generated_observed'] = (
         True if generated else False if generated == 0 and coverage == 1 else None)
+    result['fg']['generated_count'] = generated
+    result['fg']['activation_observed'] = result['fg']['generated_observed']
     status = result['fg']['status']
     if status not in ('unsupported', 'inconsistent', 'wrong_mode'):
         if generated is None:
