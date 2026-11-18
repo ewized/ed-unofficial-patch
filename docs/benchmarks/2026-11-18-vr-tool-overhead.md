@@ -6,7 +6,9 @@ The exact Windows build `2bbac50c` retained the independent FPS layer and
 verified generated-frame counts in 3× and Auto. In the mirrored tools-off
 comparison, Compact with GPU timing still cost 1.25–1.69% in application
 cadence. Detailed with GPU timing cost 1.88–1.94%. Both increased the p99 frame
-cycle. The investigation continues with GPU timing and Compact tested separately.
+cycle. Testing GPU timing and Compact separately found smaller penalties in
+both modes. The `f41f5cdc` replay also verified a fix for repeated invalid
+timing records during enable.
 
 The first performance candidate `3f0a7c2e` delivered more application frame
 cycles per second and lower frame-cycle p95 in each corresponding control
@@ -314,3 +316,48 @@ captures showed 22 native and 43 generated submissions per second at 3×,
 and 31 native, 32 generated, and one repeated per second in Auto. These are
 readout snapshots from the sampled intervals. All checks used bounded head
 motion and stayed docked. Physical scanout was outside this simulator test.
+
+### GPU timing and Compact separately
+
+Another launch of the exact `2bbac50c` package used the same docked scene,
+configuration, and simulator clock. The harness qualified 9,475 application
+cycles in six windows and verified the saved preferences after Normal Stop.
+
+| Block | Enabled tools | Cycles/s | Cycle p95 | Cycle p99 |
+| --- | --- | ---: | ---: | ---: |
+| 1 | None | 53.10 | 25.745 ms | 27.777 ms |
+| 2 | GPU timing | 52.50 | 26.460 ms | 28.416 ms |
+| 3 | Compact overlay | 52.77 | 26.809 ms | 28.550 ms |
+| 4 | Compact overlay | 52.21 | 27.398 ms | 29.142 ms |
+| 5 | GPU timing | 52.43 | 26.654 ms | 28.854 ms |
+| 6 | None | 52.77 | 26.486 ms | 28.274 ms |
+
+GPU timing reduced cadence by 1.13% and 0.63% in opposite orders. Cycle p99
+rose by 0.639 and 0.580 ms. Compact reduced cadence by 0.61% and 1.06%, with
+p99 increases of 0.773 and 0.868 ms. Both effects also shared the same sign
+after interpolating the Off control across the session. The combined penalty
+in the earlier launch was similar in size to the two individual effects
+together, without a same-session estimate of their interaction.
+
+GPU timing increased mean time before first eye submission by 0.225 and
+0.247 ms. Its direct `xrEndFrame` p99 changed by +0.289 and −0.687 ms.
+Compact increased pre-submit time by 0.304 and 0.138 ms and direct
+`xrEndFrame` p99 by 1.553 and 0.160 ms. The few contained 256-frame
+OpenXR phase windows show more drift than the application cadence totals.
+Both GPU timing windows reported about 52.5 valid completions per second
+and zero invalid counter growth once steady.
+
+### GPU timing enable transition
+
+Earlier builds reported thousands of invalid admissions within one game
+Present of the first manual GPU timing enable. The `2bbac50c` mirrored
+overlay run reported 7,809 additional invalid records between the first
+failed native query and the next valid result, then 41,346 more over
+roughly five seconds. The steady timing windows started after this burst.
+
+`f41f5cdc` consumes the first attempt for a failed native frame and retires
+failed query state without publishing the same failure again. In an
+exact-source replay following one failed admission, 8,192 draws went from
+8,192 extra `GetData` calls and 7,938 dropped completion records to zero in
+both categories. The older pending sample and the next valid measured
+frame were preserved. This replay measures the enable-transition defect.
