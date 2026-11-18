@@ -4,7 +4,7 @@ Acquisition and wire parsing stay with the controller. A capture receipt binds
 its selected streams to the guarded process and row; it is not a signature or
 proof that an untrusted producer parsed those bytes correctly. Runtime phase
 records remain with the parser: no phase is added to another or substituted
-for the raw DXGI Present measurement. See docs/benchmarks/2026-11-17-vrs-framegen.
+for the raw DXGI Present measurement. See docs/benchmark-qualification.md.
 """
 
 import argparse
