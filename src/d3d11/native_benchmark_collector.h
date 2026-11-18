@@ -135,6 +135,8 @@ private:
     uint64_t droppedGpu_ = 0;
     Entry entries_[kCapacity]{};
     OrphanGpu orphans_[kOrphanCapacity]{};
+    // Counts use the sequence's home bucket, not its actual probe slot.
+    uint16_t orphanBucketCounts_[kOrphanCapacity]{};
 
     static bool validValue(double value) noexcept;
     static bool elapsed(uint64_t now, uint64_t then, uint64_t duration) noexcept;

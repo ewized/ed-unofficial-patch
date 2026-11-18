@@ -34,9 +34,13 @@ void NativeBenchmarkCollector::noteDropped(bool cpu, uint64_t count) noexcept {
 void NativeBenchmarkCollector::clearEntries() noexcept {
     for (auto& entry : entries_) entry = {};
     for (auto& orphan : orphans_) orphan = {};
+    for (auto& count : orphanBucketCounts_) count = 0;
 }
 
 void NativeBenchmarkCollector::reset() noexcept {
+    // The default and reset Idle states have empty tables. Flat or unavailable
+    // native timing can request this every monitor tick.
+    if (phase_ == Phase::Idle) return;
     scope_ = 0;
     metadata_ = {};
     warmupStartMs_ = sampleStartMs_ = sampleEndMs_ = drainEndMs_ = lastNowMs_ = 0;
@@ -104,6 +108,9 @@ NativeBenchmarkCollector::OrphanGpu* NativeBenchmarkCollector::findOrphan(
     uint64_t sequence, bool create) noexcept {
     if (!sequence) return nullptr;
     const unsigned start = static_cast<unsigned>(sequence % kOrphanCapacity);
+    // Delayed warmup completions can leave unrelated orphans for the whole
+    // window. An empty home bucket proves a miss without probing those slots.
+    if (!create && !orphanBucketCounts_[start]) return nullptr;
     OrphanGpu* freeSlot = nullptr;
     for (unsigned probe = 0; probe < kOrphanCapacity; ++probe) {
         OrphanGpu& orphan = orphans_[(start + probe) % kOrphanCapacity];
@@ -117,6 +124,7 @@ NativeBenchmarkCollector::OrphanGpu* NativeBenchmarkCollector::findOrphan(
         *freeSlot = {};
         freeSlot->sequence = sequence;
         freeSlot->used = true;
+        ++orphanBucketCounts_[start];
         return freeSlot;
     }
     if (!create) return nullptr;
@@ -139,6 +147,7 @@ void NativeBenchmarkCollector::addCpu(const NativeBenchmarkObservation& sample) 
         entry->gpuValid = orphan->valid;
         entry->gpuMs = orphan->valid ? orphan->ms : 0.0;
         *orphan = {};
+        --orphanBucketCounts_[sample.cpuSequence % kOrphanCapacity];
     }
 }
 

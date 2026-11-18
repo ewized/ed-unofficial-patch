@@ -235,6 +235,7 @@ void benchmarkAdmission() {
     };
     c.observe(onlyGpu(1,3010,10),3010);
     c.observe(onlyGpu(257,3011,20),3011); // Same hash bucket.
+    c.observe(onlyGpu(257,3012,999),3012); // Duplicate orphan completion keeps the first value.
     c.observe(onlyCpu(1,3001,1),3012); // Removing it must not hide 257.
     c.observe(onlyCpu(257,3002,2),3013);
     c.observe(onlyGpu(3,3014,999),3014);
@@ -258,9 +259,11 @@ void benchmarkAdmission() {
     check(r.startedAtMs==3000&&r.sampleEndedAtMs==33000&&r.drainMs==2000,
           "sample and drain durations are distinct");
     c.observe(tick,40000);c.observe(tick,42000);
-    c.observe(onlyCpu(100,42001,7),42001);tick.scope=2;c.observe(tick,42500);
+    c.observe(onlyCpu(3,42001,7),42001);tick.scope=2;c.observe(tick,42500);
     check(c.takeReport(&r)&&r.aborted&&r.sampleEndedAtMs-r.startedAtMs==500&&r.drainMs==0,
           "partial reports state actual duration, not planned thirty seconds");
+    check(r.cpu.valid==1&&r.gpu.missing==1,
+          "a recurring window cannot reuse an unmatched orphan from the previous window");
 }
 void benchmarkWindows() {
     NativeBenchmarkCollector c;
@@ -376,6 +379,39 @@ void benchmarkWindows() {
     }
     check(c.ready() && c.takeReport(&report) && report.aborted && report.overflow,
           "storage overflow aborts instead of silently truncating samples");
+}
+
+void benchmarkInterruptedReset() {
+    NativeBenchmarkCollector c;
+    NativeBenchmarkObservation tick{};
+    tick.scope = 1;
+    for (bool draining : {false, true}) {
+        c.observe(tick, 0);
+        c.observe(benchmarkSample(3, 2000, 9, 30), 2000);
+        auto orphan = benchmarkSample(4, 2001, 0, 40);
+        orphan.cpuSequence = 0;
+        c.observe(orphan, 2001);
+        if (draining) c.observe({}, 32000);
+        check(c.sampling() && c.collecting() != draining, "reset interrupts the intended active phase");
+        const auto window = c.window();
+        c.reset();
+        c.reset();
+        c.observe({}, 34000);
+        check(!c.ready() && !c.sampling() && !c.warming() && c.window() == window,
+              "repeated idle resets keep the collector empty and preserve window numbering");
+
+        c.observe(tick, 40000);
+        auto newCpu = benchmarkSample(4, 42000, 2, 0);
+        newCpu.gpuSequence = 0;
+        c.observe(newCpu, 42000);
+        c.observe({}, 72000);
+        c.observe({}, 74000);
+        NativeBenchmarkReport report{};
+        check(c.takeReport(&report) && report.window == window && !report.aborted &&
+              report.cpu.valid == 1 && approx(report.cpu.p50, 2) &&
+              report.gpu.missing == 1 && report.gpu.valid == 0,
+              "reset clears active entries and orphan occupancy during sampling and drain");
+    }
 }
 
 // ---- frame_ticks.h: where the Present hook's time went, per frame -------------------------------------
@@ -890,6 +926,7 @@ int wmain(int argc,wchar_t** argv) {
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
     averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
+    benchmarkInterruptedReset();
     frameTicksChain();frameTicksTopThree();frameTicksOddClocks();frameTicksUncut();frameShareText();nativeLongFrameFits();frameTickCostNote();
     fpsOverlayModes();detailedText();flatCorner();readoutMachine();
     presentedTally();presentedRing();presentedBudgets();readoutText();
