@@ -103,3 +103,5 @@ Not affiliated with, endorsed by, or supported by Frontier Developments plc or
 Valve Corporation. Elite Dangerous is a trademark of Frontier Developments plc.
 
 Captured performance rows can be checked with the [benchmark qualification tool](docs/benchmark-qualification.md), which separates timing coverage, feature activity and submission rates.
+
+AI agents: see [AGENTS.md](AGENTS.md).
