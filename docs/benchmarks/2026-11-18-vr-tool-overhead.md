@@ -124,7 +124,37 @@ The sampled Compact crop was 1718 × 158. Compact improved cadence by 1.31%
 and 0.47% versus Detailed Live and reduced cycle p99 by 0.905 ms and 0.449 ms.
 The remaining cadence differences versus Off were −0.93% and −0.87%, with
 p95 changes of +0.132 ms and +0.156 ms. The diagnostic establishes a smaller
-cost for Compact in this setup. The production build needs its own check.
+cost for Compact in this setup.
+
+## Production Compact comparison
+
+The original `bae4fd1a` package was restored and independently verified
+before this docked Pilot Assessment run. It used the same four mirrored
+treatments as the Detailed comparison, with only the overlay style changing.
+All eight timing blocks qualified. The four visible blocks reported a matching
+OpenXR attachment of the Compact raster with rates, mode, and cumulative count.
+
+| Block | Enabled tools | Cycles/s | Cycle p95 | Cycle p99 |
+| --- | --- | ---: | ---: | ---: |
+| 1 | None | 57.70 | 22.703 ms | 24.390 ms |
+| 2 | GPU timing | 56.13 | 22.883 ms | 25.249 ms |
+| 3 | Compact overlay | 55.30 | 24.003 ms | 25.472 ms |
+| 4 | Both | 55.43 | 23.451 ms | 25.508 ms |
+| 5 | Both | 56.43 | 23.183 ms | 25.153 ms |
+| 6 | Compact overlay | 57.13 | 22.717 ms | 24.497 ms |
+| 7 | GPU timing | 57.57 | 22.719 ms | 24.166 ms |
+| 8 | None | 57.20 | 22.844 ms | 24.580 ms |
+
+Compact reduced cadence by 1.25% and 1.97% with GPU timing enabled. Both
+tools together reduced it by 3.93% and 1.34% relative to no tools. With GPU
+timing off, the Compact effects were −4.16% and −0.12%. The two Compact-only
+blocks differed by 3.32%, making the size of the Compact-only effect uncertain.
+This production comparison did not reproduce the diagnostic advantage with
+both tools active.
+
+The Compact frame-generation check stopped before timing because its harness
+omitted a required output directory. The verified 3× and Auto results above
+use Detailed.
 
 ## Local cost checks
 
