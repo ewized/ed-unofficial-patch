@@ -9,8 +9,10 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
+#include "../common/runtime_profile.h"
 #include "journal_watch.h"
 #include "native_on_foot.h"
+#include "native_reflex_nvapi.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -31,7 +33,9 @@ std::atomic<uint64_t> g_heldLatches{0};   // TEMPORARY (concourse vr probe): lat
 
 struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
+    IUnknown* deviceIdentity = nullptr; // borrowed for the same lifetime as device
     uint64_t generation = 0;
+    edvr::native_reflex::ModeHistory reflex;
     uint64_t sequenceFloor = 0;
     bool active = false;
     bool invalidated = false;
@@ -57,6 +61,36 @@ State g_pool[kPoolSize];
 unsigned g_used = 0;
 State* g_current = nullptr;
 std::mutex g_mutex;
+// Changes to the config or active profile trigger one device-scoped update
+// on the game producer. An acquire always refreshes the new session itself.
+std::atomic<uint64_t> g_reflexConfigStamp{UINT64_MAX};
+
+uint64_t reflexConfigStamp() {
+    return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile());
+}
+
+// The caller holds g_mutex. Read the stamp first so a concurrent reload will
+// still notify the next Present if it changed while the key was being read.
+void refreshReflex(State& state, uint64_t stamp) {
+    using namespace edvr::native_reflex;
+    Mode mode = Mode::Off;
+    if (stamp & 1) {
+        const auto value = edvr::Config::get().getString("fix.nvidia_reflex", "off");
+        if (_stricmp(value.c_str(), "boost") == 0) mode = Mode::Boost;
+        else if (_stricmp(value.c_str(), "on") == 0) mode = Mode::On;
+    }
+    updateMode(state.reflex, state.device, mode, state.generation);
+    g_reflexConfigStamp.store(stamp, std::memory_order_release);
+}
+
+bool matchesReflexDevice(ID3D11Device* device, const State& state) {
+    if (device == state.device) return true;
+    IUnknown* identity = nullptr;
+    if (FAILED(device->QueryInterface(IID_IUnknown, reinterpret_cast<void**>(&identity)))) return false;
+    const bool matches = identity == state.deviceIdentity;
+    identity->Release();
+    return matches;
+}
 // F22: the look-to-aim total and the game frame it was taken at, for version 6 (set by nativeFrameSetLookYaw; guarded by g_mutex).
 float g_lookYaw = 0.0f;
 uint32_t g_lookYawFrame = 0;
@@ -642,8 +676,10 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    edvr::native_reflex::closeMode(state->reflex, state->device, state->generation);
     state->active = false;
     state->device = nullptr;
+    state->deviceIdentity = nullptr;
     state->invalidated = true;
     state->began = false;
     state->latched = false;
@@ -658,6 +694,17 @@ HRESULT WINAPI close(void* context) {
 } // namespace
 
 namespace edvr {
+
+void native_reflex::updateOnGamePresent(ID3D11Device* device) {
+    const auto stamp = reflexConfigStamp();
+    if (stamp == g_reflexConfigStamp.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_current) {
+        g_reflexConfigStamp.store(stamp, std::memory_order_release);
+    } else if (device && matchesReflexDevice(device, *g_current)) {
+        refreshReflex(*g_current, reflexConfigStamp());
+    }
+}
 
 // For temporal_pass.cpp's edges-mode fovea (same DLL, no table needed):
 // the cached triple beginFrame already resolved above, vertical/outer/
@@ -776,9 +823,13 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     State& state = g_pool[g_used++];
     state = {};
     state.device = request->gameDevice;
+    state.deviceIdentity = identity;
     state.generation = request->generation;
     state.active = true;
     g_current = &state;
+    // NativeRuntimeHost acquires this table through the game-producer
+    // dispatcher. Its later beginFrame runs on the OpenXR owner instead.
+    refreshReflex(state, reflexConfigStamp());
     table->context = &state;
     table->beginFrame = beginFrame;
     table->reservedCall = retiredCall;

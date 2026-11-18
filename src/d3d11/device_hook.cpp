@@ -5,6 +5,7 @@
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
+#include "native_reflex.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -1978,9 +1979,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         renderBoundaryNoteOwnedPresent(dev);
     ID3D11DeviceContext* timingContext = nullptr;
     if (dev) dev->GetImmediateContext(&timingContext);
+    const bool ownerPresent = timingContext && SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST) &&
+                              renderBoundaryValidateOwner(dev, timingContext);
     if (timingContext) {
-        if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST) &&
-            renderBoundaryValidateOwner(dev, timingContext)) {
+        if (ownerPresent) {
             static uint32_t fgConfigGeneration = UINT32_MAX;
             static bool fgWasFlat = false;
             auto& cfg = Config::get();
@@ -2057,6 +2059,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     g_frameTicks.boundary(true);
     // Each tick runs under a budget of its own (boundary_tick.h).
     presentFrameBoundary();
+    // The boundary just committed any reload or VR-to-flat profile switch.
+    // Reflex updates the game D3D11 device only when its requested mode changes.
+    if (ownerPresent) native_reflex::updateOnGamePresent(dev);
     const int64_t boundaryT1 = qpcNow();
     // Whatever the boundary did after its last tick (all of it, when
     // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.

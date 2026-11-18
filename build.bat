@@ -1159,7 +1159,7 @@ if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe assembly build faile
 call :assemble_if_changed "tools\native_frame_test\weapon_ui_getter_probe_test.asm" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj"
 if errorlevel 1 ( echo [edvr] ERROR: weapon UI getter probe fixture assembly build failed & exit /b 1 )
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_NATIVE_FRAME_TEST ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
     "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^

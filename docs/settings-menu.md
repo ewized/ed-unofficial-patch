@@ -298,6 +298,12 @@ repeated XR submissions. The selected multiplier alone does not establish genera
 See the [NVIDIA DLSS-G options](https://github.com/NVIDIA-RTX/Streamline/blob/main/include/sl_dlss_g.h) for the
 multiplier convention. EDVR queries its NVIDIA NGX runtime for available capacity.
 
+For VR latency experiments, `fix.nvidia_reflex` accepts `off` (default), `on`, and `boost`.
+The setting requests NVIDIA's low-latency mode on the game's D3D11 device. `boost` also requests
+higher GPU clocks. OpenXR continues to pace headset frames. The graphics log shows the requested
+mode and the driver's low-latency status. Measure headset responsiveness separately from submission
+rates and confirm Boost's effect using GPU clock and power samples. [NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
+
 ### XeSS Frame Generation rows (2026-11-12)
 
 Two flat-only rows (`menu flat_performance`, so none on VR's pages) on the Performance tab, under the DLSS preset

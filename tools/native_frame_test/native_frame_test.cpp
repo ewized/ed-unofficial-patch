@@ -8,6 +8,7 @@
 #include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
+#include "../../src/d3d11/native_reflex_nvapi.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -196,6 +197,31 @@ int wmain(int argc, wchar_t** argv) {
             std::printf("FAIL: %s\n", name);
         }
     };
+
+    {
+        using edvr::native_reflex::Mode;
+        using edvr::native_reflex::ModeHistory;
+        using edvr::native_reflex::detail::modeParameters;
+        constexpr auto off = modeParameters(Mode::Off);
+        constexpr auto on = modeParameters(Mode::On);
+        constexpr auto boost = modeParameters(Mode::Boost);
+        check(off.version == 0x0001002c && !off.lowLatencyMode && !off.lowLatencyBoost &&
+              on.lowLatencyMode && !on.lowLatencyBoost && boost.lowLatencyMode && boost.lowLatencyBoost &&
+              !boost.minimumIntervalUs && !boost.useMarkersToOptimize && !boost.useMinQueueTime,
+              "Reflex V1 parameters enable driver mode without a limiter or marker optimization");
+        ModeHistory reflex;
+        check(reflex.change(Mode::Off) && !reflex.requiresDriver() && !reflex.change(Mode::Off),
+              "default Reflex Off leaves NVAPI untouched");
+        check(reflex.change(Mode::On) && reflex.requiresDriver() && !reflex.needsReset() &&
+              reflex.change(Mode::Off) && !reflex.requiresDriver(),
+              "a refused Reflex enable leaves no driver state to clear");
+        check(reflex.change(Mode::Boost) && reflex.requiresDriver(), "Reflex Boost requests the driver");
+        reflex.accepted();
+        check(reflex.change(Mode::Off) && reflex.requiresDriver() && reflex.needsReset() &&
+              !reflex.change(Mode::Off), "a refused Reflex disable remains owned until close");
+        reflex.accepted();
+        check(!reflex.needsReset(), "an accepted Reflex disable releases the owned mode");
+    }
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
     const auto createDevice = edvr::systemD3D11CreateDevice();
