@@ -36,7 +36,7 @@
       "sha256": "e6f0687980534771b821abbba5485160db88b1dc38709004d49f438be7b818a7",
       "bytes": 61
     },
-    "input_preset": {
+    "graphics_start_preset": {
       "snapshot": "StartPreset.start",
       "sha256": "c4ebc6d4a5832cd9415f906ad03661110c705a72381c8b8b145761d02e2dd23a",
       "bytes": 4

@@ -1,9 +1,11 @@
 {
   "schema": 1,
-  "status": "partial_balanced_complete_final_sweep_pending",
+  "status": "partial_native_group_pending",
   "measured_code": "cfe5e8ca4241b7169eea524f6d50fc4c5f64c620",
   "groups_completed": [
-    "balanced"
+    "balanced",
+    "performance",
+    "quality"
   ],
   "original_files": {
     "ini": {
@@ -35,5 +37,21 @@
   "keyboard_restoration_completed": true,
   "game_runtime_census_empty": true,
   "final_broader_preference_audit": "pending",
-  "private_completion_evidence_sha256": "16033efdb125bf70c09b3ae32817cd8918845aa89127c1f54b45f8425efb64be"
+  "group_evidence": {
+    "balanced": {
+      "progress.json": "16033efdb125bf70c09b3ae32817cd8918845aa89127c1f54b45f8425efb64be",
+      "before-metadata.json": "700c0df4b9eef8ca4da859e7854e2b9bb9a3ee05a6d5c1a6c052303370e01bf7",
+      "after-metadata.json": "c52a15a11fc08999f7d6c2b5fbde31dd40ddd1499aa10016e2195ae69c9add54"
+    },
+    "performance": {
+      "progress.json": "4aec9c5f512164f946afd358682a289525b5e1460cf24b4e7c1d3754d02c56b0",
+      "before-metadata.json": "e6ece9d61434cd7ce1b40f88d740606c76f53c0a63074c91d0d379c101f57e3f",
+      "after-metadata.json": "c7febb79786629c1b4159cf3aa230830e89923b9620bf4ac55829c8af7cf4e93"
+    },
+    "quality": {
+      "progress.json": "50dbc586a550e6538db7c624eb6638857ae791f384bcae2a700b68e4a3a49388",
+      "before-metadata.json": "c4c0023cee2a6c7ca3070a4016834ff225754eabdb764e92bd658e85ae514b9b",
+      "after-metadata.json": "60406b24c10d4c2ee52242f0f5b994cb8a8f42b092f5f53668ef289a91090f06"
+    }
+  }
 }
