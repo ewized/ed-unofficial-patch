@@ -49,6 +49,11 @@ public:
     // baseDisplayHz), else the session's first predicted period. 0 when neither
     // is known. Survives ring staleness only through the first-period fallback.
     double basePeriodMs(uint64_t nowMs) const noexcept;
+    // Nominal display rate for a benchmark record, quantized to 0.1 Hz. A
+    // missing report carries the last rate for this session, then falls back
+    // to the same base period used by the monitor.
+    uint32_t benchmarkRefreshMilliHz(const NativeTimingSnapshot&, uint32_t previous,
+                                     uint64_t nowMs) const noexcept;
     // The display-rate throttle test: the runtime predicting more than 1.5x the
     // base period means the headset is running at a throttled display rate
     // (e.g. SteamVR halving 90 Hz to 45 Hz under load), whatever the producer

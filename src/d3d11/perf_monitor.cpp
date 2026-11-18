@@ -985,12 +985,10 @@ bool updateBenchmarkMetadata(State& s, const NativeTimingSnapshot& timing,
         benchmarkCopy(metadata.build, sizeof(metadata.build), EDVR_VERSION_STRING);
         s.nativeBenchmarkMetadataMs = nowMs;
     }
-    if (std::isfinite(timing.predictedPeriodMs) && timing.predictedPeriodMs > 0.0) {
-        // Quantize to 0.1 Hz so normal prediction jitter cannot restart a
-        // benchmark scope. This is context, not the GPU conversion factor.
-        const double hz = 1000.0 / timing.predictedPeriodMs;
-        metadata.refreshMilliHz = static_cast<uint32_t>(std::llround(hz * 10.0) * 100.0);
-    }
+    // OpenXR's predicted period can span multiple display intervals while
+    // the nominal refresh and measurement workload stay the same.
+    metadata.refreshMilliHz = s.nativeHistory.benchmarkRefreshMilliHz(
+        timing, metadata.refreshMilliHz, nowMs);
     const uint64_t scope = benchmarkScope(timing, metadata,
                                           s.nativeBenchmarkSettingsEpoch.load(std::memory_order_relaxed));
     if (scope != s.nativeBenchmarkScope) {

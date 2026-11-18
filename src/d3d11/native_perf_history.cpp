@@ -3,6 +3,14 @@
 #include <cmath>
 
 namespace edvr {
+namespace {
+double reportedDisplayHz(const EdvrNativeTimingFrame& frame) noexcept {
+    if (frame.version < EDVR_NATIVE_TIMING_VERSION_4) return 0;
+    const double hz = frame.baseDisplayHz;
+    return std::isfinite(hz) && hz > 0 && hz <= 1000 ? hz : 0;
+}
+}
+
 bool NativePerfHistory::duration(double v) noexcept { return std::isfinite(v) && v>=0 && v<=600000; }
 bool NativePerfHistory::age(uint64_t now,uint64_t at,uint64_t window) noexcept { return at && at<=now && now-at<=window; }
 void NativePerfHistory::Stream::reset(uint64_t consumed) noexcept {
@@ -88,7 +96,7 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
         // The base for the throttle flag: the panel rate the ABI publishes
         // (display_frequency) while fresh; when a version 3 host never sends
         // one, the session's first predicted period stands in for it.
-        baseHz_=c.version>=EDVR_NATIVE_TIMING_VERSION_4&&std::isfinite(c.baseDisplayHz)&&c.baseDisplayHz>0&&c.baseDisplayHz<=1000?double(c.baseDisplayHz):0;
+        baseHz_=reportedDisplayHz(c);
         baseHzAt_=baseHz_?t.capturedAtMs:0;
         if(!firstPeriodMs_&&period_)firstPeriodMs_=period_;
     }
@@ -152,6 +160,17 @@ double NativePerfHistory::predictedPeriod(uint64_t n)const noexcept{return age(n
 double NativePerfHistory::basePeriodMs(uint64_t n)const noexcept{
     if(age(n,baseHzAt_,2000)&&baseHz_>0)return 1000.0/baseHz_;
     return firstPeriodMs_;
+}
+uint32_t NativePerfHistory::benchmarkRefreshMilliHz(const NativeTimingSnapshot& t,
+                                                   uint32_t previous, uint64_t now) const noexcept {
+    double hz = t.haveCpu && !t.invalid ? reportedDisplayHz(t.cpu) : 0;
+    if (!hz) {
+        if (previous) return previous;
+        const double period = basePeriodMs(now);
+        if (period < 1.0) return 0;
+        hz = 1000.0 / period;
+    }
+    return static_cast<uint32_t>(std::llround(hz * 10.0) * 100);
 }
 bool NativePerfHistory::displayThrottled(double predicted,double base)noexcept{
     return predicted>0&&base>0&&predicted>1.5*base;

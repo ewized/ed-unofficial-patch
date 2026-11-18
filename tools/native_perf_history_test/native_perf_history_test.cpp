@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cwchar>
 #include <limits>
+#include <memory>
 
 using namespace edvr;
 namespace {
@@ -137,6 +138,55 @@ void displayBase() {
     h.observe(true,t,gpu(6,10050),10050);
     check(NativePerfHistory::displayThrottled(h.predictedPeriod(10050),h.basePeriodMs(10050)),
           "new session resets the base to the new session's prediction");
+}
+
+void benchmarkDisplayRefresh() {
+    NativePerfHistory history;
+    const auto collector = std::make_unique<NativeBenchmarkCollector>();
+    NativeBenchmarkMetadata metadata{};
+    uint64_t sequence = 1;
+    const auto observe = [&](uint64_t now, double predictedMs, float reportedHz) {
+        auto t = cpu(sequence++, now);
+        t.predictedPeriodMs = predictedMs;
+        t.cpu.baseDisplayHz = reportedHz;
+        history.observe(true, t, {}, now);
+        metadata.refreshMilliHz = history.benchmarkRefreshMilliHz(t, metadata.refreshMilliHz, now);
+        // Use the refresh as the scope identifier to isolate that component.
+        collector->observe({metadata.refreshMilliHz, &metadata, t.sequence, now, 3.0, true}, now);
+    };
+    observe(10000, 22.222, 90.0f);
+    observe(12000, 11.111, 90.0f);
+    observe(13000, 22.222, 90.0f);
+    observe(14000, 33.333, 90.0f);
+    observe(15000, 33.333, 0.0f);
+    check(metadata.refreshMilliHz == 90000 && !collector->ready(),
+          "predicted interval multiples and missing reports retain the nominal benchmark scope");
+    observe(42000, 22.222, 90.0f);
+    observe(44000, 11.111, 90.0f);
+    collector->observe({}, 44000);
+    NativeBenchmarkReport report{};
+    check(collector->takeReport(&report) && !report.aborted && report.metadata.refreshMilliHz == 90000 &&
+          report.sampleEndedAtMs - report.startedAtMs == NativeBenchmarkCollector::kSampleMs,
+          "variable prediction permits a complete 90 Hz benchmark");
+    observe(45000, 11.111, 90.0f);
+    observe(47000, 22.222, 90.0f);
+    observe(48000, 33.333, 120.0f);
+    check(metadata.refreshMilliHz == 120000 && collector->takeReport(&report) && report.aborted &&
+          report.abortReason == kNativeBenchmarkScopeChanged && report.metadata.refreshMilliHz == 90000,
+          "reported display refresh change ends the previous benchmark scope");
+
+    history.clear();
+    auto legacy = cpu(1, 10000);
+    legacy.cpu.version = EDVR_NATIVE_TIMING_VERSION_3;
+    legacy.predictedPeriodMs = 11.111;
+    history.observe(true, legacy, {}, 10000);
+    const uint32_t fallback = history.benchmarkRefreshMilliHz(legacy, 0, 10000);
+    legacy.sequence = legacy.cpu.sequence = 2;
+    legacy.capturedAtMs = 10010;
+    legacy.predictedPeriodMs = 33.333;
+    history.observe(true, legacy, {}, 10010);
+    check(fallback == 90000 && history.benchmarkRefreshMilliHz(legacy, 0, 10010) == fallback,
+          "legacy host fallback stays at the session's first valid prediction");
 }
 // The monitor's CPU figure (NativePerfHistory::cpuFigure, the settlement
 // governor's rule): on a version 5 frame the caller work per cycle -- the
@@ -925,7 +975,8 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
-    averages();invalidation();agesAndValues();displayBase();callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
+    averages();invalidation();agesAndValues();displayBase();benchmarkDisplayRefresh();
+    callerWorkCrossing();graphs();benchmarkWindows();benchmarkAdmission();
     benchmarkInterruptedReset();
     frameTicksChain();frameTicksTopThree();frameTicksOddClocks();frameTicksUncut();frameShareText();nativeLongFrameFits();frameTickCostNote();
     fpsOverlayModes();detailedText();flatCorner();readoutMachine();
