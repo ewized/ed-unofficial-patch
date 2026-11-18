@@ -384,6 +384,8 @@ struct State {
     float    overlayYaw = 0.0f;
     float    overlayPitch = -16.0f;
     bool     overlayUp = false;
+    bool     overlayLayer = false; // native OpenXR acquired the independent readout
+    uint64_t overlayLayerSession = 0;
     float    overlayAlpha = 0.0f;
     uint64_t overlayTextMs = 0;
     std::string overlayText;
@@ -5198,6 +5200,7 @@ static void menuReadFpsOverlayKeys(Config& cfg) {
         s.overlayTextMs = 0;   // the next tick builds the new shape at once
         s.overlayText.clear();
         s.flatReadout.clear();
+        if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
     }
     if (s.configured && ovLock != s.overlayLock) {
         Log::get().note("menu: the frame-rate overlay is %s while the menu is open.", ovLock ? "locked on" : "no longer locked");
@@ -5526,6 +5529,18 @@ void menuTick(ID3D11Device* dev) {
     const bool world = pol.anchor == MenuAnchor::World;
     const bool hotkeysPage = menuProfileHasPage(MenuPageSource::Hotkeys, runtimeFlatProfile());   // one answer, the page table's (menu_pages.h)
     guardedBudget(g_budget, [&] {
+        const bool layeredFps = world && nativeMenuFpsOverlaySupported();
+        const uint64_t overlaySession = layeredFps ? nativeMenuSessionId() : 0;
+        if (layeredFps != s.overlayLayer || overlaySession != s.overlayLayerSession) {
+            if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
+            s.overlayLayer = layeredFps;
+            s.overlayLayerSession = overlaySession;
+            s.overlayUp = false; // route the next raster to the new owner
+        }
+        const auto submitOverlay = [layeredFps](const MenuContent& content) {
+            if (layeredFps) menuPanelSubmitNativeFpsOverlay(content);
+            else menuPanelSubmit(content);
+        };
         if (world) {
             static uint64_t lastNativeRevision = 0;
             const uint64_t nativeRevision = nativeMenuRevision();
@@ -5876,14 +5891,13 @@ void menuTick(ID3D11Device* dev) {
                         s.contentDirty = true;   // the menu's content must be re-sent after a toast
                     }
                 }
-                // The head-locked readout: the door anchors it to each frame's
-                // own pose (setMenuHeadLock below), so it rides the look with no
-                // lag, the toolkit's way; its text is refreshed twice a second.
-                // Never while a toast has the panel.
+                // Native OpenXR places the readout in view space. The legacy
+                // eye pass still takes a head pose per frame. Both refresh the
+                // same content while neither a menu nor a toast is showing.
                 if (s.overlay && !s.toastUp) {
                     float pose[12];
-                    s.anchorValid = headPose(pose);
-                    if (s.anchorValid) {
+                    if (!layeredFps) s.anchorValid = headPose(pose);
+                    if (layeredFps || s.anchorValid) {
                         // compact: twice a second; detailed: about four times a second, and always re-rasterised (its strip moves).
                         const bool detailed = s.overlayMode == FpsOverlayMode::Detailed;
                         if (!s.overlayUp || dueMs(s.overlayTextMs, detailed ? 250 : 500)) {
@@ -5893,7 +5907,7 @@ void menuTick(ID3D11Device* dev) {
                                 if (buildReadoutContent(c, FpsOverlayMode::Detailed, false, s.textDeg)) {
                                     s.overlayText.clear();
                                     s.overlayTextDeg = s.textDeg;
-                                    menuPanelSubmit(c);
+                                    submitOverlay(c);
                                 }
                             } else {
                                 char line[120];
@@ -5904,7 +5918,7 @@ void menuTick(ID3D11Device* dev) {
                                     if (menuPanelBuildOverlayContent(c, s.overlayText.c_str(), s.textDeg,
                                                                       nullptr)) {
                                         s.overlayTextDeg = s.textDeg;
-                                        menuPanelSubmit(c);
+                                        submitOverlay(c);
                                     }
                                 }
                             }
@@ -6075,7 +6089,13 @@ void menuTick(ID3D11Device* dev) {
             g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
             g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
             g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
-            g.overlayRaster = showingOverlay;
+            g.overlayRaster = showingOverlay && !layeredFps;
+            if (layeredFps) {
+                menuPanelSetNativeFpsOverlayPose(showingOverlay, s.overlayYaw, s.overlayPitch, s.distance);
+                // The overlay is outside both the projection images and the
+                // shared menu alpha that suspends Auto FG sampling.
+                if (showingOverlay) g.alpha = 0.0f;
+            }
             if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
                 g.alpha = 0.0f;
                 inputGateSetPrivate(false);
@@ -6105,7 +6125,7 @@ void menuTick(ID3D11Device* dev) {
             menuPanelSetMonitorGeometry(mg);
         }
         if (world) {
-            setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
+            setMenuHeadLock(showingOverlay && !layeredFps, s.overlayYaw, s.overlayPitch);
             setMenuVisible(g.alpha);
         }
         inputGateTick();
@@ -6117,6 +6137,7 @@ void menuTick(ID3D11Device* dev) {
         if (world) {
             hotkeysSuspend(false);
             setMenuVisible(0.0f);
+            if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
         } else {
             inputGateSetPadPrivate(false, -1);
         }

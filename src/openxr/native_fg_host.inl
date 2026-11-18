@@ -40,9 +40,12 @@
   XrResult fgEndPrepared(const XrCompositionLayerProjection* layer,edvr::NativePresentationKind kind) {
     const bool pixels=layer&&boundary.frame().shouldRender&&state.frameShouldRender()&&
         !state.terminal()&&state.lifecycle()!=Lifecycle::Stopping;
-    const XrResult result=boundary.prepared(layer);
+    const uint64_t sequence=boundary.frame().sequence+frameSequenceOffset;
+    const auto* fps=pixels?fpsOverlay():nullptr;
+    const XrResult result=boundary.prepared(layer,nullptr,fps);
     notePresentation(result!=XR_SUCCESS?edvr::NativePresentationKind::Failed:
         pixels?kind:edvr::NativePresentationKind::Empty);
+    if(fps&&result==XR_SUCCESS)reportFpsOverlay(kind,sequence,fgMultiplier);
     return result;
   }
   void fgRunCredit(const std::shared_ptr<FgCreditRequest>& request,const RuntimeGate::Lease& operation) {

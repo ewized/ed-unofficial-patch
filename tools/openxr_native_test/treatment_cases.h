@@ -51,9 +51,13 @@ extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenReques
   using namespace edvr::openxr::test::treatment_fixture;
   *table={sizeof(*table),EDVR_NATIVE_SHARPEN_VERSION_1,&state,sharpen,invalidate,close};return S_OK;
 }
-extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest*,EdvrNativeMenuTable* table) {
+extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* request,EdvrNativeMenuTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
-  *table={sizeof(*table),EDVR_NATIVE_MENU_VERSION_1,&state,publish,menu,close};return S_OK;
+  // Model a v1 provider that knows only the original wire size.
+  if(request->version!=EDVR_NATIVE_MENU_VERSION_1||table->version!=EDVR_NATIVE_MENU_VERSION_1||
+     table->size!=EDVR_NATIVE_MENU_TABLE_V1_SIZE)return E_INVALIDARG;
+  const EdvrNativeMenuTable result{EDVR_NATIVE_MENU_TABLE_V1_SIZE,EDVR_NATIVE_MENU_VERSION_1,&state,publish,menu,close};
+  std::memcpy(table,&result,EDVR_NATIVE_MENU_TABLE_V1_SIZE);return S_OK;
 }
 
 namespace edvr::openxr::test {

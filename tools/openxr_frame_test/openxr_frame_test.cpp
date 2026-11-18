@@ -60,7 +60,9 @@ struct Fake {
   XrDuration period = 11;
   bool lastHadLayers = false;
   unsigned lastLayerCount=0;
+  XrStructureType lastLayerTypes[3]{};
   float worldSourceX=0,nativeUiSourceX=0;
+  XrSwapchain fpsSwapchain=XR_NULL_HANDLE;
   XrTime lastDisplayTime = 0;
   static Fake* current;
   static XrResult poll(XrInstance, XrEventDataBuffer* out) {
@@ -100,7 +102,15 @@ struct Fake {
   static XrResult endFrame(XrSession, const XrFrameEndInfo* info) {
     current->trace.push_back('E');
     current->lastLayerCount=info->layerCount;
-    if(info->layerCount==2) {
+    std::fill_n(current->lastLayerTypes,3,XR_TYPE_UNKNOWN);
+    current->fpsSwapchain=XR_NULL_HANDLE;
+    for(uint32_t index=0;index<std::min(info->layerCount,3u);++index) {
+      const auto* layer=info->layers[index];
+      current->lastLayerTypes[index]=layer->type;
+      if(layer->type==XR_TYPE_COMPOSITION_LAYER_QUAD)
+        current->fpsSwapchain=reinterpret_cast<const XrCompositionLayerQuad*>(layer)->subImage.swapchain;
+    }
+    if(info->layerCount>=2&&current->lastLayerTypes[1]==XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
       current->worldSourceX=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0])->views[0].pose.position.x;
       current->nativeUiSourceX=reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[1])->views[0].pose.position.x;
     }
@@ -115,6 +125,9 @@ Fake* Fake::current = nullptr;
 struct Sink : FrameSink {
   Fake& fake; std::vector<vr::EVREye> eyes; std::vector<bool> copies;
   bool available=true,finishedPixels=false;unsigned finished=0;XrResult finishedResult=XR_SUCCESS;
+  const XrCompositionLayerQuad* overlay=nullptr;
+  unsigned overlayRequests=0;
+  bool endedWithOverlay=false;
   explicit Sink(Fake& f) : fake(f) {}
   vr::EVRCompositorError capture(vr::EVREye eye, const vr::Texture_t*, const vr::VRTextureBounds_t*,
       vr::EVRSubmitFlags, bool copyPixels) override {
@@ -129,6 +142,8 @@ struct Sink : FrameSink {
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
     ++fake.backgroundCalls;const auto r=compose(layer);--fake.composeCalls;return r;
   }
+  const XrCompositionLayerQuad* fpsOverlay() override {++overlayRequests;return overlay;}
+  void endFrameReturned(const EndFrameInfo& info) override {endedWithOverlay=info.fpsOverlay;}
   bool sceneLayerAvailable() const override {return available;}
   void sceneFinished(bool pixels,XrResult result) override {++finished;finishedPixels=pixels;finishedResult=result;}
 };
@@ -136,6 +151,17 @@ struct Sink : FrameSink {
 bool start(SessionState& session, Fake& fake) {
   if (session.reset(fake.dispatch(), reinterpret_cast<XrInstance>(1), reinterpret_cast<XrSession>(2), XR_ENVIRONMENT_BLEND_MODE_OPAQUE) != XR_SUCCESS) return false;
   return session.pollEvents()==XR_SUCCESS && session.startIfReady()==XR_SUCCESS;
+}
+
+XrCompositionLayerQuad fpsLayerFixture() {
+  XrCompositionLayerQuad overlay{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  overlay.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+  overlay.space=reinterpret_cast<XrSpace>(4);
+  overlay.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
+  overlay.subImage={reinterpret_cast<XrSwapchain>(5),{{0,0},{256,64}},0};
+  overlay.pose={{0,0,0,1},{0,0,-1}};
+  overlay.size={.5f,.125f};
+  return overlay;
 }
 
 void preparedFrames() {
@@ -158,13 +184,57 @@ void preparedFrames() {
   nativeUi.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
   check(boundary.prepared(&layer,&nativeUi)==XR_SUCCESS&&fake.lastLayerCount==2&&
     fake.worldSourceX==.5f&&fake.nativeUiSourceX==1.f,"prepared: world interpolation and native HUD retain distinct source poses in one real tick");
+  const auto overlay=fpsLayerFixture();
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: next tick can show the FPS overlay without native HUD");
+  check(boundary.prepared(&layer,nullptr,&overlay)==XR_SUCCESS&&fake.lastLayerCount==2&&
+    fake.lastLayerTypes[0]==XR_TYPE_COMPOSITION_LAYER_PROJECTION&&fake.lastLayerTypes[1]==XR_TYPE_COMPOSITION_LAYER_QUAD&&
+    fake.fpsSwapchain==overlay.subImage.swapchain,
+    "prepared: generated projection and FPS quad use separate layers");
+  check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: native HUD and FPS overlay can share a tick");
+  check(boundary.prepared(&layer,&nativeUi,&overlay)==XR_SUCCESS&&fake.lastLayerCount==3&&
+    fake.lastLayerTypes[0]==XR_TYPE_COMPOSITION_LAYER_PROJECTION&&fake.lastLayerTypes[1]==XR_TYPE_COMPOSITION_LAYER_PROJECTION&&
+    fake.lastLayerTypes[2]==XR_TYPE_COMPOSITION_LAYER_QUAD&&fake.worldSourceX==.5f&&fake.nativeUiSourceX==1.f&&
+    fake.fpsSwapchain==overlay.subImage.swapchain,
+    "prepared: FPS quad follows world and noninterpolated native HUD without changing either pose");
   check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: next independent tick");layer.viewCount=1;
   check(boundary.prepared(&layer)==XR_ERROR_VALIDATION_FAILURE&&session.frameOpen(),"prepared: refuses half stereo without consuming tick");
-  check(boundary.prepared(nullptr)==XR_SUCCESS&&!fake.lastHadLayers,"prepared: unavailable source closes empty");
+  check(boundary.prepared(nullptr,nullptr,&overlay)==XR_ERROR_VALIDATION_FAILURE&&session.frameOpen(),
+    "prepared: FPS overlay requires a scene projection");
+  check(boundary.prepared(nullptr)==XR_SUCCESS&&!fake.lastHadLayers,
+    "prepared: unavailable source closes empty");
+  layer.viewCount=2;fake.shouldRender=false;
+  check(boundary.waitAndBegin()==XR_SUCCESS&&boundary.prepared(&layer,nullptr,&overlay)==XR_SUCCESS&&
+    !fake.lastHadLayers,"prepared: vendor no-render suppresses both scene and FPS overlay");
+  fake.shouldRender=true;
   check(boundary.waitAndBegin()==XR_SUCCESS,"prepared: native admission token");boundary.setGeometryReady(true);
   bool pair=false;check(boundary.publish(vr::Eye_Left,nullptr,nullptr,vr::Submit_Default,pair)==vr::VRCompositorError_None,"prepared: native eye admitted");
   layer.viewCount=2;check(boundary.prepared(&layer)==XR_ERROR_CALL_ORDER_INVALID,"prepared: cannot steal partially submitted native frame");
   check(boundary.clear()==XR_SUCCESS,"prepared: native partial clear");
+}
+
+void sceneFpsOverlay() {
+  Fake fake;SessionState session;
+  check(start(session,fake),"FPS overlay: running session");
+  const auto overlay=fpsLayerFixture();
+  Sink sink(fake);sink.overlay=&overlay;
+  FrameBoundary boundary(session,sink);
+  vr::Texture_t texture{};
+  check(boundary.waitAndBegin()==XR_SUCCESS,"FPS overlay: begin normal stereo frame");
+  boundary.setGeometryReady(true);
+  boundary.submit(vr::Eye_Left,&texture);
+  check(sink.overlayRequests==0,"FPS overlay: partial eye handoff does not request an overlay");
+  check(boundary.submit(vr::Eye_Right,&texture)==vr::VRCompositorError_None&&sink.overlayRequests==1&&
+    sink.endedWithOverlay&&fake.lastLayerCount==2&&fake.lastLayerTypes[1]==XR_TYPE_COMPOSITION_LAYER_QUAD&&
+    fake.fpsSwapchain==overlay.subImage.swapchain,
+    "FPS overlay: successful native stereo appends its own quad and reports it");
+
+  fake.shouldRender=false;
+  check(boundary.waitAndBegin()==XR_SUCCESS,"FPS overlay: begin vendor no-render frame");
+  boundary.setGeometryReady(true);
+  boundary.submit(vr::Eye_Left,&texture);
+  check(boundary.submit(vr::Eye_Right,&texture)==vr::VRCompositorError_None&&sink.overlayRequests==1&&
+    !sink.endedWithOverlay&&!fake.lastHadLayers,
+    "FPS overlay: no-render frame neither requests nor submits overlay pixels");
 }
 
 void gateTest() {
@@ -972,7 +1042,7 @@ void traceBatchTest() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) { std::puts("Would test injected OpenXR frame boundary; no runtime or files."); return 0; }
   if (argc != 2 || std::strcmp(argv[1], "--self-test") != 0) return 2;
-  preparedFrames();gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
+  preparedFrames();sceneFpsOverlay();gateTest(); boundedBlockedGateTest(); frameBoundaryTest(); publishFinishPairSplitTest(); frameEndOwnerBodyStatsTest();
   frameEndOwnerBodyRaceTest();
   latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
   blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();

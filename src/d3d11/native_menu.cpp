@@ -14,7 +14,7 @@ struct State {
   DWORD thread = 0;
   uint64_t generation = 0, referenceGeneration = 0;
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
-  bool active = false, pose = false;
+  bool active = false, pose = false, fpsOverlay = false;
 };
 // Retain CPU contexts for the module's bounded 16 Init attempts. A stale table
 // cannot address a new generation. One lock fences admission/callbacks/close.
@@ -24,6 +24,7 @@ State* current = nullptr;
 std::mutex mutex;
 std::atomic<bool> available{false};
 std::atomic<bool> active{false};
+std::atomic<bool> fpsOverlaySupported{false};
 std::atomic<uint64_t> revision{0};
 std::atomic<uint64_t> sessionId{0};   // bumped at every acquire and every close of an active session
 State* identify(void* context) {
@@ -138,15 +139,36 @@ HRESULT WINAPI close(void* context) {
   if (!s) return E_INVALIDARG;
   if (!s->active) return S_FALSE;
   invalidate(*s); s->active = false; s->device = nullptr;
+  if (s->fpsOverlay) {
+    fpsOverlaySupported.store(false, std::memory_order_release);
+    edvr::menuPanelClearNativeFpsOverlay();
+  }
   active.store(false, std::memory_order_release);
   sessionId.fetch_add(1, std::memory_order_release);
   if (current == s) current = nullptr;
   return S_OK;
 }
+HRESULT WINAPI readFpsOverlay(void* context, uint64_t knownRevision, EdvrNativeFpsOverlay* out,
+                              void* pixels, uint32_t capacity) {
+  if (!out) return E_POINTER;
+  *out = {};
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto* s = identify(context);
+  if (!s || !s->active || s != current || !s->fpsOverlay) return E_INVALIDARG;
+  // The raster is head-locked in view space. It needs no game-eye pose,
+  // including when the runtime is displaying a generated frame.
+  switch (edvr::menuPanelReadNativeFpsOverlay(knownRevision, *out, pixels, capacity)) {
+    case edvr::NativeFpsOverlayRead::Ready: return S_OK;
+    case edvr::NativeFpsOverlayRead::ShortBuffer: return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    case edvr::NativeFpsOverlayRead::Hidden: return S_FALSE;
+  }
+  return E_UNEXPECTED;
+}
 }
 
 bool nativeMenuAvailable() { return available.load(std::memory_order_acquire); }
 bool nativeMenuActive() { return active.load(std::memory_order_acquire); }
+bool nativeMenuFpsOverlaySupported() { return fpsOverlaySupported.load(std::memory_order_acquire); }
 uint64_t nativeMenuRevision() { return revision.load(std::memory_order_acquire); }
 uint64_t nativeMenuSessionId() { return sessionId.load(std::memory_order_acquire); }
 bool nativeMenuEyePoses(float out[2][12]) {
@@ -156,16 +178,24 @@ bool nativeMenuEyePoses(float out[2][12]) {
   return true;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* request, EdvrNativeMenuTable* table) {
-  if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_MENU_VERSION_1) return E_INVALIDARG;
-  *table = {sizeof(*table), EDVR_NATIVE_MENU_VERSION_1};
-  if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_MENU_VERSION_1 ||
+  if (!table) return E_INVALIDARG;
+  const auto version = table->version;
+  const bool fpsOverlay = version == EDVR_NATIVE_MENU_VERSION_2;
+  const uint32_t tableSize = fpsOverlay ? sizeof(*table) : EDVR_NATIVE_MENU_TABLE_V1_SIZE;
+  if ((!fpsOverlay && version != EDVR_NATIVE_MENU_VERSION_1) || table->size != tableSize) return E_INVALIDARG;
+  EdvrNativeMenuTable result{tableSize, version};
+  std::memcpy(table, &result, tableSize);
+  if (!request || request->size != sizeof(*request) || request->version != version ||
       !request->gameDevice || !request->generation) return E_INVALIDARG;
   std::lock_guard<std::mutex> lock(mutex);
   if (current || used == _countof(pool)) return E_PENDING;
   auto& s = pool[used++]; s.device = request->gameDevice; s.thread = GetCurrentThreadId();
-  s.generation = request->generation; s.active = true; current = &s;
+  s.generation = request->generation; s.active = true; s.fpsOverlay = fpsOverlay; current = &s;
   active.store(true, std::memory_order_release);
+  fpsOverlaySupported.store(fpsOverlay, std::memory_order_release);
   sessionId.fetch_add(1, std::memory_order_release);
-  table->context = &s; table->publishPose = publish; table->treatEye = treat; table->close = close;
+  result.context = &s; result.publishPose = publish; result.treatEye = treat; result.close = close;
+  if (fpsOverlay) result.readFpsOverlay = readFpsOverlay;
+  std::memcpy(table, &result, tableSize);
   return S_OK;
 }

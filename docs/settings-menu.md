@@ -1269,13 +1269,13 @@ and `fps_overlay_pitch` put it where you can stop seeing it (default 20
 degrees above the look). `menu.fps_overlay_lock` keeps the readout visible
 while the F8 menu is open, drawing it at the top of the menu panel so you
 can watch FPS while changing settings for A/B tests; it is off by default,
-so the readout clears while the menu is open as before. The lock has no lag:
-the door builds its anchor from each frame's own pose (`setMenuHeadLock` on
-the channel) rather than from a value published a frame earlier. Its price
-is the panel's: one region copy plus a composite over the readout's own
-pixel box per eye per frame, timed by a timestamp pair and printed in the
-graphics log after 240 frames (`menu panel: measured ... ms per eye`), so
-the number is measured and not believed.
+so the readout clears while the menu is open as before. Native OpenXR
+submits the head-locked FPS readout as its own compositor layer. It stays
+visible across native and generated frames. The readout shows generated FPS,
+the cumulative generated count, and the effective multiplier, including
+when Auto selects 2x. The F8 panel continues to use the menu path.
+The legacy VR renderer composites the readout into each eye using that
+frame's pose.
 
 With `menu.developer = on`, three more pages and two changes everywhere:
 the ini's dotted key name appears under each label, and each row's hint

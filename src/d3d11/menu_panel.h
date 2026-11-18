@@ -32,6 +32,7 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct IDXGISwapChain;
+struct EdvrNativeFpsOverlay;
 
 namespace edvr {
 
@@ -248,6 +249,14 @@ struct MenuGeometry {
 
 // Hand the raster a new content (copied; the worker wakes). Frame thread.
 void menuPanelSubmit(const MenuContent& c);
+// Keep the native headset's readout raster separate from the menu eye pass.
+// The worker accepts only results belonging to the current visible interval.
+void menuPanelSubmitNativeFpsOverlay(const MenuContent& c);
+void menuPanelSetNativeFpsOverlayPose(bool visible, float yaw, float pitch, float distance);
+void menuPanelClearNativeFpsOverlay();
+enum class NativeFpsOverlayRead { Hidden, Ready, ShortBuffer };
+NativeFpsOverlayRead menuPanelReadNativeFpsOverlay(uint64_t knownRevision, EdvrNativeFpsOverlay& out,
+                                                 void* pixels, uint32_t capacity);
 // THE FLAT MONITOR PANEL (docs\design-f8-menu-unification-2026-11-15.md, 2026-11-16 entry): a second flat raster in its own texture, composited after the
 // menu's in the same Present, so both can be on screen. Flat only; VR never submits one. Frame thread, like menuPanelSubmit; the raster worker is shared, and
 // a menu content waiting is taken first.

@@ -18,6 +18,8 @@
 #include "eye_share.h"
 #include <vector>
 
+struct EdvrNativeFpsOverlay;
+
 namespace edvr::openxr {
 
 // Where a treated eye's pixels belong inside the swapchain image, as
@@ -179,6 +181,11 @@ class D3D11Stereo final {
   // Counts the notice textures made, so the host traces each creation once. noticeSize is the texture's size for one eye.
   uint32_t noticeGeneration() const { return noticeGeneration_; }
   bool noticeSize(unsigned eye, uint32_t* width, uint32_t* height) const;
+  // Upload a new head-locked FPS raster only when its revision changes.
+  // The quad references a released image, retained until shutdown. Timeout
+  // leaves an acquired image pending for the next owner tick.
+  XrResult renderFpsOverlay(XrSpace view, const EdvrNativeFpsOverlay&, const uint8_t* rgba,
+                           uint32_t maxWidth, uint32_t maxHeight, XrCompositionLayerQuad&);
   // Complete submitted GPU work before retiring the render caller. Uses its
   // immediate-context boundary, without changing pipeline state. Timeout or
   // unavailable admission leaves resources alive for an explicit retry.
@@ -199,6 +206,7 @@ class D3D11Stereo final {
   double initShaderMs() const { return initShaderMs_; }
 
  private:
+  XrResult createFpsOverlaySwapchain(uint32_t width, uint32_t height);
   HRESULT ensureNativeUiResources();
   XrResult noteFailure(const char*,uint32_t,XrResult,HRESULT=S_OK,bool=false);
   FailureInfo failureInfo_{};
@@ -209,6 +217,14 @@ class D3D11Stereo final {
     std::vector<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>> rtvs;
     uint32_t width = 0, height = 0;
   } eyes_[2];
+  struct FpsOverlay {
+    XrSwapchain swapchain=XR_NULL_HANDLE;
+    std::vector<ID3D11Texture2D*> images;
+    std::vector<uint8_t> converted;
+    uint32_t pendingIndex=0;
+    uint64_t revision=0,convertedRevision=0;
+    bool acquired=false;
+  } fpsOverlay_;
   XrCompositionLayerProjectionView layerViews_[2]{};
   StereoDispatch dispatch_{};
   XrSession session_ = XR_NULL_HANDLE;

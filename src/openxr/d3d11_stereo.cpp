@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <exception>
 #include "../common/comfort_fade.h"
 #include "flat_notice_placement.h"
@@ -15,6 +16,7 @@
 #include "../../include/edvr_plugin_api.h"
 #include "plugin_frame_args.h"
 #include "native_trace.h"
+#include "../common/native_menu.h"
 
 namespace edvr::openxr {
 namespace {
@@ -185,6 +187,11 @@ XrResult D3D11Stereo::shutdown() {
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
     eye.swapchain=XR_NULL_HANDLE;eye.width=eye.height=0;
   }
+  if(fpsOverlay_.swapchain) {
+    const auto r=dispatch_.destroySwapchain(fpsOverlay_.swapchain);
+    if(r!=XR_SUCCESS&&first==XR_SUCCESS)first=r;
+  }
+  fpsOverlay_={};
   graphicsBridge_.reset();
   completion_.Reset();
   immediateExecutor_=nullptr;
@@ -196,6 +203,119 @@ XrResult D3D11Stereo::shutdown() {
   for(auto& view:layerViews_)view={XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
   return first;
 }
+
+XrResult D3D11Stereo::createFpsOverlaySwapchain(uint32_t width,uint32_t height) {
+  auto& overlay=fpsOverlay_;
+  XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  info.usageFlags=XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT|XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+  info.format=format_;info.sampleCount=1;
+  info.width=width;info.height=height;info.faceCount=info.arraySize=info.mipCount=1;
+  const auto created=dispatch_.createSwapchain(session_,&info,&overlay.swapchain);
+  if(created!=XR_SUCCESS)return created;
+  if(!overlay.swapchain)return XR_ERROR_RUNTIME_FAILURE;
+  std::vector<XrSwapchainImageD3D11KHR> images;
+  const auto enumerated=enumerate<XrSwapchainImageD3D11KHR>([&](uint32_t n,uint32_t* count,XrSwapchainImageD3D11KHR* data){
+    return dispatch_.enumerateSwapchainImages(overlay.swapchain,n,count,reinterpret_cast<XrSwapchainImageBaseHeader*>(data));
+  },images,{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+  if(enumerated!=XR_SUCCESS)return enumerated;
+  if(images.empty())return XR_ERROR_RUNTIME_FAILURE;
+  for(const auto& image:images) {
+    if(!image.texture||!sameDevice(device_.Get(),image.texture))return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    D3D11_TEXTURE2D_DESC desc{};image.texture->GetDesc(&desc);
+    if(desc.Width!=width||desc.Height!=height||desc.ArraySize!=1||desc.MipLevels!=1||desc.SampleDesc.Count!=1||
+       desc.SampleDesc.Quality||!compatible(desc.Format,DXGI_FORMAT(format_)))return XR_ERROR_VALIDATION_FAILURE;
+    overlay.images.push_back(image.texture);
+  }
+  return XR_SUCCESS;
+}
+
+XrResult D3D11Stereo::renderFpsOverlay(XrSpace view,const EdvrNativeFpsOverlay& raster,const uint8_t* rgba,
+    uint32_t maxWidth,uint32_t maxHeight,XrCompositionLayerQuad& layer) {
+  layer={XR_TYPE_COMPOSITION_LAYER_QUAD};
+  if(!view||!session_||!ready_||GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
+  // Fixed capacity prevents the compact line's measured width from recreating
+  // an XR swapchain every time a number gains or loses a digit.
+  auto& overlay=fpsOverlay_;
+  if(!raster.revision||!raster.width||!raster.height||raster.width>maxWidth||raster.height>maxHeight)
+    return XR_ERROR_VALIDATION_FAILURE;
+  if(!overlay.swapchain) {
+    const auto created=createFpsOverlaySwapchain(maxWidth,maxHeight);
+    if(created!=XR_SUCCESS)return created;
+  }
+  if(raster.revision!=overlay.revision) {
+    if(!rgba||!context_)return XR_ERROR_VALIDATION_FAILURE;
+    const bool blueFirst=format_==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||format_==DXGI_FORMAT_B8G8R8A8_UNORM;
+    const bool linear=format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM;
+    const auto* pixels=rgba;
+    if(blueFirst||linear) {
+      if(overlay.convertedRevision!=raster.revision) {
+        static const auto srgbToLinear=[]{
+          std::array<uint8_t,256> table{};
+          for(unsigned v=0;v<table.size();++v) {
+            const float s=float(v)/255.f;
+            const float l=s<=0.04045f?s/12.92f:std::pow((s+0.055f)/1.055f,2.4f);
+            table[v]=uint8_t(std::lround(l*255.f));
+          }
+          return table;
+        }();
+        const size_t bytes=size_t(raster.width)*raster.height*4;
+        overlay.converted.resize(bytes);
+        for(size_t i=0;i<bytes;i+=4) {
+          for(unsigned c=0;c<3;++c) {
+            const auto v=rgba[i+(blueFirst?2-c:c)];
+            overlay.converted[i+c]=linear?srgbToLinear[v]:v;
+          }
+          overlay.converted[i+3]=rgba[i+3];
+        }
+        overlay.convertedRevision=raster.revision;
+      }
+      pixels=overlay.converted.data();
+    }
+    if(!overlay.acquired) {
+      const XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+      const auto acquired=dispatch_.acquireSwapchainImage(overlay.swapchain,&acquire,&overlay.pendingIndex);
+      if(acquired!=XR_SUCCESS)return acquired;
+      overlay.acquired=true;
+    }
+    // A debug readout may wait for its next compositor tick. It never parks a
+    // generated frame while the runtime is still reading the previous bitmap.
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};wait.timeout=0;
+    const auto waited=dispatch_.waitSwapchainImage(overlay.swapchain,&wait);
+    if(waited!=XR_SUCCESS)return waited;
+    XrResult copied=XR_ERROR_RUNTIME_FAILURE;
+    if(overlay.pendingIndex<overlay.images.size()) {
+      const D3D11_BOX crop{0,0,0,raster.width,raster.height,1};
+      auto* target=overlay.images[overlay.pendingIndex];
+      if(ownedImmediateScene_) {
+        immediateContext_->UpdateSubresource(target,0,&crop,pixels,raster.width*4,0);
+        immediateContext_->Flush();gpuPending_=true;
+        copied=FAILED(device_->GetDeviceRemovedReason())?XR_ERROR_GRAPHICS_DEVICE_INVALID:XR_SUCCESS;
+      } else {
+        context_->UpdateSubresource(target,0,&crop,pixels,raster.width*4,0);
+        copied=submitCommands();
+      }
+    }
+    const XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    const auto released=dispatch_.releaseSwapchainImage(overlay.swapchain,&release);
+    overlay.acquired=false;overlay.revision=0;
+    if(released!=XR_SUCCESS)return released;
+    if(copied!=XR_SUCCESS)return copied;
+    overlay.revision=raster.revision;
+  }
+  constexpr float halfRadianPerDegree=0.008726646259971648f;
+  const float yaw=-raster.yawDegrees*halfRadianPerDegree,pitch=raster.pitchDegrees*halfRadianPerDegree;
+  const float cy=std::cos(yaw),sy=std::sin(yaw),cp=std::cos(pitch),sp=std::sin(pitch);
+  layer.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT|XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+  layer.space=view;layer.eyeVisibility=XR_EYE_VISIBILITY_BOTH;
+  layer.subImage.swapchain=overlay.swapchain;
+  layer.subImage.imageRect.extent={int32_t(raster.width),int32_t(raster.height)};
+  layer.pose.orientation={cy*sp,sy*cp,-sy*sp,cy*cp};
+  const auto d=raster.distanceMeters;
+  layer.pose.position={-2.f*d*sy*cy*(cp*cp-sp*sp),2.f*d*sp*cp,-d*(cy*cy-sy*sy)*(cp*cp-sp*sp)};
+  layer.size={raster.widthMeters,raster.widthMeters*float(raster.height)/float(raster.width)};
+  return XR_SUCCESS;
+}
+
 XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D11Device* device,
                                const XrViewConfigurationView (&views)[2],HMODULE graphicsProvider,
                                ImmediateExecutor* immediateExecutor,bool ownedImmediateScene) {

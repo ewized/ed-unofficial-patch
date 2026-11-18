@@ -26,6 +26,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
@@ -336,6 +337,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   std::atomic<uint32_t> zoomRawReads{0},zoomMatrixReads{0};
   std::atomic<float> zoomRawSpan{0.f},zoomMatrixSpan{0.f};
   NativeMenuClient menu;
+  XrCompositionLayerQuad fpsLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  std::vector<uint8_t> fpsPixels;
+  uint64_t fpsRasterRevision=0,fpsVisibleRevision=0,fpsTraceRevision[3]{};
+  uint32_t fpsLayerCount=0,fpsMaxWidth=0,fpsMaxHeight=0,fpsTraceMultiplier[3]{};
+  bool fpsLayerUnavailable=false;
   NativeTemporalClient temporal;
   NativeSharpenClient sharpen;
   NativeDesktopWindowClient desktopWindow;   // visual.desktop_window: each captured eye's finished texture, for Elite's desktop window (optional)
@@ -2619,6 +2625,62 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     slowRegime.finish([&](const SlowReport& report){writeSlowLine(report);});
     writeInstrumentSummaries("session_close");
   }
+  const XrCompositionLayerQuad* fpsOverlay() override {
+    if(fpsLayerUnavailable||!menu.independentFpsOverlay()||!view||fpsLayerCount<2||
+       !fpsMaxWidth||!fpsMaxHeight||comfortFade()>0.f)return nullptr;
+    EdvrNativeFpsOverlay raster{};
+    const auto valid=[&] {
+      return raster.revision&&raster.width&&raster.height&&raster.width<=fpsMaxWidth&&raster.height<=fpsMaxHeight&&
+        std::isfinite(raster.yawDegrees)&&std::abs(raster.yawDegrees)<=60.f&&
+        std::isfinite(raster.pitchDegrees)&&std::abs(raster.pitchDegrees)<=45.f&&
+        std::isfinite(raster.distanceMeters)&&raster.distanceMeters>0.f&&
+        std::isfinite(raster.widthMeters)&&raster.widthMeters>0.f;
+    };
+    auto result=menu.readFpsOverlay(fpsRasterRevision,raster,fpsPixels.data(),uint32_t(fpsPixels.size()));
+    if((result!=S_OK&&result!=HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER))||!valid()) {
+      fpsVisibleRevision=0;
+      return nullptr;
+    }
+    const auto bytes=size_t(raster.width)*raster.height*4;
+    if(bytes>fpsPixels.size()) {
+      try { fpsPixels.resize(bytes); }
+      catch(const std::bad_alloc&) { return nullptr; }
+      result=menu.readFpsOverlay(fpsRasterRevision,raster,fpsPixels.data(),uint32_t(fpsPixels.size()));
+    }
+    if(result!=S_OK||!valid()||size_t(raster.width)*raster.height*4>fpsPixels.size()) {
+      fpsVisibleRevision=0;
+      return nullptr;
+    }
+    fpsRasterRevision=raster.revision;
+    XrCompositionLayerQuad candidate{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrResult rendered=XR_ERROR_OUT_OF_MEMORY;
+    try { rendered=stereo.renderFpsOverlay(view,raster,fpsPixels.data(),fpsMaxWidth,fpsMaxHeight,candidate); }
+    catch(const std::bad_alloc&) {}
+    if(rendered==XR_SUCCESS) {
+      fpsLayer=candidate;
+      fpsVisibleRevision=fpsRasterRevision;
+      return &fpsLayer;
+    }
+    // An outstanding wait has not replaced the previously released image.
+    // Keep displaying that bitmap with its own bounds and revision.
+    if(rendered==XR_TIMEOUT_EXPIRED)return fpsVisibleRevision?&fpsLayer:nullptr;
+    fpsLayerUnavailable=true;fpsVisibleRevision=0;
+    nativeTracePrintf("native_fps_overlay,included=0,reason=swapchain,result=%d\n",int(rendered));
+    return nullptr;
+  }
+
+  // A layer is evidence of visible content only after successful endFrame.
+  void reportFpsOverlay(edvr::NativePresentationKind kind,uint64_t sequence,uint32_t multiplier) {
+    constexpr const char* names[]={"native","generated","repeated"};
+    const auto slot=unsigned(kind);
+    if(slot>=_countof(names)||!edvrTraceFpsOverlayRevision(fpsVisibleRevision))return;
+    if(fpsTraceRevision[slot]==fpsVisibleRevision&&fpsTraceMultiplier[slot]==multiplier)return;
+    fpsTraceRevision[slot]=fpsVisibleRevision;fpsTraceMultiplier[slot]=multiplier;
+    nativeTracePrintf("native_fps_overlay,sequence=%llu,included=1,kind=%s,multiplier=%u,revision=%llu,size=%dx%d\n",
+      (unsigned long long)sequence,names[slot],multiplier,(unsigned long long)fpsVisibleRevision,
+      fpsLayer.subImage.imageRect.extent.width,fpsLayer.subImage.imageRect.extent.height);
+  }
+
   // FrameSink: every xrEndFrame the boundary made, the moment it returned (owner thread). Feeds the episodes and the
   // slow regime with that frame's own figures: the end-frame call, the pose wait, the swapchain calls, our copy and
   // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
@@ -2631,6 +2693,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       info.background?edvr::NativePresentationKind::Background:
       frameWithheld?edvr::NativePresentationKind::Repeated:edvr::NativePresentationKind::Native;
     notePresentation(kind);
+    if(info.fpsOverlay&&info.result==XR_SUCCESS)reportFpsOverlay(kind,info.sequence+frameSequenceOffset,0);
     const uint64_t nowMs=GetTickCount64();
     const double periodMs=double(info.periodNs)/1000000.0;
     const bool scene=info.layers&&!info.background;
@@ -4342,6 +4405,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto stereoResult=stereo.shutdown();
     clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);
     if(stereo.needsGpuDrain())return clean=false; // do not invalidate its session/images
+    fpsLayer={XR_TYPE_COMPOSITION_LAYER_QUAD};fpsRasterRevision=fpsVisibleRevision=0;fpsPixels.clear();fpsLayerUnavailable=false;
+    std::fill_n(fpsTraceRevision,3,uint64_t(0));std::fill_n(fpsTraceMultiplier,3,uint32_t(0));
     ShutdownTrace seatedStage("host_seated_shutdown",tracing);
     const auto seatedResult=seated.shutdown();
     clean=result("destroy_seated_space",seatedResult)&&clean;seatedStage.end(seatedResult==XR_SUCCESS);
@@ -4473,6 +4538,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!result("xrGetSystem",api.getSystem(instance,&si,&system))) return false;
     XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};
     if(!result("xrGetSystemProperties",api.systemProperties(instance,system,&properties)))return false;
+    fpsLayerCount=properties.graphicsProperties.maxLayerCount;
+    fpsMaxWidth=(std::min)(properties.graphicsProperties.maxSwapchainImageWidth,2600u);
+    fpsMaxHeight=(std::min)(properties.graphicsProperties.maxSwapchainImageHeight,1024u);
     copyLabel(systemLabel,properties.systemName);
     // The name goes last: systemName is up to 256 bytes and may carry commas,
     // and the fixed fields must not shift. Traced here so the line exists even
@@ -4614,7 +4682,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     compositorGeneration=poses.begin();
     if(runtimeGeneration&&compositorGeneration&&options.graphicsProvider&&externalDevice) {
       HRESULT acquired=E_FAIL;
-      if(!graphicsCalls.invoke([&]{acquired=menu.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
+      const bool fpsLayerSupported=view&&fpsLayerCount>=2&&fpsMaxWidth&&fpsMaxHeight;
+      if(!graphicsCalls.invoke([&]{acquired=menu.acquire(options.graphicsProvider,externalDevice,runtimeGeneration,fpsLayerSupported);})||acquired!=S_OK) {
         nativeTracePrintf("native_menu,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
       nativeTracePuts("native_menu,provider_acquired=1");

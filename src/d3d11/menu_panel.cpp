@@ -26,6 +26,7 @@
 #include "../common/perf_graph.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/native_menu.h"
 #include "../common/supersample_math.h"
 #include "../common/timing.h"
 #include "perf_monitor.h"   // the upload is an event for the drop attribution
@@ -1069,6 +1070,7 @@ struct Worker {
     bool                    quit = false;
     bool                    hasPending = false;
     MenuContent             pending{};
+    uint64_t                pendingFpsEpoch = 0; // zero routes the result to the menu eye pass
     bool                    hasReady = false;
     Raster                  ready;
     // The flat monitor panel's slot (menuPanelSubmitMonitor): its own pending content and finished raster, taken by uploadMonitorRaster.
@@ -1076,6 +1078,13 @@ struct Worker {
     MenuContent             pendingMon{};
     bool                    hasReadyMon = false;
     Raster                  readyMon;
+    // The native FPS layer reads CPU pixels directly, even on another D3D
+    // device. Epoch retires work from before a hide or mode/session change.
+    uint64_t                fpsEpoch = 1;
+    uint64_t                fpsRevision = 0;
+    bool                    fpsVisible = false;
+    float                   fpsYaw = 0.0f, fpsPitch = 0.0f, fpsDistance = 0.0f;
+    Raster                  fpsRaster;
     // The layout the hit test reads, from the raster most recently uploaded.
     std::vector<LineRect>   liveLines;
     int                     liveW = 0, liveH = 0;
@@ -1091,16 +1100,33 @@ struct Worker {
 // joins on the normal stop path; process exit must neither join nor destruct.
 Worker& g_w = *new Worker;
 
+// The GDI raster is premultiplied in sRGB byte space. OpenXR consumes
+// straight sRGB colour and applies the alpha in the compositor colour space.
+// Retain the readout's 90% opacity without altering the legacy menu raster.
+void encodeFpsLayerPixels(Raster& raster) {
+    for (size_t i = 0; i < raster.rgba.size(); i += 4) {
+        auto* pixel = raster.rgba.data() + i;
+        const unsigned alpha = pixel[3];
+        if (alpha) {
+            for (unsigned channel = 0; channel < 3; ++channel)
+                pixel[channel] = static_cast<uint8_t>((std::min)(255u, (pixel[channel] * 255u + alpha / 2) / alpha));
+        }
+        pixel[3] = static_cast<uint8_t>((alpha * 9u + 5u) / 10u);
+    }
+}
+
 void workerMain() {
     for (;;) {
         MenuContent c;
         bool mon = false;
+        uint64_t fpsEpoch = 0;
         {
             std::unique_lock<std::mutex> lock(g_w.m);
             g_w.cv.wait(lock, [] { return g_w.quit || g_w.hasPending || g_w.hasPendingMon; });
             if (g_w.quit) return;
             if (g_w.hasPending) {   // the menu's content first
                 c = g_w.pending;
+                fpsEpoch = g_w.pendingFpsEpoch;
                 g_w.hasPending = false;
             } else {
                 c = g_w.pendingMon;
@@ -1113,6 +1139,22 @@ void workerMain() {
         guarded("menuPanel/raster", [&] { ok = rasterise(c, r); });
         if (!ok) continue;
         r.slotOwner = c.slotOwner;
+        if (fpsEpoch) {
+            encodeFpsLayerPixels(r);
+            uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(g_w.m);
+                if (fpsEpoch != g_w.fpsEpoch) continue;
+                g_w.fpsRaster = std::move(r);
+                revision = ++g_w.fpsRevision;
+            }
+            if (edvrTraceFpsOverlayRevision(revision)) {
+                Log::get().note("native_fps_overlay_raster,revision=%llu,line1=\"%s\",line2=\"%s\",line3=\"%s\"",
+                    static_cast<unsigned long long>(revision), c.lines[0].left,
+                    c.lineCount > 1 ? c.lines[1].left : "", c.lineCount > 2 ? c.lines[2].left : "");
+            }
+            continue;
+        }
         std::lock_guard<std::mutex> lock(g_w.m);
         if (mon) {
             g_w.readyMon = std::move(r);
@@ -1918,7 +1960,7 @@ bool menuPanelHit(const float org[3], const float dir[3], float dist, float curv
     return u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f;
 }
 
-void menuPanelSubmit(const MenuContent& c) {
+static void submitPanelRaster(const MenuContent& c, bool fpsOverlay) {
     std::lock_guard<std::mutex> lock(g_w.m);
     if (!g_w.started) {
         g_w.started = true;
@@ -1926,8 +1968,50 @@ void menuPanelSubmit(const MenuContent& c) {
         g_w.thread = std::thread(workerMain);
     }
     g_w.pending = c;
+    g_w.pendingFpsEpoch = fpsOverlay ? g_w.fpsEpoch : 0;
     g_w.hasPending = true;
     g_w.cv.notify_one();
+}
+
+void menuPanelSubmit(const MenuContent& c) { submitPanelRaster(c, false); }
+void menuPanelSubmitNativeFpsOverlay(const MenuContent& c) { submitPanelRaster(c, true); }
+
+// Caller holds the worker lock, so a render finishing after retirement
+// cannot publish over the next readout.
+static void clearNativeFpsOverlayLocked() {
+    ++g_w.fpsEpoch;
+    g_w.fpsVisible = false;
+    g_w.fpsRaster = {};
+}
+
+void menuPanelClearNativeFpsOverlay() {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    clearNativeFpsOverlayLocked();
+}
+
+void menuPanelSetNativeFpsOverlayPose(bool visible, float yaw, float pitch, float distance) {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    if (!visible && g_w.fpsVisible) clearNativeFpsOverlayLocked();
+    g_w.fpsVisible = visible;
+    g_w.fpsYaw = yaw;
+    g_w.fpsPitch = pitch;
+    g_w.fpsDistance = distance;
+}
+
+NativeFpsOverlayRead menuPanelReadNativeFpsOverlay(uint64_t knownRevision, EdvrNativeFpsOverlay& out,
+                                                 void* pixels, uint32_t capacity) {
+    std::lock_guard<std::mutex> lock(g_w.m);
+    const auto& raster = g_w.fpsRaster;
+    if (!g_w.fpsVisible || raster.rgba.empty() || !(raster.angularWidthDeg > 0.0f))
+        return NativeFpsOverlayRead::Hidden;
+    const float widthMeters = 2.0f * g_w.fpsDistance * tanf(raster.angularWidthDeg * 0.00872664626f);
+    out = {g_w.fpsRevision, static_cast<uint32_t>(raster.w), static_cast<uint32_t>(raster.h),
+           g_w.fpsYaw, g_w.fpsPitch, g_w.fpsDistance, widthMeters};
+    if (pixels && knownRevision != out.revision) {
+        if (capacity < raster.rgba.size()) return NativeFpsOverlayRead::ShortBuffer;
+        memcpy(pixels, raster.rgba.data(), raster.rgba.size());
+    }
+    return NativeFpsOverlayRead::Ready;
 }
 
 #ifdef EDVR_MENU_TEST
@@ -2352,6 +2436,7 @@ bool menuPanelBuildReadoutContent(MenuContent& c, const char* const* lines, int 
 void menuPanelShutdown() {
     {
         std::lock_guard<std::mutex> lock(g_w.m);
+        clearNativeFpsOverlayLocked();
         g_w.quit = true;
         g_w.cv.notify_one();
     }
