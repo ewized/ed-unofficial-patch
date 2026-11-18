@@ -210,17 +210,40 @@ int wmain(int argc, wchar_t** argv) {
               !boost.minimumIntervalUs && !boost.useMarkersToOptimize && !boost.useMinQueueTime,
               "Reflex V1 parameters enable driver mode without a limiter or marker optimization");
         ModeHistory reflex;
-        check(reflex.change(Mode::Off) && !reflex.requiresDriver() && !reflex.change(Mode::Off),
+        check(reflex.change(Mode::Off) && !reflex.requiresDriver() && !reflex.observing() &&
+              !reflex.change(Mode::Off),
               "default Reflex Off leaves NVAPI untouched");
         check(reflex.change(Mode::On) && reflex.requiresDriver() && !reflex.needsReset() &&
               reflex.change(Mode::Off) && !reflex.requiresDriver(),
               "a refused Reflex enable leaves no driver state to clear");
         check(reflex.change(Mode::Boost) && reflex.requiresDriver(), "Reflex Boost requests the driver");
-        reflex.accepted();
+        reflex.acceptRequest();
+        check(reflex.observing(), "an accepted Reflex request arms delayed driver reads");
         check(reflex.change(Mode::Off) && reflex.requiresDriver() && reflex.needsReset() &&
-              !reflex.change(Mode::Off), "a refused Reflex disable remains owned until close");
-        reflex.accepted();
-        check(!reflex.needsReset(), "an accepted Reflex disable releases the owned mode");
+              !reflex.observing() && !reflex.change(Mode::Off),
+              "new Reflex mode cancels prior reads and a refused disable remains owned");
+        reflex.finishObservation(true);
+        check(reflex.needsReset(), "an unscheduled read cannot clear a refused Reflex disable");
+        reflex.acceptRequest();
+        check(reflex.observing() && reflex.needsReset(),
+              "Off setter success alone leaves Reflex cleanup armed");
+        reflex.finishObservation(false);
+        check(reflex.needsReset() && !reflex.observing(),
+              "an unresolved Reflex Off readback leaves one close-time retry armed");
+        check(reflex.change(Mode::Boost), "a new Reflex request can supersede an unresolved disable");
+        reflex.acceptRequest();
+        check(reflex.change(Mode::Off), "a new Reflex Off request can be observed");
+        reflex.acceptRequest();
+        reflex.finishObservation(true);
+        check(!reflex.needsReset() && !reflex.observing() && !reflex.requiresDriver(),
+              "verified Reflex Off releases cleanup ownership");
+        unsigned due = 0;
+        for (unsigned presents = 0; presents <= 128; ++presents) {
+            if (ModeHistory::observationDue(presents)) ++due;
+        }
+        check(due == 3 && ModeHistory::observationDue(4) && ModeHistory::observationDue(16) &&
+              ModeHistory::observationDue(64) && ModeHistory::kLastObservation == 64,
+              "Reflex polls at three bounded successful producer Present counts");
     }
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.

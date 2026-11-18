@@ -157,27 +157,45 @@ inline const char* deviceRefusal(ID3D11Device* device) {
     return desc.VendorId != 0x10de ? "non_nvidia_adapter" : nullptr;
 }
 
-// Device-only calls. The bound D3D11 device remains alive through normal XR
-// close. Check vendor/threading prior to the first request on this device.
-inline Result apply(ID3D11Device* device, Mode mode) {
-    if (const char* refused = deviceRefusal(device)) return {refused};
+inline const Driver& driverFunctions() {
     static const Driver driver = loadDriver();
-    if (!driver.set) return {driver.reason};
-    Result result{"set_failed", true, kDriverFault};
-    auto params = modeParameters(mode);
-    guarded("nativeReflex/setMode", [&] { result.setStatus = driver.set(device, &params); });
-    if (result.setStatus != 0) return result;
+    return driver;
+}
+
+inline void readback(ID3D11Device* device, Mode mode, const Driver& driver, Result& result) {
     result.readback.version = version1(sizeof(result.readback));
     result.getStatus = kDriverFault;
     guarded("nativeReflex/getStatus", [&] { result.getStatus = driver.get(device, &result.readback); });
     result.reason = result.getStatus != 0 ? "readback_failed"
         : bool(result.readback.lowLatencyMode) != (mode != Mode::Off) ? "driver_mode_differs"
-        : "applied";
+        : result.setStatus == 0 ? "applied" : "readback_matches";
+}
+
+// Device-only calls on the enrolled D3D11 device, which remains alive through
+// normal XR close. Validate vendor/threading before issuing a mode request.
+inline Result apply(ID3D11Device* device, Mode mode) {
+    if (const char* refused = deviceRefusal(device)) return {refused};
+    const auto& driver = driverFunctions();
+    if (!driver.set) return {driver.reason};
+    Result result{"set_failed", true, kDriverFault};
+    auto params = modeParameters(mode);
+    guarded("nativeReflex/setMode", [&] { result.setStatus = driver.set(device, &params); });
+    if (result.setStatus == 0) readback(device, mode, driver, result);
+    return result;
+}
+
+// Only called for a previously accepted request on the same enrolled device.
+// The prior request already resolved and pinned the driver entry points.
+inline Result observe(ID3D11Device* device, Mode mode) {
+    Result result{"device_removed", true};
+    if (SUCCEEDED(device->GetDeviceRemovedReason()))
+        readback(device, mode, driverFunctions(), result);
     return result;
 }
 #else
 // The Windows native-frame rig must never touch the installed GPU driver.
 inline Result apply(ID3D11Device*, Mode) { return {"test_driver_unavailable"}; }
+inline Result observe(ID3D11Device*, Mode) { return {"test_driver_unavailable"}; }
 #endif
 
 inline std::string statusWord(int status) {
@@ -186,28 +204,44 @@ inline std::string statusWord(int status) {
     return std::to_string(status);
 }
 
-inline void logMode(Mode mode, const char* event, uint64_t session, const Result& result) {
+inline void logMode(Mode mode, const char* event, uint64_t session, const Result& result,
+                    unsigned presents = 0) {
     const char* requested = mode == Mode::Boost ? "boost" : mode == Mode::On ? "on" : "off";
     const auto set = statusWord(result.setStatus), get = statusWord(result.getStatus);
     const auto readbackBit = [&](uint8_t value) {
         return result.getStatus != 0 ? "unknown" : value != 0 ? "1" : "0";
     };
+    const std::string observation = presents
+        ? ",after_presents=" + std::to_string(presents) +
+            ",final=" + (presents == ModeHistory::kLastObservation ? "1" : "0")
+        : std::string{};
     Log::get().note(
-        "native_reflex,requested=%s,event=%s,supported=%u,set_status=%s,get_status=%s,"
-        "driver_enabled=%s,boost_requested=%u,game_sleep=%s,reason=%s,session=%llu",
-        requested, event, unsigned(result.supported), set.c_str(), get.c_str(),
+        "%s,requested=%s,event=%s,supported=%u,set_status=%s,get_status=%s,"
+        "driver_enabled=%s,boost_requested=%u,game_sleep=%s,reason=%s,session=%llu%s",
+        presents ? "native_reflex_readback" : "native_reflex", requested, event,
+        unsigned(result.supported), set.c_str(), get.c_str(),
         readbackBit(result.readback.lowLatencyMode), unsigned(mode == Mode::Boost),
-        readbackBit(result.readback.useGameSleep), result.reason, static_cast<unsigned long long>(session));
+        readbackBit(result.readback.useGameSleep), result.reason,
+        static_cast<unsigned long long>(session), observation.c_str());
 }
 
 } // namespace detail
 
-inline void updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, uint64_t session) {
-    if (!history.change(mode)) return;
+inline bool updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, uint64_t session) {
+    if (!history.change(mode)) return false;
     const auto result = history.requiresDriver()
         ? detail::apply(device, mode) : detail::Result{"off_unmodified"};
-    if (result.setStatus == 0) history.accepted();
+    if (result.setStatus == 0) history.acceptRequest();
     detail::logMode(mode, "apply", session, result);
+    return true;
+}
+
+inline void observeMode(ModeHistory& history, ID3D11Device* device, uint64_t session,
+                        unsigned presents) {
+    const auto result = detail::observe(device, history.requested());
+    detail::logMode(history.requested(), "observe", session, result, presents);
+    if (presents == ModeHistory::kLastObservation)
+        history.finishObservation(result.getStatus == 0 && !result.readback.lowLatencyMode);
 }
 
 inline void closeMode(const ModeHistory& history, ID3D11Device* device, uint64_t session) {

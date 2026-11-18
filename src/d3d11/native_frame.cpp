@@ -63,7 +63,12 @@ State* g_current = nullptr;
 std::mutex g_mutex;
 // Changes to the config or active profile trigger one device-scoped update
 // on the game producer. An acquire always refreshes the new session itself.
-std::atomic<uint64_t> g_reflexConfigStamp{UINT64_MAX};
+// The high bit is outside the config generation and VR profile stamp. It
+// keeps inactive Reflex on the same single stamp comparison as before.
+constexpr uint64_t kReflexObservationPending = uint64_t{1} << 63;
+std::atomic<uint64_t> g_reflexConfigStamp{kReflexObservationPending - 1};
+std::atomic<DWORD> g_reflexProducerThread{0};
+thread_local unsigned t_reflexPresentsAfterRequest = 0;
 
 uint64_t reflexConfigStamp() {
     return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile());
@@ -71,7 +76,7 @@ uint64_t reflexConfigStamp() {
 
 // The caller holds g_mutex. Read the stamp first so a concurrent reload will
 // still notify the next Present if it changed while the key was being read.
-void refreshReflex(State& state, uint64_t stamp) {
+bool refreshReflex(State& state, uint64_t stamp) {
     using namespace edvr::native_reflex;
     Mode mode = Mode::Off;
     if (stamp & 1) {
@@ -79,7 +84,13 @@ void refreshReflex(State& state, uint64_t stamp) {
         if (_stricmp(value.c_str(), "boost") == 0) mode = Mode::Boost;
         else if (_stricmp(value.c_str(), "on") == 0) mode = Mode::On;
     }
-    updateMode(state.reflex, state.device, mode, state.generation);
+    if (!updateMode(state.reflex, state.device, mode, state.generation)) return false;
+    if (state.reflex.observing()) t_reflexPresentsAfterRequest = 0;
+    return true;
+}
+
+void publishReflexStamp(const State& state, uint64_t stamp) {
+    if (state.reflex.observing()) stamp |= kReflexObservationPending;
     g_reflexConfigStamp.store(stamp, std::memory_order_release);
 }
 
@@ -677,6 +688,9 @@ HRESULT WINAPI close(void* context) {
         state->consumerAnnounced = false;
     }
     edvr::native_reflex::closeMode(state->reflex, state->device, state->generation);
+    if (state->reflex.observing())
+        g_reflexConfigStamp.fetch_and(~kReflexObservationPending, std::memory_order_release);
+    g_reflexProducerThread.store(0, std::memory_order_relaxed);
     state->active = false;
     state->device = nullptr;
     state->deviceIdentity = nullptr;
@@ -697,12 +711,35 @@ namespace edvr {
 
 void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     const auto stamp = reflexConfigStamp();
-    if (stamp == g_reflexConfigStamp.load(std::memory_order_acquire)) return;
+    const auto cached = g_reflexConfigStamp.load(std::memory_order_acquire);
+    if (stamp == cached) return;
+
+    // The caller filters unsuccessful and test Presents. The device/context
+    // owner check alone does not identify the thread. Only the producer that
+    // acquired this frame table advances the accepted request's sample count.
+    const DWORD thread = GetCurrentThreadId();
+    unsigned presents = 0;
+    if (cached & kReflexObservationPending) {
+        if (thread != g_reflexProducerThread.load(std::memory_order_relaxed)) return;
+        presents = ++t_reflexPresentsAfterRequest;
+        if (stamp == (cached & ~kReflexObservationPending) &&
+            !ModeHistory::observationDue(presents)) return;
+    }
+
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_current) {
         g_reflexConfigStamp.store(stamp, std::memory_order_release);
-    } else if (device && matchesReflexDevice(device, *g_current)) {
-        refreshReflex(*g_current, reflexConfigStamp());
+    } else if (thread == g_reflexProducerThread.load(std::memory_order_relaxed) &&
+               device && matchesReflexDevice(device, *g_current)) {
+        const auto currentStamp = reflexConfigStamp();
+        const auto priorStamp = g_reflexConfigStamp.load(std::memory_order_relaxed);
+        const bool changed = currentStamp != (priorStamp & ~kReflexObservationPending) &&
+            refreshReflex(*g_current, currentStamp);
+        if (!changed && g_current->reflex.observing() &&
+            ModeHistory::observationDue(presents)) {
+            observeMode(g_current->reflex, g_current->device, g_current->generation, presents);
+        }
+        publishReflexStamp(*g_current, currentStamp);
     }
 }
 
@@ -829,7 +866,10 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     g_current = &state;
     // NativeRuntimeHost acquires this table through the game-producer
     // dispatcher. Its later beginFrame runs on the OpenXR owner instead.
-    refreshReflex(state, reflexConfigStamp());
+    g_reflexProducerThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    const auto reflexStamp = reflexConfigStamp();
+    refreshReflex(state, reflexStamp);
+    publishReflexStamp(state, reflexStamp);
     table->context = &state;
     table->beginFrame = beginFrame;
     table->reservedCall = retiredCall;

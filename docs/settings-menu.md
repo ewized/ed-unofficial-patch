@@ -300,9 +300,14 @@ multiplier convention. EDVR queries its NVIDIA NGX runtime for available capacit
 
 For VR latency experiments, `fix.nvidia_reflex` accepts `off` (default), `on`, and `boost`.
 The setting requests NVIDIA's low-latency mode on the game's D3D11 device. `boost` also requests
-higher GPU clocks. OpenXR continues to pace headset frames. The graphics log shows the requested
-mode and the driver's low-latency status. Measure headset responsiveness separately from submission
-rates and confirm Boost's effect using GPU clock and power samples. [NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
+higher GPU clocks. OpenXR continues to pace headset frames. Default Off leaves the driver untouched.
+For an accepted mode change, the graphics log records the immediate result (`native_reflex`) and
+read-only driver status after 4, 16, and 64 successful game Presents (`native_reflex_readback`).
+The final observation gives the effective low-latency state at that point. Driver policy can override the
+request. If the final Off reading is still enabled or unknown, the session tries Off once more at
+normal close. The Boost flag in the log identifies the request. Check GPU clocks and power for
+its effect, and measure headset responsiveness separately from submission rates.
+[NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
 
 ### XeSS Frame Generation rows (2026-11-12)
 
