@@ -5,6 +5,7 @@
 #include "../../src/openxr/scope_circle.h"   // F205: the ADS view circle's arithmetic
 #include "../../src/openxr/flat_notice_placement.h"
 #include "../../src/openxr/flat_notice_raster.h"
+#include "../../src/common/native_menu.h"
 #include "../../src/common/system_d3d11.h"
 #include <cstdio>
 #include <cstring>
@@ -35,7 +36,7 @@ const auto session=reinterpret_cast<XrSession>(1);
 const auto space=reinterpret_cast<XrSpace>(2);
 struct Eye {ComPtr<ID3D11Texture2D> images[2];bool alive=false,acquired=false,waited=false;unsigned calls=0,index=0;};
 struct Fake {
-  ComPtr<ID3D11Device> device,foreign;ComPtr<ID3D11DeviceContext> context;Eye eyes[2];
+  ComPtr<ID3D11Device> device,foreign;ComPtr<ID3D11DeviceContext> context;Eye eyes[5];
   unsigned creates=0,destroys=0,formatCalls=0;std::vector<std::string> trace;
   unsigned width=size,height=size;
   std::string failure;XrResult error=XR_ERROR_RUNTIME_FAILURE;
@@ -50,7 +51,7 @@ struct RecordingObserver final : GpuWorkObserver {
   void endGpuWork(unsigned phase, ID3D11DeviceContext* context) noexcept override { events.push_back({phase,false,context}); }
   std::vector<Event> events;
 };
-int index(XrSwapchain chain){const int n=int(reinterpret_cast<uintptr_t>(chain))-10;check(n>=0&&n<2,"swapchain handle");return n<0||n>1?0:n;}
+int index(XrSwapchain chain){const int n=int(reinterpret_cast<uintptr_t>(chain))-10;const bool valid=n>=0&&n<int(_countof(fake->eyes));check(valid,"swapchain handle");return valid?n:0;}
 XrResult outcome(const char* action,int eye){const std::string name=std::string(action)+std::to_string(eye);fake->trace.push_back(name);return fake->failure==name?fake->error:XR_SUCCESS;}
 XrResult XRAPI_PTR formats(XrSession s,uint32_t cap,uint32_t* count,int64_t* out){
   check(s==session,"format session");++fake->formatCalls;
@@ -61,13 +62,16 @@ XrResult XRAPI_PTR formats(XrSession s,uint32_t cap,uint32_t* count,int64_t* out
 }
 XrResult XRAPI_PTR create(XrSession s,const XrSwapchainCreateInfo* ci,XrSwapchain* out){
   const unsigned eye=fake->creates++;
-  check(s==session&&eye<2&&ci->type==XR_TYPE_SWAPCHAIN_CREATE_INFO&&!ci->next,"create ABI");
-  check(ci->width==fake->width&&ci->height==fake->height&&ci->arraySize==1&&ci->faceCount==1&&ci->mipCount==1&&ci->sampleCount==1&&
-    ci->usageFlags==XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT,"swapchain shape/usage");
+  check(s==session&&eye<_countof(fake->eyes)&&ci->type==XR_TYPE_SWAPCHAIN_CREATE_INFO&&!ci->next,"create ABI");
+  if(eye>=_countof(fake->eyes))return XR_ERROR_LIMIT_REACHED;
+  const bool quad=eye>=2;
+  const XrSwapchainUsageFlags usage=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|(quad?XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT:0);
+  check((quad?(ci->width>0&&ci->height>0):(ci->width==fake->width&&ci->height==fake->height))&&
+    ci->arraySize==1&&ci->faceCount==1&&ci->mipCount==1&&ci->sampleCount==1&&ci->usageFlags==usage,"swapchain shape/usage");
   XrResult r=outcome("C",eye);if(r!=XR_SUCCESS)return r;
   auto& e=fake->eyes[eye];
   for(auto& image:e.images){
-    D3D11_TEXTURE2D_DESC d{};d.Width=fake->width+(fake->wrongDimensions?1:0);d.Height=fake->height;d.MipLevels=d.ArraySize=1;
+    D3D11_TEXTURE2D_DESC d{};d.Width=ci->width+(fake->wrongDimensions?1:0);d.Height=ci->height;d.MipLevels=d.ArraySize=1;
     d.Format=fake->typeless?DXGI_FORMAT_R8G8B8A8_TYPELESS:DXGI_FORMAT(ci->format);d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_RENDER_TARGET;
     ID3D11Device* dev=fake->wrongDevice?fake->foreign.Get():fake->device.Get();
     if(FAILED(dev->CreateTexture2D(&d,nullptr,&image)))return XR_ERROR_RUNTIME_FAILURE;
@@ -97,7 +101,8 @@ XrResult XRAPI_PTR acquire(XrSwapchain chain,const XrSwapchainImageAcquireInfo* 
   *out=e.index=e.calls++%2;e.acquired=true;return XR_SUCCESS;
 }
 XrResult XRAPI_PTR wait(XrSwapchain chain,const XrSwapchainImageWaitInfo* info){
-  const int eye=index(chain);auto& e=fake->eyes[eye];check(info->type==XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO&&!info->next&&info->timeout>0&&info->timeout<=1000000000LL&&e.acquired&&!e.waited,"wait order/ABI");
+  const int eye=index(chain);auto& e=fake->eyes[eye];check(info->type==XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO&&!info->next&&
+    (eye>=2?info->timeout==0:info->timeout>0&&info->timeout<=1000000000LL)&&e.acquired&&!e.waited,"wait order/ABI");
   XrResult r=outcome("W",eye);if(r!=XR_SUCCESS)return r;e.waited=true;return XR_SUCCESS;
 }
 XrResult XRAPI_PTR release(XrSwapchain chain,const XrSwapchainImageReleaseInfo* info){
@@ -128,6 +133,71 @@ struct Fixture {
     uint32_t value=0;std::memcpy(&value,static_cast<const char*>(map.pData)+y*map.RowPitch+x*4,4);runtime.context->Unmap(read.Get(),0);return value;
   }
 };
+
+void fpsOverlayBackingSelfTest() {
+  std::vector<uint8_t> pixels(size_t(2600)*1024*4,0x69);
+  EdvrNativeFpsOverlay raster{1,1718,158,5.f,8.f,1.4f,.72f};
+  XrCompositionLayerQuad layer{};
+  auto render=[&](Fixture& f){return f.renderer.renderFpsOverlay(space,raster,pixels.data(),2600,1024,layer);};
+  const auto backing=[](Fixture& f,XrSwapchain chain,uint32_t width,uint32_t height) {
+    auto* source=f.runtime.eyes[index(chain)].images[0].Get();
+    if(!source)return false;
+    D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+    return desc.Width==width&&desc.Height==height;
+  };
+  {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize owned device");
+    check(render(f)==XR_SUCCESS,"FPS backing: Compact raster uploads");
+    const auto small=layer.subImage.swapchain;
+    check(small&&backing(f,small,2048,256)&&layer.subImage.imageRect.extent.width==1718&&
+      layer.subImage.imageRect.extent.height==158&&layer.space==space&&layer.size.width==raster.widthMeters,
+      "FPS backing: smaller chain keeps original crop, view space and physical width");
+    check(f.pixel(2,0,0,0)==0x69696969u,"FPS backing: original pixels reached the quad");
+    f.runtime.trace.clear();
+    check(render(f)==XR_SUCCESS&&f.runtime.trace.empty()&&layer.subImage.swapchain==small,
+      "FPS backing: unchanged revision reuses the released small image");
+    ++raster.revision;f.runtime.failure="W2";f.runtime.error=XR_TIMEOUT_EXPIRED;
+    check(render(f)==XR_TIMEOUT_EXPIRED&&f.runtime.trace==std::vector<std::string>({"A2","W2"}),
+      "FPS backing: timeout holds the acquired small image without a release");
+
+    ++raster.revision;raster.width=1200;raster.height=460;f.runtime.failure.clear();
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain!=small&&backing(f,layer.subImage.swapchain,1536,512)&&
+      f.runtime.eyes[2].acquired&&!f.runtime.eyes[2].waited&&f.runtime.destroys==0,
+      "FPS backing: Detailed uses the middle chain while the smaller wait remains pending");
+    ++raster.revision;raster.width=1718;raster.height=158;f.runtime.trace.clear();
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain==small&&f.runtime.trace==std::vector<std::string>({"W2","R2"}),
+      "FPS backing: returning to Compact resumes the old wait without a second acquire");
+
+    ++raster.revision;raster.width=2050;
+    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&f.runtime.destroys==0,
+      "FPS backing: an oversized raster takes the full chain without retiring smaller chains");
+    ++raster.revision;raster.width=1718;f.runtime.failure="W2";f.runtime.trace.clear();
+    check(render(f)==XR_TIMEOUT_EXPIRED,"FPS backing: another timeout before shutdown");
+    check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==5&&
+      std::find(f.runtime.trace.begin(),f.runtime.trace.end(),"R2")==f.runtime.trace.end(),
+      "FPS backing: after the GPU drain shutdown destroys each chain without releasing unready pixels");
+  }
+  {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize allocation fallback fixture");
+    f.runtime.failure="C2";f.runtime.error=XR_ERROR_LIMIT_REACHED;
+    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&f.runtime.creates==4,
+      "FPS backing: a recoverable smaller allocation failure tries the full chain");
+    ++raster.revision;
+    check(render(f)==XR_SUCCESS&&f.runtime.creates==4,"FPS backing: allocation failure is retained for the session");
+  }
+  {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize partial enumeration fixture");
+    f.runtime.failure="I2";f.runtime.error=XR_ERROR_SIZE_INSUFFICIENT;
+    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&
+      f.runtime.eyes[2].alive&&f.runtime.destroys==0,"FPS backing: partial smaller chain remains owned until shutdown");
+    check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==4,"FPS backing: shutdown reclaims the partially enumerated chain");
+  }
+  for(auto error:{XR_ERROR_SESSION_LOST,XR_ERROR_INSTANCE_LOST,XR_ERROR_GRAPHICS_DEVICE_INVALID,XR_SESSION_LOSS_PENDING}) {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize terminal result fixture");
+    f.runtime.failure="C2";f.runtime.error=error;
+    check(render(f)==error&&f.runtime.creates==3&&!layer.subImage.swapchain,"FPS backing: terminal result cannot trigger a full allocation");
+  }
+}
 // The whole of one swapchain image, read back row by row (the fixture's pixel() reads one texel per copy).
 std::vector<uint32_t> readWhole(Fixture& f,unsigned eye,unsigned image){
   auto* source=f.runtime.eyes[eye].images[image].Get();D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
@@ -1120,6 +1190,7 @@ void embeddedShaderPin() {
 
 int selfTest(){
   noticeSelfTest();
+  fpsOverlayBackingSelfTest();
   for(bool unorm:{false,true}){
     Fixture f;f.runtime.unorm=unorm;f.runtime.grow=true;check(f.init()==XR_SUCCESS,"initialize actual swapchains/RTVs/shaders");
     check(f.runtime.formatCalls==3,"growing format count retry");XrCompositionLayerProjection layer{};

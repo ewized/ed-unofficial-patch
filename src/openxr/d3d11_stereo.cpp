@@ -92,6 +92,11 @@ bool compatible(DXGI_FORMAT resource,DXGI_FORMAT selected) {
     return selected==DXGI_FORMAT_B8G8R8A8_UNORM || selected==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
   return false;
 }
+bool canFallbackFpsBacking(XrResult error) {
+  return error==XR_ERROR_LIMIT_REACHED||error==XR_ERROR_OUT_OF_MEMORY||
+    error==XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED||error==XR_ERROR_FEATURE_UNSUPPORTED||
+    error==XR_ERROR_SIZE_INSUFFICIENT;
+}
 bool sameDevice(ID3D11Device* device,ID3D11Texture2D* texture) {
   ComPtr<ID3D11Device> owner;texture->GetDevice(&owner);
   ComPtr<IUnknown> a,b;
@@ -187,11 +192,14 @@ XrResult D3D11Stereo::shutdown() {
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
     eye.swapchain=XR_NULL_HANDLE;eye.width=eye.height=0;
   }
-  if(fpsOverlay_.swapchain) {
-    const auto r=dispatch_.destroySwapchain(fpsOverlay_.swapchain);
-    if(r!=XR_SUCCESS&&first==XR_SUCCESS)first=r;
+  for(auto* overlay:{&fpsOverlaySmall_,&fpsOverlayMedium_,&fpsOverlayFull_}) {
+    if(overlay->swapchain) {
+      const auto r=dispatch_.destroySwapchain(overlay->swapchain);
+      if(r!=XR_SUCCESS&&first==XR_SUCCESS)first=r;
+    }
+    *overlay={};
   }
-  fpsOverlay_={};
+  fpsOverlayConverted_=std::vector<uint8_t>{};fpsOverlayConvertedRevision_=0;
   graphicsBridge_.reset();
   completion_.Reset();
   immediateExecutor_=nullptr;
@@ -204,8 +212,7 @@ XrResult D3D11Stereo::shutdown() {
   return first;
 }
 
-XrResult D3D11Stereo::createFpsOverlaySwapchain(uint32_t width,uint32_t height) {
-  auto& overlay=fpsOverlay_;
+XrResult D3D11Stereo::createFpsOverlaySwapchain(FpsOverlay& overlay,uint32_t width,uint32_t height) {
   XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
   info.usageFlags=XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT|XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
   info.format=format_;info.sampleCount=1;
@@ -233,22 +240,48 @@ XrResult D3D11Stereo::renderFpsOverlay(XrSpace view,const EdvrNativeFpsOverlay& 
     uint32_t maxWidth,uint32_t maxHeight,XrCompositionLayerQuad& layer) {
   layer={XR_TYPE_COMPOSITION_LAYER_QUAD};
   if(!view||!session_||!ready_||GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
-  // Fixed capacity prevents the compact line's measured width from recreating
-  // an XR swapchain every time a number gains or loses a digit.
-  auto& overlay=fpsOverlay_;
   if(!raster.revision||!raster.width||!raster.height||raster.width>maxWidth||raster.height>maxHeight)
     return XR_ERROR_VALIDATION_FAILURE;
-  if(!overlay.swapchain) {
-    const auto created=createFpsOverlaySwapchain(maxWidth,maxHeight);
-    if(created!=XR_SUCCESS)return created;
+  // The runtime may import the entire backing image. Prefer the smallest
+  // fitting tier, while keeping every created chain until the session drains.
+  // A Compact line changing width, or a switch to Detailed, needs no resize
+  // or destruction while older quads may still be visible to the runtime.
+  const auto ensure=[&](FpsOverlay& slot,uint32_t width,uint32_t height) {
+    if(!slot.creationAttempted) {
+      slot.creationAttempted=true;
+      slot.creationResult=createFpsOverlaySwapchain(slot,width,height);
+      if(canFallbackFpsBacking(slot.creationResult)&&FAILED(device_->GetDeviceRemovedReason()))
+        slot.creationResult=XR_ERROR_GRAPHICS_DEVICE_INVALID;
+      nativeTracePrintf("native_fps_overlay_backing,width=%u,height=%u,result=%d\n",width,height,int(slot.creationResult));
+    }
+    return slot.creationResult;
+  };
+  auto* selected=&fpsOverlayFull_;
+  XrResult created=XR_SUCCESS;
+  struct Tier { FpsOverlay* slot;uint32_t width,height; };
+  const Tier tiers[]={{&fpsOverlaySmall_,2048,256},{&fpsOverlayMedium_,1536,512}};
+  for(const auto& tier:tiers) {
+    const auto width=(std::min)(maxWidth,tier.width),height=(std::min)(maxHeight,tier.height);
+    if(raster.width>width||raster.height>height)continue;
+    if(width==maxWidth&&height==maxHeight)break;
+    created=ensure(*tier.slot,width,height);
+    if(created==XR_SUCCESS)selected=tier.slot;
+    else if(!canFallbackFpsBacking(created))return created;
+    break;
   }
+  if(selected==&fpsOverlayFull_)created=ensure(*selected,maxWidth,maxHeight);
+  if(created!=XR_SUCCESS)return created;
+  // Pending acquire and last released revision belong to the chosen chain.
+  // Leave any other chain's unfinished wait alone until that chain is used
+  // again. Releasing it without fresh pixels could replace a cached quad.
+  auto& overlay=*selected;
   if(raster.revision!=overlay.revision) {
     if(!rgba||!context_)return XR_ERROR_VALIDATION_FAILURE;
     const bool blueFirst=format_==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB||format_==DXGI_FORMAT_B8G8R8A8_UNORM;
     const bool linear=format_==DXGI_FORMAT_R8G8B8A8_UNORM||format_==DXGI_FORMAT_B8G8R8A8_UNORM;
     const auto* pixels=rgba;
     if(blueFirst||linear) {
-      if(overlay.convertedRevision!=raster.revision) {
+      if(fpsOverlayConvertedRevision_!=raster.revision) {
         static const auto srgbToLinear=[]{
           std::array<uint8_t,256> table{};
           for(unsigned v=0;v<table.size();++v) {
@@ -259,17 +292,17 @@ XrResult D3D11Stereo::renderFpsOverlay(XrSpace view,const EdvrNativeFpsOverlay& 
           return table;
         }();
         const size_t bytes=size_t(raster.width)*raster.height*4;
-        overlay.converted.resize(bytes);
+        fpsOverlayConverted_.resize(bytes);
         for(size_t i=0;i<bytes;i+=4) {
           for(unsigned c=0;c<3;++c) {
             const auto v=rgba[i+(blueFirst?2-c:c)];
-            overlay.converted[i+c]=linear?srgbToLinear[v]:v;
+            fpsOverlayConverted_[i+c]=linear?srgbToLinear[v]:v;
           }
-          overlay.converted[i+3]=rgba[i+3];
+          fpsOverlayConverted_[i+3]=rgba[i+3];
         }
-        overlay.convertedRevision=raster.revision;
+        fpsOverlayConvertedRevision_=raster.revision;
       }
-      pixels=overlay.converted.data();
+      pixels=fpsOverlayConverted_.data();
     }
     if(!overlay.acquired) {
       const XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};

@@ -182,8 +182,9 @@ class D3D11Stereo final {
   uint32_t noticeGeneration() const { return noticeGeneration_; }
   bool noticeSize(unsigned eye, uint32_t* width, uint32_t* height) const;
   // Upload a new head-locked FPS raster only when its revision changes.
-  // The quad references a released image, retained until shutdown. Timeout
-  // leaves an acquired image pending for the next owner tick.
+  // The quad references a released image, retained until shutdown. Bounds
+  // cap the backing for the XR session. Timeout leaves that chain's acquired
+  // image pending until the owner renders another raster of the same tier.
   XrResult renderFpsOverlay(XrSpace view, const EdvrNativeFpsOverlay&, const uint8_t* rgba,
                            uint32_t maxWidth, uint32_t maxHeight, XrCompositionLayerQuad&);
   // Complete submitted GPU work before retiring the render caller. Uses its
@@ -206,7 +207,8 @@ class D3D11Stereo final {
   double initShaderMs() const { return initShaderMs_; }
 
  private:
-  XrResult createFpsOverlaySwapchain(uint32_t width, uint32_t height);
+  struct FpsOverlay;
+  XrResult createFpsOverlaySwapchain(FpsOverlay&, uint32_t width, uint32_t height);
   HRESULT ensureNativeUiResources();
   XrResult noteFailure(const char*,uint32_t,XrResult,HRESULT=S_OK,bool=false);
   FailureInfo failureInfo_{};
@@ -220,11 +222,13 @@ class D3D11Stereo final {
   struct FpsOverlay {
     XrSwapchain swapchain=XR_NULL_HANDLE;
     std::vector<ID3D11Texture2D*> images;
-    std::vector<uint8_t> converted;
     uint32_t pendingIndex=0;
-    uint64_t revision=0,convertedRevision=0;
-    bool acquired=false;
-  } fpsOverlay_;
+    uint64_t revision=0;
+    XrResult creationResult=XR_ERROR_RUNTIME_FAILURE;
+    bool creationAttempted=false,acquired=false;
+  } fpsOverlaySmall_,fpsOverlayMedium_,fpsOverlayFull_;
+  std::vector<uint8_t> fpsOverlayConverted_;
+  uint64_t fpsOverlayConvertedRevision_=0;
   XrCompositionLayerProjectionView layerViews_[2]{};
   StereoDispatch dispatch_{};
   XrSession session_ = XR_NULL_HANDLE;
