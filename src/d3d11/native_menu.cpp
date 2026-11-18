@@ -24,9 +24,12 @@ State* current = nullptr;
 std::mutex mutex;
 std::atomic<bool> available{false};
 std::atomic<bool> active{false};
-std::atomic<bool> fpsOverlaySupported{false};
+std::atomic<State*> fpsOverlayContext{nullptr};
 std::atomic<uint64_t> revision{0};
 std::atomic<uint64_t> sessionId{0};   // bumped at every acquire and every close of an active session
+#ifdef EDVR_MENU_TEST
+std::atomic<unsigned> fpsOverlayProviderLocks{0};
+#endif
 State* identify(void* context) {
   for (unsigned i = 0; i < used; ++i) if (context == &pool[i]) return &pool[i];
   return nullptr;
@@ -140,7 +143,7 @@ HRESULT WINAPI close(void* context) {
   if (!s->active) return S_FALSE;
   invalidate(*s); s->active = false; s->device = nullptr;
   if (s->fpsOverlay) {
-    fpsOverlaySupported.store(false, std::memory_order_release);
+    fpsOverlayContext.store(nullptr, std::memory_order_release);
     edvr::menuPanelClearNativeFpsOverlay();
   }
   active.store(false, std::memory_order_release);
@@ -152,7 +155,14 @@ HRESULT WINAPI readFpsOverlay(void* context, uint64_t knownRevision, EdvrNativeF
                               void* pixels, uint32_t capacity) {
   if (!out) return E_POINTER;
   *out = {};
+  // Close retires this unique context before clearing the raster. Check the
+  // context after visibility so that clear cannot admit a retired caller.
+  if (context && !edvr::menuPanelNativeFpsOverlayVisible() &&
+      context == fpsOverlayContext.load(std::memory_order_acquire)) return S_FALSE;
   std::lock_guard<std::mutex> lock(mutex);
+#ifdef EDVR_MENU_TEST
+  fpsOverlayProviderLocks.fetch_add(1, std::memory_order_relaxed);
+#endif
   const auto* s = identify(context);
   if (!s || !s->active || s != current || !s->fpsOverlay) return E_INVALIDARG;
   // The raster is head-locked in view space. It needs no game-eye pose,
@@ -168,7 +178,12 @@ HRESULT WINAPI readFpsOverlay(void* context, uint64_t knownRevision, EdvrNativeF
 
 bool nativeMenuAvailable() { return available.load(std::memory_order_acquire); }
 bool nativeMenuActive() { return active.load(std::memory_order_acquire); }
-bool nativeMenuFpsOverlaySupported() { return fpsOverlaySupported.load(std::memory_order_acquire); }
+bool nativeMenuFpsOverlaySupported() { return fpsOverlayContext.load(std::memory_order_acquire) != nullptr; }
+#ifdef EDVR_MENU_TEST
+unsigned nativeMenuFpsOverlayProviderLocksForTest() {
+  return fpsOverlayProviderLocks.load(std::memory_order_relaxed);
+}
+#endif
 uint64_t nativeMenuRevision() { return revision.load(std::memory_order_acquire); }
 uint64_t nativeMenuSessionId() { return sessionId.load(std::memory_order_acquire); }
 bool nativeMenuEyePoses(float out[2][12]) {
@@ -192,7 +207,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* req
   auto& s = pool[used++]; s.device = request->gameDevice; s.thread = GetCurrentThreadId();
   s.generation = request->generation; s.active = true; s.fpsOverlay = fpsOverlay; current = &s;
   active.store(true, std::memory_order_release);
-  fpsOverlaySupported.store(fpsOverlay, std::memory_order_release);
+  fpsOverlayContext.store(fpsOverlay ? &s : nullptr, std::memory_order_release);
   sessionId.fetch_add(1, std::memory_order_release);
   result.context = &s; result.publishPose = publish; result.treatEye = treat; result.close = close;
   if (fpsOverlay) result.readFpsOverlay = readFpsOverlay;

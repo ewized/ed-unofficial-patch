@@ -254,6 +254,8 @@ void menuPanelSubmit(const MenuContent& c);
 void menuPanelSubmitNativeFpsOverlay(const MenuContent& c);
 void menuPanelSetNativeFpsOverlayPose(bool visible, float yaw, float pitch, float distance);
 void menuPanelClearNativeFpsOverlay();
+// Lock-free visibility hint. A visible overlay may still be waiting for its raster.
+bool menuPanelNativeFpsOverlayVisible();
 enum class NativeFpsOverlayRead { Hidden, Ready, ShortBuffer };
 NativeFpsOverlayRead menuPanelReadNativeFpsOverlay(uint64_t knownRevision, EdvrNativeFpsOverlay& out,
                                                  void* pixels, uint32_t capacity);
@@ -268,6 +270,7 @@ uint32_t menuPanelMonitorRasterSerial();
 uint8_t  menuPanelMonitorRasterOwner();   // the slotOwner of the raster last uploaded to the monitor slot (kSlotOwnerNone when none is)
 bool menuPanelMonitorRasterReady();
 #ifdef EDVR_MENU_TEST
+unsigned menuPanelFpsOverlayLocksForTest();
 bool menuPanelWorkerReadyForTest();
 bool menuPanelMonitorWorkerReadyForTest();
 int  menuPanelLayoutHeightForTest(const MenuContent& c);

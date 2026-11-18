@@ -1082,7 +1082,7 @@ struct Worker {
     // device. Epoch retires work from before a hide or mode/session change.
     uint64_t                fpsEpoch = 1;
     uint64_t                fpsRevision = 0;
-    bool                    fpsVisible = false;
+    std::atomic<bool>       fpsVisible{false}; // writes remain under m
     float                   fpsYaw = 0.0f, fpsPitch = 0.0f, fpsDistance = 0.0f;
     Raster                  fpsRaster;
     // The layout the hit test reads, from the raster most recently uploaded.
@@ -1099,6 +1099,10 @@ struct Worker {
 // Keep process-lifetime storage, as the logger does. Explicit shutdown still
 // joins on the normal stop path; process exit must neither join nor destruct.
 Worker& g_w = *new Worker;
+
+#ifdef EDVR_MENU_TEST
+std::atomic<unsigned> g_fpsOverlayLocks{0};
+#endif
 
 // The GDI raster is premultiplied in sRGB byte space. OpenXR consumes
 // straight sRGB colour and applies the alpha in the compositor colour space.
@@ -1980,8 +1984,8 @@ void menuPanelSubmitNativeFpsOverlay(const MenuContent& c) { submitPanelRaster(c
 // cannot publish over the next readout.
 static void clearNativeFpsOverlayLocked() {
     ++g_w.fpsEpoch;
-    g_w.fpsVisible = false;
     g_w.fpsRaster = {};
+    g_w.fpsVisible.store(false, std::memory_order_release);
 }
 
 void menuPanelClearNativeFpsOverlay() {
@@ -1990,19 +1994,35 @@ void menuPanelClearNativeFpsOverlay() {
 }
 
 void menuPanelSetNativeFpsOverlayPose(bool visible, float yaw, float pitch, float distance) {
+    if (!visible && !menuPanelNativeFpsOverlayVisible()) return;
     std::lock_guard<std::mutex> lock(g_w.m);
-    if (!visible && g_w.fpsVisible) clearNativeFpsOverlayLocked();
-    g_w.fpsVisible = visible;
+#ifdef EDVR_MENU_TEST
+    g_fpsOverlayLocks.fetch_add(1, std::memory_order_relaxed);
+#endif
+    if (!visible) {
+        if (g_w.fpsVisible.load(std::memory_order_relaxed)) clearNativeFpsOverlayLocked();
+        return;
+    }
     g_w.fpsYaw = yaw;
     g_w.fpsPitch = pitch;
     g_w.fpsDistance = distance;
+    if (!g_w.fpsVisible.load(std::memory_order_relaxed))
+        g_w.fpsVisible.store(true, std::memory_order_release);
+}
+
+bool menuPanelNativeFpsOverlayVisible() {
+    return g_w.fpsVisible.load(std::memory_order_acquire);
 }
 
 NativeFpsOverlayRead menuPanelReadNativeFpsOverlay(uint64_t knownRevision, EdvrNativeFpsOverlay& out,
                                                  void* pixels, uint32_t capacity) {
     std::lock_guard<std::mutex> lock(g_w.m);
+#ifdef EDVR_MENU_TEST
+    g_fpsOverlayLocks.fetch_add(1, std::memory_order_relaxed);
+#endif
     const auto& raster = g_w.fpsRaster;
-    if (!g_w.fpsVisible || raster.rgba.empty() || !(raster.angularWidthDeg > 0.0f))
+    if (!g_w.fpsVisible.load(std::memory_order_relaxed) ||
+        raster.rgba.empty() || !(raster.angularWidthDeg > 0.0f))
         return NativeFpsOverlayRead::Hidden;
     const float widthMeters = 2.0f * g_w.fpsDistance * tanf(raster.angularWidthDeg * 0.00872664626f);
     out = {g_w.fpsRevision, static_cast<uint32_t>(raster.w), static_cast<uint32_t>(raster.h),
@@ -2015,6 +2035,10 @@ NativeFpsOverlayRead menuPanelReadNativeFpsOverlay(uint64_t knownRevision, EdvrN
 }
 
 #ifdef EDVR_MENU_TEST
+unsigned menuPanelFpsOverlayLocksForTest() {
+    return g_fpsOverlayLocks.load(std::memory_order_relaxed);
+}
+
 bool menuPanelWorkerReadyForTest() {
     std::lock_guard<std::mutex> lock(g_w.m);
     return g_w.hasReady && !g_w.hasPending;

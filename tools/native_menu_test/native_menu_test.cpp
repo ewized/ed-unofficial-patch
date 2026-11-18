@@ -34,6 +34,8 @@ using Microsoft::WRL::ComPtr;
 
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeMenu")
 
+unsigned nativeMenuFpsOverlayProviderLocksForTest();
+
 class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
  public: bool invoke(std::function<void()> callback) override { callback(); return true; }
 };
@@ -833,6 +835,19 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFpsOverlay meta{};
         check(overlay.readFpsOverlay(overlay.context, 0, &meta, nullptr, 0) == S_FALSE &&
               !meta.revision, "no FPS layer before the first visible raster");
+        const auto providerLocks = nativeMenuFpsOverlayProviderLocksForTest();
+        const auto workerLocks = edvr::menuPanelFpsOverlayLocksForTest();
+        bool hidden = true;
+        uint8_t hiddenPixel = 0x42;
+        for (unsigned frame = 0; frame < 180; ++frame) {
+            edvr::menuPanelSetNativeFpsOverlayPose(false, 6.0f, 20.0f, 1.4f);
+            meta.revision = 123;
+            hidden &= overlay.readFpsOverlay(overlay.context, 0, &meta, &hiddenPixel, 1) == S_FALSE &&
+                      !meta.revision && hiddenPixel == 0x42;
+        }
+        check(hidden && providerLocks == nativeMenuFpsOverlayProviderLocksForTest() &&
+              workerLocks == edvr::menuPanelFpsOverlayLocksForTest(),
+              "FPS layer Off uses no provider or worker locks");
         edvr::MenuContent readout{};
         check(edvr::menuPanelBuildOverlayContent(readout, "render 11 fps | gen 22 fps | gen total 614", 1.1f, nullptr),
               "build an FPS raster containing generated counts");
@@ -849,6 +864,9 @@ int wmain(int argc, wchar_t** argv) {
                                   meta.distanceMeters == 1.4f && meta.widthMeters > 0.0f;
         check(readyOverlay, "FPS raster exposes revision, dimensions and view-relative placement");
         if (!readyOverlay) { overlay.close(overlay.context); return 1; }
+        check(providerLocks < nativeMenuFpsOverlayProviderLocksForTest() &&
+              workerLocks < edvr::menuPanelFpsOverlayLocksForTest(),
+              "visible FPS layer still validates and reads raster under both locks");
         uint8_t sentinel = 0x42;
         const uint32_t bytes = meta.width * meta.height * 4;
         const auto revision = meta.revision;
@@ -876,13 +894,33 @@ int wmain(int argc, wchar_t** argv) {
         check(overlay.publishPose(overlay.context, nullptr, nullptr, nullptr, 30, 0) == S_OK &&
               overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_OK,
               "CPU menu-pose invalidation leaves the independent FPS raster available");
+        edvr::menuPanelSetNativeFpsOverlayPose(true, 7.0f, 21.0f, 1.5f);
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, &sentinel, 1) == S_OK &&
+              meta.revision == revision && meta.yawDegrees == 7.0f && meta.pitchDegrees == 21.0f &&
+              meta.distanceMeters == 1.5f && sentinel == 0x42,
+              "pose can update without a new raster or pixel copy");
         edvr::menuPanelSetNativeFpsOverlayPose(false, 6.0f, 20.0f, 1.4f);
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_FALSE &&
+              !meta.revision, "hiding retires a visible FPS raster immediately");
         edvr::menuPanelSetNativeFpsOverlayPose(true, 6.0f, 20.0f, 1.4f);
         check(overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_FALSE,
               "the next visibility interval does not inherit a retired raster");
         check(overlay.close(overlay.context) == S_OK && !nativeMenuFpsOverlaySupported() &&
               overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == E_INVALIDARG,
               "v2 close retires the independent FPS capability");
+        EdvrNativeMenuTable replacement{sizeof(replacement), EDVR_NATIVE_MENU_VERSION_2};
+        overlayRequest.generation = 31;
+        const bool replaced = edvrAcquireNativeMenu(&overlayRequest, &replacement) == S_OK &&
+                              replacement.context && replacement.context != overlay.context &&
+                              replacement.readFpsOverlay;
+        check(replaced, "v2 reacquires with a fresh context");
+        if (replaced) {
+            check(overlay.readFpsOverlay(overlay.context, 0, &meta, nullptr, 0) == E_INVALIDARG &&
+                  replacement.readFpsOverlay(nullptr, 0, &meta, nullptr, 0) == E_INVALIDARG &&
+                  replacement.readFpsOverlay(replacement.context, 0, &meta, nullptr, 0) == S_FALSE,
+                  "hidden fast path admits only its current v2 context");
+            check(replacement.close(replacement.context) == S_OK, "close replacement FPS layer context");
+        }
     }
 
     edvr::openxr::NativeMenuClient client;
