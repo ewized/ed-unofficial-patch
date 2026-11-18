@@ -1,57 +1,288 @@
 {
-  "schema": 1,
-  "status": "partial_native_group_pending",
-  "measured_code": "cfe5e8ca4241b7169eea524f6d50fc4c5f64c620",
+  "assembler_sha256": "2a2a1f5270147ad0d06d6706004bde6f67a782eef0328bb5b50f145953af6986",
+  "audit_after_all_group_cleanup_verified": true,
+  "final_broader_preference_audit": "passed",
+  "final_preference_audit": {
+    "all_captured_mtimes_verified": true,
+    "all_known_bytes_verified": true,
+    "captured_mtime_labels": [
+      "driver",
+      "graphics",
+      "ini",
+      "mirror",
+      "openvr_paths",
+      "steamvr_settings"
+    ],
+    "expected_absent_labels": [
+      "flat_ini",
+      "owned_keyboard_test_binding"
+    ],
+    "files": [
+      {
+        "bytes": 68,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": true,
+        "label": "bindings_start_preset",
+        "original_mtime_captured": false,
+        "sha256": "8667f62a598c94167f7ff00ecb317898710677b49780a2e9a206b4d0b1078905"
+      },
+      {
+        "bytes": 494,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": true,
+        "label": "display",
+        "original_mtime_captured": false,
+        "sha256": "d660b98efc2eafcf0b432f2f59ba59317c34b7b20f6af57e156b68a73f6800bc"
+      },
+      {
+        "bytes": 134,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "driver",
+        "original_mtime_captured": true,
+        "sha256": "02a1fcf7e3491bab9c1cf6407154a2f2bb2f9b7a26fee3aa3627468d70161b80"
+      },
+      {
+        "bytes": null,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": false,
+        "label": "flat_ini",
+        "original_mtime_captured": false,
+        "sha256": null
+      },
+      {
+        "bytes": 1462,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "graphics",
+        "original_mtime_captured": true,
+        "sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+      },
+      {
+        "bytes": 61,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": true,
+        "label": "graphics_override",
+        "original_mtime_captured": false,
+        "sha256": "e6f0687980534771b821abbba5485160db88b1dc38709004d49f438be7b818a7"
+      },
+      {
+        "bytes": 927,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": true,
+        "label": "graphics_settings",
+        "original_mtime_captured": false,
+        "sha256": "d85198b9735e5ea29209c7a987bf692f31cddc38ee9f65a840209707a1cce13c"
+      },
+      {
+        "bytes": 4,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": true,
+        "label": "graphics_start_preset",
+        "original_mtime_captured": false,
+        "sha256": "c4ebc6d4a5832cd9415f906ad03661110c705a72381c8b8b145761d02e2dd23a"
+      },
+      {
+        "bytes": 201014,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "ini",
+        "original_mtime_captured": true,
+        "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f"
+      },
+      {
+        "bytes": 201014,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "mirror",
+        "original_mtime_captured": true,
+        "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f"
+      },
+      {
+        "bytes": 781,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "openvr_paths",
+        "original_mtime_captured": true,
+        "sha256": "6d922ecfcbe69d0ff9c3f4d65b075ee8e857f3a1e668a222977adb6bffcb6e98"
+      },
+      {
+        "bytes": null,
+        "bytes_verified": true,
+        "captured_mtime_verified": null,
+        "expected_exists": false,
+        "label": "owned_keyboard_test_binding",
+        "original_mtime_captured": false,
+        "sha256": null
+      },
+      {
+        "bytes": 3398,
+        "bytes_verified": true,
+        "captured_mtime_verified": true,
+        "expected_exists": true,
+        "label": "steamvr_settings",
+        "original_mtime_captured": true,
+        "sha256": "db0f7dfd6b61df3fd4553bdcab0598596f61233bac552537fdc649afc669ec15"
+      }
+    ],
+    "label_count": 13,
+    "mtime_scope": "Only captured original timestamps are verified. SteamVR reference time was captured after physical-probe byte restoration; its pre-probe original time was not captured.",
+    "uncaptured_existing_mtime_labels": [
+      "bindings_start_preset",
+      "display",
+      "graphics_override",
+      "graphics_settings",
+      "graphics_start_preset"
+    ]
+  },
+  "final_preference_audit_sha256": "0864fb79887c8b9631d354cef7ee0e4a72c075ea7f2e889057a99a42d60d9f18",
+  "game_runtime_census_empty": true,
+  "group_evidence": {
+    "balanced": {
+      "after-metadata.json": "c52a15a11fc08999f7d6c2b5fbde31dd40ddd1499aa10016e2195ae69c9add54",
+      "b__vrs-off__fg-2x/after-state.json": "fb97feb2efaee8cf271aea138259ffb900c1264cc54d1e98ebf975530d79c26d",
+      "b__vrs-off__fg-2x/before-state.json": "38ef7e7cc9f3ad492f9c4d18a1da081fdbfe06ae2589faff61a192b621930df6",
+      "b__vrs-off__fg-4x/after-state.json": "136a1a3e9622b53b5bd207325992d2a3ec1291aa91ab2197a04759e3384563f4",
+      "b__vrs-off__fg-4x/before-state.json": "632ae1ff76d1d1152f7b47b6597fe9f0485713cec78f903c954b0f84a0631c0a",
+      "b__vrs-off__fg-auto/after-state.json": "3dd5de8ddd69a0cf36a19c2968f9987a605f82d06be9a7977ebc4310301d4bde",
+      "b__vrs-off__fg-auto/before-state.json": "0a1403ec9be811e1d66daf2dbd2c6b3efb23f0ec015c9df92d57ddebeef0f280",
+      "b__vrs-off__fg-off/after-state.json": "45ec4b22c50139616337b526095d8da3ac4dfa0c4bb2d361f98973ffd3b720a4",
+      "b__vrs-off__fg-off/before-state.json": "6767353181b22f7d45f6fef738d2d367761dbb6f3c75844230e628a0561fd27d",
+      "b__vrs-on__fg-2x/after-state.json": "6220a85607a6caca6031c35b98842474a5a6be06a00e09ab602c74f00ed77bd9",
+      "b__vrs-on__fg-2x/before-state.json": "161617dec2deed575ec50596c398b23f435aeb8f29cddc431d4a6c5876faf125",
+      "b__vrs-on__fg-4x/after-state.json": "a34dba305f470cc29e8b56abb2bd39910d6ef71ec0ddc01dbd9701665b3af2e2",
+      "b__vrs-on__fg-4x/before-state.json": "cd17c74c48648aa51f2cfaff8912fdf931711c1bf3baa19404228ae9e74ed7af",
+      "b__vrs-on__fg-auto/after-state.json": "9878ebf70721af377798eafcc8299414c4b368e171b7a7106e29e50c4eb6734c",
+      "b__vrs-on__fg-auto/before-state.json": "569bffa6ffceb56ffb81584d2ae936ecc58e71140294ac97f2eb8b86ea44db1b",
+      "b__vrs-on__fg-off/after-state.json": "f294d9da32087fdff9768ad944e8934539a9d8e0531daa5ceda49bc275f7f653",
+      "b__vrs-on__fg-off/before-state.json": "61b81eb8d15ed568549362be924f28dc44f1af6c6b382503cdf93a985d5f50c5",
+      "before-metadata.json": "700c0df4b9eef8ca4da859e7854e2b9bb9a3ee05a6d5c1a6c052303370e01bf7",
+      "keyboard-restored.json": "17d074ca66af891869932db2777db8668bf3d794b9632735020ba0f28619ae14",
+      "progress.json": "16033efdb125bf70c09b3ae32817cd8918845aa89127c1f54b45f8425efb64be",
+      "stop-status.json": "f60071932290905159588a421a76987881e4d4c5b884f96790850088cda8ed3b",
+      "timestamps-restored.json": "6f5e0acd0c703c5d0eeb8144ac78e40dc4153f3c902ba177cbb1b0c609f3f328"
+    },
+    "native": {
+      "after-metadata.json": "d9fa4774f02f3162a255a36e8988c4d8c21a976c88e24f100152343643b2fd2b",
+      "before-metadata.json": "f0a1163edf26e1510883225e7c513a5e8d42b72ad9a8dc8c3b7dbcb54d0a4f1b",
+      "keyboard-restored.json": "0879e6b3a812e2637d83a183403f6117b0587bd1c286767c5219245eb5c821a0",
+      "native__vrs-off__fg-2x/after-state.json": "f10bcfdad8c8f29de84e37b6431978b63593c552982b6a74c37d2f891a6bafc5",
+      "native__vrs-off__fg-2x/before-state.json": "e11276646fb69d31d14ea999180e634d53f27a9a8753965d703675549ef2359d",
+      "native__vrs-off__fg-4x/after-state.json": "4780cf189b33d4cbd599aaaea35f1eca426c05cb00207d4fc0964b38bc5d7bef",
+      "native__vrs-off__fg-4x/before-state.json": "635abad3aef16f4b34a999ec8b4ae4d1ff3cf28a17072e874c99f4422d46e7d1",
+      "native__vrs-off__fg-auto/after-state.json": "178b1145e648a891ef5c97dcf0ae15f8aa68676085cd1278895b6c2102c33424",
+      "native__vrs-off__fg-auto/before-state.json": "f3bb3c4123bb6ea46ec1ef311e88d678ea76eec3cb10aca0d8a4fcf2b80f3e71",
+      "native__vrs-off__fg-off/after-state.json": "a07ab3c9a7c92ac3671bef371742d0047324d8ce5e7445cb245dba52422da39f",
+      "native__vrs-off__fg-off/before-state.json": "159490f336b57dc557713120af0e055cd31645c3a5e05a7e273960133bbb32d4",
+      "native__vrs-on__fg-2x/after-state.json": "70a88fd7ab0641af38362c55e6871f183f4268f51a6bb3bcae4b3d88f33c3cfa",
+      "native__vrs-on__fg-2x/before-state.json": "1fe46704f5ba383a59e880aac9b73c9f0c301f8f5332b5302a8342f80c816a3e",
+      "native__vrs-on__fg-4x/after-state.json": "72e252144d97d6d7afa2cb6e68ca313338f089b3083b15cb175d21e86e49dbac",
+      "native__vrs-on__fg-4x/before-state.json": "ea981d9937b556f7bc828bab31ddd8be778496fc3eb33c13e41689d8501a7da2",
+      "native__vrs-on__fg-auto/after-state.json": "1f0189f4c00772e972ca9212c3f4672b095db5fec23a18d0e035d521a518da6a",
+      "native__vrs-on__fg-auto/before-state.json": "83654c24ad10892e10e9578138fb21246f64c477598b403c5280288576a14fab",
+      "native__vrs-on__fg-off/after-state.json": "d5d7c4555af0f590893d8a11c85b2d393430b9304eeff0c06bf7febd0b237d19",
+      "native__vrs-on__fg-off/before-state.json": "448e4ab8c185701b8a56a5673c649942dc54da7fe848cc4c201421ee6ab8901f",
+      "progress.json": "fcd422ea7dafe4bf76d3a7086b605a74110a2fbef02946476a1dfce7eb77a133",
+      "stop-status.json": "63cf981fbdac1bdc05ec8a27e669d556c8860f23e93ae72413702726b7ada53d",
+      "timestamps-restored.json": "ef47191cd2a83c932a3661f129793e8fe586c60886f14fe119beb58aa59d5020"
+    },
+    "performance": {
+      "after-metadata.json": "c7febb79786629c1b4159cf3aa230830e89923b9620bf4ac55829c8af7cf4e93",
+      "before-metadata.json": "e6ece9d61434cd7ce1b40f88d740606c76f53c0a63074c91d0d379c101f57e3f",
+      "keyboard-restored.json": "fa23c8a784e446d9782629eb6d49444a862e9f30d3cf749279284f9c40b575fb",
+      "p__vrs-off__fg-2x/after-state.json": "027206d53dad13f5056230a336e595e6d185d1277527216a5afd8fe06189ec36",
+      "p__vrs-off__fg-2x/before-state.json": "a9702b10db3a5d01e5f5f2613c2632340f31cb51ed2dd98d4b69b57165f14d57",
+      "p__vrs-off__fg-4x/after-state.json": "4ff9667eeec1819a6c00775b668f988e566d336ecf002596f75272e7973ad2e1",
+      "p__vrs-off__fg-4x/before-state.json": "3d94c86b226624cb3980dda10cb5ba3c15ef1f50fbd54e87c8ecc029cf8c9f81",
+      "p__vrs-off__fg-auto/after-state.json": "4e4f8be3c36b0eb1945f4c2a76941f2133870fc32883d80676f9ba23446b628d",
+      "p__vrs-off__fg-auto/before-state.json": "d270f3c5eae3e7d25423bdb67b673812c6c72b75b1987e6d0442e213dbaa3954",
+      "p__vrs-off__fg-off/after-state.json": "42e163d55ce2ba3a28d7e54fca8c46b33c97c86f92a0f546af6cb2421f818b47",
+      "p__vrs-off__fg-off/before-state.json": "dfe07e87f82292a0df9315ea3d44fc9da79b2e0fb790b951ca689427d4582aaf",
+      "p__vrs-on__fg-2x/after-state.json": "a0a04179dc15332c127daf0e0ad88b8041b6e204a03a039240a3eb65afe53a2d",
+      "p__vrs-on__fg-2x/before-state.json": "bee4cc511990b50e5d1f4e5b7f59c5b6996b52c745648dd39827645651201e6e",
+      "p__vrs-on__fg-4x/after-state.json": "7f972a52a92f63e38452f09db62fc6f2125706833db2f39c4b972699507fb0a9",
+      "p__vrs-on__fg-4x/before-state.json": "3e88822dc3b441d83cda3c11e8789e548bf74b117633e62ee414a03020af9e44",
+      "p__vrs-on__fg-auto/after-state.json": "e55c8fb7896c3fe991e8f040faed862f5beb14afbf4404a6e6b96eda9a2d2f01",
+      "p__vrs-on__fg-auto/before-state.json": "b7ebe56161c834a98cd2b501bce4dec9418497a8bd39a19d97ebb2f26008fdc7",
+      "p__vrs-on__fg-off/after-state.json": "b0502cfd0e94a807ed721824cca6eb90ed3331c186bf771e7fb4df4d90bc8866",
+      "p__vrs-on__fg-off/before-state.json": "0cfac7bc24e8171c16d3fbe0c27ff3a749e929773336ea94a15f46393b80a4f5",
+      "progress.json": "4aec9c5f512164f946afd358682a289525b5e1460cf24b4e7c1d3754d02c56b0",
+      "stop-status.json": "32123f9ffcc32b63ca44ae69d37ad0e424cfc0ef30b7cbb23cf197ce15160399",
+      "timestamps-restored.json": "fc7d3a4a4a64149d543d5241c81448fcf7ced104d8a93d700d56e628ba099b47"
+    },
+    "quality": {
+      "after-metadata.json": "60406b24c10d4c2ee52242f0f5b994cb8a8f42b092f5f53668ef289a91090f06",
+      "before-metadata.json": "c4c0023cee2a6c7ca3070a4016834ff225754eabdb764e92bd658e85ae514b9b",
+      "keyboard-restored.json": "d5462bc72f0642c8b8420f9b755c8da78c45b39d36207b6f20f1a06fbe0a15cc",
+      "progress.json": "50dbc586a550e6538db7c624eb6638857ae791f384bcae2a700b68e4a3a49388",
+      "q__vrs-off__fg-2x/after-state.json": "3e79a838a0c9e96edf6dd3c91eaeab2ca1db5cd55f972f73f41e7249ff6e1e9f",
+      "q__vrs-off__fg-2x/before-state.json": "b15295607a2b20c6cd0980db217e95827f82012461e261542728450a2644b1bf",
+      "q__vrs-off__fg-4x/after-state.json": "b1fce050bbebe21b4b262e80f6a8458c2b74952f82b7076c0a310d817392afbe",
+      "q__vrs-off__fg-4x/before-state.json": "70afb9e2c95f6cfd38ca4023ce32eb414b8f3e08ddba34485893468f5594f307",
+      "q__vrs-off__fg-auto/after-state.json": "7e0f4e84307b89d510a2597a3b79378cbcf1306c58089f1aa6478f63054bed78",
+      "q__vrs-off__fg-auto/before-state.json": "61d6a2e43eec49b23280f465006f2921be820fa8d99627ab489224acdd665d83",
+      "q__vrs-off__fg-off/after-state.json": "8d4109b84561f975a6548665742b509e675cb3a844393e7346e8878d2aa6b383",
+      "q__vrs-off__fg-off/before-state.json": "7c63617237742501aca6e2757acd80443ace686391755d260c00b611fe7e96e4",
+      "q__vrs-on__fg-2x/after-state.json": "895d11aad68d1a45674c38f18f1192f7e6f046429fda1a95b9ff7bdff70024b0",
+      "q__vrs-on__fg-2x/before-state.json": "fb5c5593eb5e0e30d0b70008b465e6eedf80cb0db895d82d8c534fb0274d5f23",
+      "q__vrs-on__fg-4x/after-state.json": "bc1f5a1b0770a62562b8516880627674e3e7d5e1315f3ecfc58d94db0d25d721",
+      "q__vrs-on__fg-4x/before-state.json": "0d4dc7a1e6e2e56f168be002a692b58f437aa00a1f14612bc4a636412e36335c",
+      "q__vrs-on__fg-auto/after-state.json": "5313014b9de0124f0b9b35a280a735f693da9eb1e7cd2a0521ecc76813674926",
+      "q__vrs-on__fg-auto/before-state.json": "c7ed702aef257bb0933e7dd1362a3079b82b4a2dae49c892809aa108f372ca69",
+      "q__vrs-on__fg-off/after-state.json": "310f7103353bcda2ad9e6861296e368dc21ae6bd220030ec8c0917954bf25f6e",
+      "q__vrs-on__fg-off/before-state.json": "4a77772f5730acf9ecb6aefa4032c2b5574e40091de1166e3a344bc2b8d74c16",
+      "stop-status.json": "16a7123ba011c579ed211c95f42c79f1135e82f61ae2a2f0ae1c3f54aa26d3d2",
+      "timestamps-restored.json": "159da6b152dc478654c726162a9d4a033cf75e51b76cdea0aca80055728dbe56"
+    }
+  },
   "groups_completed": [
     "balanced",
     "performance",
-    "quality"
+    "quality",
+    "native"
   ],
+  "keyboard_restoration_completed": true,
+  "measured_code": "cfe5e8ca4241b7169eea524f6d50fc4c5f64c620",
+  "normal_stop_completed": true,
   "original_files": {
-    "ini": {
-      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
-      "bytes": 201014,
-      "original_bytes_verified": true,
-      "original_mtime_verified": true
-    },
-    "mirror": {
-      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f",
-      "bytes": 201014,
-      "original_bytes_verified": true,
-      "original_mtime_verified": true
-    },
-    "graphics": {
-      "sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b",
-      "bytes": 1462,
-      "original_bytes_verified": true,
-      "original_mtime_verified": true
-    },
     "driver": {
-      "sha256": "02a1fcf7e3491bab9c1cf6407154a2f2bb2f9b7a26fee3aa3627468d70161b80",
       "bytes": 134,
       "original_bytes_verified": true,
-      "original_mtime_verified": true
+      "original_mtime_verified": true,
+      "sha256": "02a1fcf7e3491bab9c1cf6407154a2f2bb2f9b7a26fee3aa3627468d70161b80"
+    },
+    "graphics": {
+      "bytes": 1462,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true,
+      "sha256": "d0ac81502fce721079c9bf0f04fee676d7141df585523620d260cd7cd78ce48b"
+    },
+    "ini": {
+      "bytes": 201014,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true,
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f"
+    },
+    "mirror": {
+      "bytes": 201014,
+      "original_bytes_verified": true,
+      "original_mtime_verified": true,
+      "sha256": "c5ea958581209d075718b6feb2e2e9fdf25a1c5182d13e7ea249f28eead91b6f"
     }
   },
-  "normal_stop_completed": true,
-  "keyboard_restoration_completed": true,
-  "game_runtime_census_empty": true,
-  "final_broader_preference_audit": "pending",
-  "group_evidence": {
-    "balanced": {
-      "progress.json": "16033efdb125bf70c09b3ae32817cd8918845aa89127c1f54b45f8425efb64be",
-      "before-metadata.json": "700c0df4b9eef8ca4da859e7854e2b9bb9a3ee05a6d5c1a6c052303370e01bf7",
-      "after-metadata.json": "c52a15a11fc08999f7d6c2b5fbde31dd40ddd1499aa10016e2195ae69c9add54"
-    },
-    "performance": {
-      "progress.json": "4aec9c5f512164f946afd358682a289525b5e1460cf24b4e7c1d3754d02c56b0",
-      "before-metadata.json": "e6ece9d61434cd7ce1b40f88d740606c76f53c0a63074c91d0d379c101f57e3f",
-      "after-metadata.json": "c7febb79786629c1b4159cf3aa230830e89923b9620bf4ac55829c8af7cf4e93"
-    },
-    "quality": {
-      "progress.json": "50dbc586a550e6538db7c624eb6638857ae791f384bcae2a700b68e4a3a49388",
-      "before-metadata.json": "c4c0023cee2a6c7ca3070a4016834ff225754eabdb764e92bd658e85ae514b9b",
-      "after-metadata.json": "60406b24c10d4c2ee52242f0f5b994cb8a8f42b092f5f53668ef289a91090f06"
-    }
-  }
+  "preference_baseline_sha256": "a2935987c7a463aeaa65177c241ac3434f0df29945038db3491ba4dc8983a61c",
+  "schema": 1,
+  "status": "final_four_groups_verified",
+  "verification_scope": "Offline verification of recorded local evidence; no live machine inspection or claim about uncaptured original timestamps."
 }
