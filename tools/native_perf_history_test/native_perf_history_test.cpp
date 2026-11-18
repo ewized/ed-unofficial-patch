@@ -4,6 +4,7 @@
 #include "../../src/d3d11/xess_fg_presented.h"
 #include "../../src/common/perf_presented.h"
 #include "native_fg_readout_cases.h"
+#include "native_presentation_log_cases.h"
 #include "../../src/common/fps_overlay_mode.h"
 #include "../../src/d3d11/menu_flat_layout.h"
 #include "../../src/d3d11/menu_policy.h"
@@ -893,5 +894,6 @@ int wmain(int argc,wchar_t** argv) {
     fpsOverlayModes();detailedText();flatCorner();readoutMachine();
     presentedTally();presentedRing();presentedBudgets();readoutText();
     edvr::test::nativeFgReadoutCases(check);
+    edvr::test::nativePresentationLogCases(check);
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

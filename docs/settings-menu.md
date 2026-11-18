@@ -942,6 +942,18 @@ native timing ABI. The XR owner publishes cumulative counters after actual
 `xrEndFrame` results; the graphics receiver validates ownership, generation
 and monotonic counts. The readouts do not claim physical compositor scanout.
 
+With `advanced.app_gpu_timing = on`, a passive
+`native_presentation_totals,version=1` log records those cumulative counters
+about once a second while the menu stays closed. Capability and session changes
+are recorded immediately; stale packets retain their original timestamps and
+are explicitly marked. Compute rates only between fresh, nonregressing packets
+from the same generation/context, using the difference in `captured_at_ms`.
+Successful submission FPS counts native + generated + repeated; empty, failed
+and background counts stay separate. Requested Auto/multiplier and backend
+availability are logged beside actual XR state, so selection cannot be mistaken
+for delivery. CPU/GPU benchmark windows have their own sampling intervals and
+must not be assumed to align exactly with these counter endpoints.
+
 ## What it shows
 
 Pages, in tab order. Each row is: label, then its value as a switch, a

@@ -49,6 +49,7 @@
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
 #include "../common/native_render_settings.h"
+#include "../common/native_presentation_log.h"
 #include "../common/config.h"
 
 namespace edvr {
@@ -177,6 +178,7 @@ constexpr uint32_t kThermalTargetAll = 15;
 struct State {
     NativePerfHistory nativeHistory;
     NativePresentationHistory nativePresentation;
+    NativePresentationLogCadence nativePresentationLog;
     NativeBenchmarkCollector nativeBenchmark;
     NativeBenchmarkMetadata nativeBenchmarkMetadata{};
     uint64_t nativeBenchmarkMetadataMs = 0;
@@ -1048,6 +1050,35 @@ void logNativeBenchmark(State& s, const NativeBenchmarkReport& report) {
         m.gameFov[1][0],m.gameFov[1][1],m.gameFov[1][2],m.gameFov[1][3]);
 }
 
+// Versioned passive totals for offline benchmark collection, with Monitor closed.
+// Packet times use the receiver's monotonic clock. Rates require fresh endpoints
+// in the same generation/context and use captured_at_ms deltas, not log cadence.
+// Only native+generated+repeated are successful scene submissions; the other
+// categories remain separate. These are app xrEndFrame observations, not scanout.
+void logNativePresentation(State& s,const NativePresentationSnapshot& packet,bool enabled,uint64_t now) {
+    if(!s.nativePresentationLog.due(enabled,packet,now))return;
+    EdvrFgStatus backend{};
+    const bool backendAvailable=nativeFgStatusSnapshot(&backend);
+    const bool automatic=nativeFgAutoRequested();
+    const auto policy=nativeFgAutoStatus();
+    const bool fresh=nativePresentationPacketFresh(packet,now);
+    const uint64_t age=packet.capturedAtMs&&now>=packet.capturedAtMs?now-packet.capturedAtMs:0;
+    // Backend availability qualifies backend_state/failure/config/history.
+    // selected_multiplier is the current request even without that capability;
+    // active_multiplier/fg_enabled come from the actual XR owner's packet.
+    Log::get().note("native_presentation_totals,version=1,now_ms=%llu,captured_at_ms=%llu,packet_age_ms=%llu,active=%u,available=%u,fresh=%u,generation=%llu,context=%llu,sequence=%llu,native=%llu,generated=%llu,repeated=%llu,empty=%llu,failed=%llu,background=%llu,fg_enabled=%u,active_multiplier=%u,auto_requested=%u,selected_multiplier=%u,backend_status_available=%u,backend_state=%u,last_failure=%u,config_generation=%llu,history_generation=%llu,auto_reason=%s,auto_transitions=%llu,delivery=app_xrEndFrame_not_scanout",
+        (unsigned long long)now,(unsigned long long)packet.capturedAtMs,(unsigned long long)age,
+        unsigned(packet.active),unsigned(packet.available),unsigned(fresh),
+        (unsigned long long)packet.generation,(unsigned long long)packet.context,(unsigned long long)packet.sequence,
+        (unsigned long long)packet.nativeFrames,(unsigned long long)packet.generatedFrames,
+        (unsigned long long)packet.repeatedFrames,(unsigned long long)packet.emptyFrames,
+        (unsigned long long)packet.failedFrames,(unsigned long long)packet.backgroundFrames,
+        unsigned(packet.fgEnabled),packet.activeMultiplier,unsigned(automatic),backend.requestedMultiplier,
+        unsigned(backendAvailable),backend.state,backend.lastFailure,
+        (unsigned long long)backend.configGeneration,(unsigned long long)backend.historyGeneration,
+        automatic?fg_auto::reasonName(policy.reason):"not_requested",(unsigned long long)policy.transitions);
+}
+
 }  // namespace
 
 void perfMonitorProfileSwitch() {
@@ -1056,6 +1087,7 @@ void perfMonitorProfileSwitch() {
     // The presented counter's next sample is a new baseline too: the stretch between has no frames of its own to count.
     g_s.presented.rebase();
     g_s.nativePresentation.clear();
+    g_s.nativePresentationLog.reset();
 }
 
 void perfMonitorCrossProfileFrame() {
@@ -1140,7 +1172,9 @@ void perfMonitorFrame(ID3D11Device* dev) {
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
         s.nativeHistory.observe(true, timing, gpu, historyNow);
         const auto presentation=nativePresentationSnapshot();
-        s.nativePresentation.observe(presentation, GetTickCount64());
+        const uint64_t presentationNow=GetTickCount64();
+        s.nativePresentation.observe(presentation,presentationNow);
+        logNativePresentation(s,presentation,gpu.enabled,presentationNow);
         // With the application clock off (2026-10-14), the frame's GPU work span is the application-render series' source: one sample
         // a completed pair, once. Its benchmark join is not made (the native benchmark joins by native frame sequence).
         if (!gpu.enabled) {
@@ -1218,6 +1252,7 @@ void perfMonitorFrame(ID3D11Device* dev) {
         }
     } else {
         s.nativeHistory.clear();
+        s.nativePresentationLog.reset();
         s.nativeBenchmark.reset();
         s.nativeBenchmarkScope = 0;
         s.nativeBenchmarkMetadataMs = 0;
