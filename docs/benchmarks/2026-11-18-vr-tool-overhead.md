@@ -99,6 +99,33 @@ independent quad in both modes. Each check used bounded head-only motion.
 The headset captured the cumulative session total while the measured
 submission count covers only the qualified interval.
 
+## Overlay submission and raster updates
+
+Temporary diagnostic `df88866f53a1188cb65e458bccc52a1a64cecf5d` measured
+13,588 valid app cycles in eight docked Pilot Assessment blocks. It held
+application GPU timing off. The order was Off, Detailed Live, Detailed Frozen,
+Compact, Compact, Detailed Frozen, Detailed Live, Off.
+
+| Overlay | Forward cycles/s | Reverse cycles/s | Forward p95 | Reverse p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Off | 57.17 | 57.23 | 22.829 ms | 22.860 ms |
+| Detailed Live | 55.90 | 56.47 | 23.471 ms | 22.951 ms |
+| Detailed Frozen | 56.57 | 56.23 | 23.176 ms | 22.952 ms |
+| Compact | 56.63 | 56.73 | 22.961 ms | 23.016 ms |
+
+Both Detailed modes used the same 1280 × 480 image crop, quad extent, and
+pose. They shared the 2600 × 1024 swapchain allocation with Compact. The
+measured live modes uploaded about two images per second. Frozen kept
+submitting the same released image with zero uploads during its timing blocks.
+It still reduced cadence by 1.05% and 1.75% versus Off. The cadence effect of
+live updates changed direction between the two halves.
+
+The sampled Compact crop was 1718 × 158. Compact improved cadence by 1.31%
+and 0.47% versus Detailed Live and reduced cycle p99 by 0.905 ms and 0.449 ms.
+The remaining cadence differences versus Off were −0.93% and −0.87%, with
+p95 changes of +0.132 ms and +0.156 ms. The diagnostic establishes a smaller
+cost for Compact in this setup. The production build needs its own check.
+
 ## Local cost checks
 
 An extracted Linux C++ replay of the hidden FPS overlay path removed three
