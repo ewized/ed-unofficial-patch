@@ -120,6 +120,8 @@ void perfMonitorLocalGpuLine(char* buf, size_t bufLen);
 // submit spans include blocking and rendezvous, while producer spans include
 // queued GPU work and exclude the XR device. These are never compositor times.
 void perfMonitorNativeTimingLine(char* buf, size_t bufLen);
+// Actual XR submission rates/totals and Auto decision, never multiplier-derived FPS.
+void perfMonitorNativeFrameGenerationLine(char* buf, size_t bufLen);
 
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events

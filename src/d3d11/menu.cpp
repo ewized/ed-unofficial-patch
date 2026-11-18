@@ -48,8 +48,6 @@
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
 #include "menu_write.h"
-#include "beyond_vrs_control.h"
-#include "beyond_controls_policy.h"
 #include "menu_aim_prompt.h"    // F177: the aiming choice at start: the page's words, the trigger, the writes
 #include "menu_flat_rows.h"
 #include "menu_flat_status.h"
@@ -131,12 +129,12 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice, BeyondVrs };
+enum class EntryKind { Setting, Action, Heading, PluginSetting, Approval, AimChoice };
+static_assert(kNativeFgCompactMaxChars+1==sizeof(MenuLine{}.left), "native FG readout text budget matches the panel");
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
     int         def = -1;        // index into kMenuRows for Setting
-    int         beyondControl = -1;
     int         action = -1;     // index into g_actions for Action
     int         pluginSetting = -1; // index into g_pluginRows.rows() for PluginSetting
     uint32_t    candidateId = 0;    // plugin manager candidate id for Approval; looked up when drawn and when activated
@@ -1536,12 +1534,6 @@ bool menuIniWrite(const std::string& dotted, const std::string& value, std::stri
 // I/O, serialised, coalescing repeated changes to one key while a key is
 // held; and the frame thread drains the results, asking for the reload
 // that applies each landed write.
-struct BeyondVrsCompletion { uint32_t generation=0; beyond_vrs::Snapshot snapshot; bool poll=false; };
-beyond_vrs::Snapshot g_beyondVrs;
-uint32_t g_beyondVrsGeneration=0;
-bool g_beyondVrsPending=false;
-uint64_t g_beyondVrsPollMs=0;
-char g_beyondVrsStatus[160]="VRS file: waiting for a read; runtime state unverified";
 char g_nativeVrsStatus[5][160]={"Native VRS: waiting for status"};
 char g_nativeFgStatus[160]="Frame generation: waiting for status";
 
@@ -1550,7 +1542,7 @@ const char* nativeVrsFailureLabel(NativeVrsFailure failure) {
     case NativeVrsFailure::None:return "none";
     case NativeVrsFailure::Disabled:return "disabled";
     case NativeVrsFailure::InvalidRadii:return "invalid radii";
-    case NativeVrsFailure::MagicPresent:return "Magic coexistence refused";
+    case NativeVrsFailure::MagicPresent:return "external VRS coexistence refused";
     case NativeVrsFailure::ContextRefused:return "context refused";
     case NativeVrsFailure::ThreadRefused:return "thread refused";
     case NativeVrsFailure::FrameRefused:return "frame refused";
@@ -1577,7 +1569,6 @@ struct Writer {
     bool                    quit = false;
     std::vector<WriteJob>   queue;
     std::vector<WriteDone>  done;
-    std::vector<BeyondVrsCompletion> vrsDone;
 };
 // Like the panel worker, this may still be joinable when Windows terminates
 // the other threads before DLL detach. Do not register a thread destructor
@@ -1607,16 +1598,6 @@ void writerMain() {
             if (!later) last.push_back(jobs[i]);
         }
         for (const WriteJob& job : last) {
-            if(job.destination==WriteDestination::BeyondVrs||job.destination==WriteDestination::BeyondVrsPoll) {
-                beyond_vrs::Snapshot snap; std::string why;
-                const bool poll=job.destination==WriteDestination::BeyondVrsPoll;
-                const bool ok=poll ? (snap=beyond_vrs::read(), true)
-                    : beyond_vrs::writeField(unsigned(job.def),unsigned(std::strtoul(job.value.c_str(),nullptr,10)),snap,why);
-                std::lock_guard<std::mutex> lock(g_writer.m);
-                g_writer.vrsDone.push_back({job.gen,snap,poll});
-                g_writer.done.push_back({job,ok,why});
-                continue;
-            }
             WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
                 bool ok = false;
                 guarded("menu/write", [&] { ok = write.pairs.empty() ? menuIniWrite(write.dotted, write.value, err) : menuIniWritePairs(write.pairs, err); });
@@ -1639,22 +1620,18 @@ void enqueueWrite(const WriteJob& job) {
     g_writer.cv.notify_one();
 }
 
-// HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and the steps of a
-// quarter second are written together, and once more on release: about four config refreshes a second on the frame thread instead of about twelve. The writes below go to the same queue as every other change.
-void tickBeyondControls(uint64_t now) {
-    const auto& s=g_s;
-    if(!s.open||s.pages.empty()||strcmp(s.pages[s.page].name,"VRS / Frame generation"))return;
+// Refresh the native status notes only while VR's Performance page is visible
+// and due for a new raster. The snapshots do not open a provider or write a file.
+void refreshNativePerformanceStatus() {
+    const auto& s = g_s;
+    if (runtimeFlatProfile() || !s.open || s.pages.empty() || strcmp(s.pages[s.page].name, "Performance") ||
+        !dueMs(s.statusRefreshMs, kStatusRefreshMs)) return;
     const bool automatic=nativeFgAutoRequested();
     const auto fg=nativeFgAutoStatus();
     if(automatic)snprintf(g_nativeFgStatus,sizeof(g_nativeFgStatus),
         "Auto: %s; CPU %.2f ms, render GPU %.2f ms; %s",
         fg.multiplier==2?"2x":"native",fg.cpuMs,fg.gpuMs,fg_auto::reasonName(fg.reason));
     else snprintf(g_nativeFgStatus,sizeof(g_nativeFgStatus),"Frame generation follows the selected fixed mode");
-    if(!g_beyondVrsPending&&now-g_beyondVrsPollMs>=1000) {
-        g_beyondVrsPollMs=now;
-        WriteJob job;job.destination=WriteDestination::BeyondVrsPoll;job.dotted="beyond_vrs.poll";job.gen=g_beyondVrsGeneration;enqueueWrite(job);
-    }
-    snprintf(g_beyondVrsStatus,sizeof(g_beyondVrsStatus),"VRS file %s; Magic %s, shim %s; active unverified",g_beyondVrs.valid?"valid":"unavailable/invalid",g_beyondVrs.magicLoaded?"loaded":"not detected",g_beyondVrs.shimLoaded?"loaded":"not detected");
     const auto native=nativeVrsStatus();
     snprintf(g_nativeVrsStatus[4],sizeof(g_nativeVrsStatus[4]),
         "VRS full-rate core %.0f%% wide; transition %.0f%% wide",native.sharpRadius*200.f,native.transitionRadius*200.f);
@@ -1663,9 +1640,9 @@ void tickBeyondControls(uint64_t now) {
         "Native request %s; configured %s; driver %s; %s",requested?"on":"off",
         native.configured?"on":"off",native.driverReady?"ready":"not ready",native.refused?"refused":"not refused");
     snprintf(g_nativeVrsStatus[1],sizeof(g_nativeVrsStatus[1]),
-        "Driver state %s; acknowledged: full %s, coarse %s; Magic %s",
+        "Driver state %s; acknowledged: full %s, coarse %s",
         native.vendorStateKnown?"known":"unknown",native.fullRateAcknowledged?"yes":"no",
-        native.coarseAcknowledged?"yes":"no",native.magicAbsent?"absent":"absence unconfirmed");
+        native.coarseAcknowledged?"yes":"no");
     snprintf(g_nativeVrsStatus[2],sizeof(g_nativeVrsStatus[2]),
         "Native: %s; driver code %d; errors %llu",nativeVrsFailureLabel(native.failure),
         native.lastDriverStatus,static_cast<unsigned long long>(native.driverErrors));
@@ -1676,6 +1653,8 @@ void tickBeyondControls(uint64_t now) {
         static_cast<unsigned long long>(native.worldAccepted),static_cast<unsigned long long>(native.worldCalls));
 }
 
+// HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and the steps of a
+// quarter second are written together, and once more on release: about four config refreshes a second on the frame thread instead of about twelve. The writes below go to the same queue as every other change.
 void writeHeldEdit(void*, const WriteJob& job, EditFlush) { enqueueWrite(job); }
 // The burst reads as one change in the log and on the Status page: from what the file held before its first step to the value of its last.
 void mergeHeldEdit(WriteJob& pending, const WriteJob& latest) {
@@ -1935,39 +1914,16 @@ Page makeAimPromptPage() {
     return p;
 }
 
-// The VRS/FG page combines schema-backed settings, native runtime status and
-// the external shim's three file controls. It is built through the shared page table.
-void addVrsFrameGenerationSetting(Page& p, const char* section, const char* key) {
-    for (int i = 0; i < kRowDefCount; ++i) {
-        if (strcmp(kMenuRows[i].section, section) || strcmp(kMenuRows[i].key, key)) continue;
-        Entry e;
-        e.kind = EntryKind::Setting;
-        e.def = i;
-        p.entries.push_back(e);
-        return;
-    }
-}
-
-void addVrsFrameGenerationRows(Page& p) {
-    addVrsFrameGenerationSetting(p, "fix", "frame_generation");
+// These read-only notes follow the native settings on VR's Performance page.
+void addNativePerformanceStatus(Page& p) {
     Entry h;
     h.kind = EntryKind::Heading;
     h.note = true;
     h.text = g_nativeFgStatus;
     p.entries.push_back(h);
-    addVrsFrameGenerationSetting(p, "experimental", "eye_tracked_foveation");
-    addVrsFrameGenerationSetting(p, "experimental", "foveation_focus");
     for (auto& status : g_nativeVrsStatus) {
         h.text = status;
         p.entries.push_back(h);
-    }
-    h.text = g_beyondVrsStatus;
-    p.entries.push_back(h);
-    for (int i = 0; i < 3; ++i) {
-        Entry e;
-        e.kind = EntryKind::BeyondVrs;
-        e.beyondControl = i;
-        p.entries.push_back(e);
     }
 }
 
@@ -2034,8 +1990,12 @@ Page makePage(const MenuPageDef& d) {
     switch (d.source) {
         case MenuPageSource::Settings:
             addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
+            if (d.token && !strcmp(d.token, "performance") && d.tier == MenuPageTier::Fix) {
+                moveRowAfter(p,"experimental","eye_tracked_foveation","fix","frame_generation");
+                moveRowAfter(p,"experimental","foveation_focus","experimental","eye_tracked_foveation");
+                addNativePerformanceStatus(p);
+            }
             break;
-        case MenuPageSource::VrsFrameGeneration: addVrsFrameGenerationRows(p); break;
         case MenuPageSource::FlatPerformance: addFlatPerformanceRows(p); break;
         case MenuPageSource::FlatVisual: addFlatVisualRows(p); break;
         case MenuPageSource::FlatDebug: addFlatDebugRows(p); break;
@@ -2374,6 +2334,9 @@ void buildMonitor(MenuContent& c) {
         char line[240];
         perfMonitorNativeTimingLine(line, sizeof(line));
         addMonitorNote(c, line);
+        perfMonitorNativeFrameGenerationLine(line, sizeof(line));
+        addMonitorNote(c, line);
+        addMonitorNote(c, "Frame counts are app submissions over the last second; totals reset with the VR session.");
     }
     // One line under the gauges: the last drop and what EDVR was doing.
     {
@@ -2631,11 +2594,11 @@ bool buildReadoutContent(MenuContent& c, FpsOverlayMode mode, bool flat, float t
     }
     PerfReadout r;
     perfMonitorReadout(&r, 1.0f);
-    char l1[96], l2[96], note[200], l3[96];
+    char l1[128], l2[96], note[200], l3[160];
     formatDetailRates(r, l1, sizeof(l1));
     formatDetailTimes(r, l2, sizeof(l2));
     formatBridgeNote(r, note, sizeof(note));
-    snprintf(l3, sizeof(l3), "%.90s", note);
+    snprintf(l3, sizeof(l3), "%.*s", int(sizeof(l3)-1), note);
     const char* lines[3];
     int n = 0;
     lines[n++] = l1;
@@ -2834,17 +2797,6 @@ void buildContent(MenuContent& c) {
                 continue;
             }
             const bool hi = (i == p.highlight);
-            if(e.kind==EntryKind::BeyondVrs) {
-                const int field=e.beyondControl;
-                const char* labels[]={"World VRS (requested)","Use eye tracking","Invert gaze Y"};
-                strncpy(l.left,labels[field],sizeof(l.left)-1);
-                const unsigned value=beyond_vrs::field(g_beyondVrs.value,unsigned(field));
-                const char* word=field==0?beyond_controls::vrsMode(value):field==1?(value?"Off":"On"):(value?"On":"Off");
-                snprintf(l.right,sizeof(l.right),"%s%s",word,g_beyondVrsPending?" (saving)":"");
-                l.style=hi?kMenuRowHi:kMenuRow;
-                if(hi)snprintf(c.hint,sizeof(c.hint),"Saved file request only; Magic reads at most once/second when queried. Runtime application and gaze provider are unverified. No provider selector.");
-                continue;
-            }
             if (e.kind == EntryKind::AimChoice) {
                 strncpy(l.left, aimprompt::kRows[e.choice], sizeof(l.left) - 1);
                 l.style = hi ? kMenuRowHi : kMenuRow;
@@ -3063,7 +3015,7 @@ void buildContent(MenuContent& c) {
                 }
             }
             if(hi&&!strcmp(d.section,"experimental")&&!strcmp(d.key,"eye_tracked_foveation"))
-                snprintf(c.hint,sizeof(c.hint),"Requested native VRS; status below reports driver acknowledgements only. Magic coexistence is refused. Provider validity does not verify physical gaze; GPU application and performance are unverified.");
+                snprintf(c.hint,sizeof(c.hint),"Requested native VRS; Performance reports driver acknowledgements only. Provider validity does not verify physical gaze; GPU application and performance are unverified.");
             if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
@@ -3528,20 +3480,12 @@ void aimPromptWriteDone(const WriteDone& w);   // F177, below with the keys
 void drainWrites() {
     State& s = g_s;
     std::vector<WriteDone> done;
-    std::vector<BeyondVrsCompletion> vrsDone;
     {
         std::lock_guard<std::mutex> lock(g_writer.m);
         if (g_writer.done.empty()) return;
         done.swap(g_writer.done);
-        vrsDone.swap(g_writer.vrsDone);
     }
-    for(const auto& v:vrsDone)if(v.generation==g_beyondVrsGeneration){g_beyondVrs=v.snapshot;if(!v.poll)g_beyondVrsPending=false;g_s.contentDirty=true;}
     for (const WriteDone& w : done) {
-        if(w.job.destination==WriteDestination::BeyondVrs||w.job.destination==WriteDestination::BeyondVrsPoll){
-            if(w.job.gen!=g_beyondVrsGeneration)continue;
-            if(!w.ok)g_s.lastWrite=w.err;else if(w.job.destination==WriteDestination::BeyondVrs)g_s.lastWrite="VRS request saved; active state unverified";
-            g_s.contentDirty=true;continue;
-        }
         if (w.job.destination == WriteDestination::Pairs) {   // F177: the aiming choice, no row owns it
             aimPromptWriteDone(w);
             continue;
@@ -3554,21 +3498,6 @@ void drainWrites() {
                           [](const char* format, auto... args) { Log::get().note(format, args...); },
                           Config::get().iniName());
     }
-}
-
-void stepBeyondVrs(int field,int direction) {
-    if(field<0||field>2)return;
-    if(!g_beyondVrs.valid&&g_beyondVrs.error!=ERROR_FILE_NOT_FOUND&&g_beyondVrs.error!=ERROR_PATH_NOT_FOUND) {
-        g_s.lastWrite="VRS control file invalid/unavailable; no write";g_s.contentDirty=true;return;
-    }
-    const unsigned maximum=field==0?5u:2u;
-    const unsigned before=beyond_vrs::field(g_beyondVrs.value,unsigned(field));
-    const unsigned value=(before+(direction<0?maximum-1:1))%maximum;
-    beyond_vrs::setField(g_beyondVrs.value,unsigned(field),value);
-    g_beyondVrsPending=true;
-    WriteJob job;job.destination=WriteDestination::BeyondVrs;job.def=field;
-    job.dotted="beyond_vrs."+std::to_string(field);job.value=std::to_string(value);job.gen=++g_beyondVrsGeneration;
-    enqueueWrite(job);g_s.lastWrite="saving VRS request; active state unverified";g_s.contentDirty=true;
 }
 
 void stepRow(int defIndex, int dir, int mult) {
@@ -3736,7 +3665,6 @@ void activateEntry() {
         s.contentDirty = true;
         return;
     }
-    if(e.kind==EntryKind::BeyondVrs){stepBeyondVrs(e.beyondControl,+1);return;}
     if (e.kind == EntryKind::PluginSetting) {
         stepPluginSetting(e.pluginSetting, +1);
         return;
@@ -4452,8 +4380,6 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                 const auto& entry = p.entries[p.highlight];
                 if (entry.kind == EntryKind::Setting) {
                     stepRow(entry.def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
-                } else if(entry.kind==EntryKind::BeyondVrs) {
-                    stepBeyondVrs(entry.beyondControl,nav==kNavLeft?-1:+1);
                 } else if (entry.kind == EntryKind::PluginSetting) {
                     stepPluginSetting(entry.pluginSetting, nav == kNavLeft ? -1 : +1);
                 }
@@ -5599,7 +5525,7 @@ void menuTick(ID3D11Device* dev) {
         tickHeldEdit(now);   // a held numeric edit whose burst has ended is written now (menu_edit_hold.h); the worker's results are drained after it
         // Writes the worker finished since last frame.
         drainWrites();
-        tickBeyondControls(now);
+        refreshNativePerformanceStatus();
 
         // The Hotkeys page's upkeep. A hotkey rebound anywhere (this page, the ini, a rewrite of
         // the registry by the reload) changes which keys are EDVR's: the panel keys adopted from
@@ -6070,7 +5996,7 @@ void menuTick(ID3D11Device* dev) {
         if (world ? (s.open || s.alpha > 0.0f) : s.open) {
             {
                 Page& p = s.pages[s.page];
-                if ((p.status || !strcmp(p.name, "VRS / Frame generation")) && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
+                if ((p.status || (!runtimeFlatProfile() && !strcmp(p.name, "Performance"))) && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
                     s.statusRefreshMs = stampMs();
                     s.contentDirty = true;
                 }

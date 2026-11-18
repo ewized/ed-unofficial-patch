@@ -1,8 +1,14 @@
 #pragma once
 #include "../common/native_timing.h"
 #include "../common/native_present_trace.h"
+#include "../common/native_presentation.h"
+
+// Optional CPU-only publication, bound to the already-acquired timing context.
+// Existing timing tables/frames remain byte-identical for separately copied DLLs.
+extern "C" HRESULT WINAPI edvrPublishNativePresentation(void*,const EdvrNativePresentation*);
 
 namespace edvr {
+NativePresentationSnapshot nativePresentationSnapshot() noexcept;
 struct NativeTimingSnapshot {
     bool active=false, haveCpu=false, invalid=false;
     uint64_t generation=0, firstSequence=0, sequence=0, capturedAtMs=0;

@@ -2,7 +2,7 @@
 //
 // buildPages (menu.cpp) is one loop over kMenuPages, keeping the entries the running profile shows (and, for a developer page, only with developer mode on).
 // What a page's rows are is its `source`: the generated schema's rows of one tier and `menu` token (Settings), one of the flat profile's three row tables
-// (menu_flat_rows.h), the VRS/FG controls and runtime status, the hotkey rows, the plugin rows, the status and monitor panes, or the registered actions. The rows come from those sources and are
+// (menu_flat_rows.h), the hotkey rows, the plugin rows, the status and monitor panes, or the registered actions. The rows come from those sources and are
 // covered where they are generated; this table is only which pages exist, in what order, for whom.
 //
 // Pure: no windows.h, no D3D. tools\menu_policy_test pins the page lists it yields.
@@ -12,7 +12,7 @@
 
 namespace edvr {
 
-enum class MenuPageSource { Settings, VrsFrameGeneration, FlatPerformance, FlatVisual, FlatDebug, Hotkeys, Plugins, Monitor, Status, Actions };
+enum class MenuPageSource { Settings, FlatPerformance, FlatVisual, FlatDebug, Hotkeys, Plugins, Monitor, Status, Actions };
 enum class MenuPageTier { Fix, Advanced, Experimental };   // the generated schema's MenuTier, by name, so this header needs no schema
 enum class MenuPagePost { None, AimChoiceAfterLookToAim };  // a step run on the page's entries once they are built
 
@@ -34,7 +34,6 @@ inline constexpr MenuPageDef kMenuPages[] = {
     {kFlatTabNames[0], true, false, false, MenuPageSource::FlatPerformance, MenuPageTier::Fix, nullptr, false, MenuPagePost::None},
     {kFlatTabNames[1], true, false, false, MenuPageSource::FlatVisual, MenuPageTier::Fix, nullptr, false, MenuPagePost::None},
     {"Performance", false, true, false, MenuPageSource::Settings, MenuPageTier::Fix, "performance", false, MenuPagePost::None},
-    {"VRS / Frame generation", false, true, false, MenuPageSource::VrsFrameGeneration, MenuPageTier::Fix, nullptr, false, MenuPagePost::None},
     {"Fixes", false, true, false, MenuPageSource::Settings, MenuPageTier::Fix, "fixes", true, MenuPagePost::None},
     {"Visual", false, true, false, MenuPageSource::Settings, MenuPageTier::Fix, "visual", true, MenuPagePost::None},
     {"Mirror window", false, true, false, MenuPageSource::Settings, MenuPageTier::Fix, "desktop_window", false, MenuPagePost::None},

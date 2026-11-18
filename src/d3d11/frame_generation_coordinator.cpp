@@ -541,6 +541,14 @@ void nativeFgAutoObserve(const fg_auto::Sample& sample) noexcept {
     }
 }
 bool nativeFgRequested() noexcept {return requested.load(std::memory_order_relaxed) != 0;}
+bool nativeFgStatusSnapshot(EdvrFgStatus* out) noexcept {
+    if(!out)return false;
+    *out={sizeof(*out),EDVR_NATIVE_FRAME_GENERATION_VERSION_1};
+    out->requestedMultiplier=requested.load(std::memory_order_acquire);
+    out->state=out->requestedMultiplier?EDVR_FG_ARMING:EDVR_FG_OFF;
+    auto* c=current.load(std::memory_order_acquire);
+    return c&&!c->closed.load(std::memory_order_acquire)&&status(c,out)==S_OK;
+}
 HRESULT nativeFgAcquire(const EdvrFgRequest* request, EdvrFgTable* table) noexcept {
     if (!request || !table || request->size != sizeof(*request) || request->version != 1 || !request->gameDevice ||
         !request->generation || table->size != sizeof(*table) || table->version != 1) return E_INVALIDARG;

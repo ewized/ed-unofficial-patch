@@ -14,6 +14,9 @@ bool nativeFgAutoRequested() noexcept;
 void nativeFgAutoObserve(const fg_auto::Sample&) noexcept;
 fg_auto::Status nativeFgAutoStatus() noexcept;
 bool nativeFgRequested() noexcept;
+// Passive CPU snapshot for menu/monitor consumers; no resource creation or worker startup.
+// Returns false without a live context, retaining the configured request/state for a waiting UI.
+bool nativeFgStatusSnapshot(EdvrFgStatus*) noexcept;
 HRESULT nativeFgAcquire(const EdvrFgRequest*, EdvrFgTable*) noexcept;
 
 // These hooks are part of the established native temporal producer. OFF exits

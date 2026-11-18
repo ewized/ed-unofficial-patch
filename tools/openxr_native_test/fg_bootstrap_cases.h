@@ -33,6 +33,40 @@ namespace edvr::openxr::test {
 template<class Check> void runFgBootstrapCases(Check check) {
   using Microsoft::WRL::ComPtr;
   using namespace fgbootstrap_fixture;
+  {
+    launch_fixture::Fixture observed;auto& h=observed.host;
+    EndFrameInfo info;info.layers=true;info.shouldRender=true;
+    h.endFrameReturned(info); // The ordinary native successful-end seam.
+    h.frameWithheld=true;h.endFrameReturned(info);
+    info.background=true;h.endFrameReturned(info);
+    info.background=false;info.result=XR_ERROR_RUNTIME_FAILURE;h.endFrameReturned(info);
+    check(h.presentationCounts.sequence==4&&h.presentationCounts.nativeFrames==1&&
+      h.presentationCounts.repeatedFrames==1&&h.presentationCounts.backgroundFrames==1&&
+      h.presentationCounts.failedFrames==1&&!h.presentationCounts.generatedFrames,
+      "presentation: native observer separates native/replay/loading/failed stereo frames");
+    h.frameWithheld=false;h.fgEnabled=true;h.fgMultiplier=2;
+    observed.fake.shouldRender=true;
+    XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    layer.space=h.seated.frame().space;layer.viewCount=2;layer.views=views;
+    check(h.boundary.waitAndBegin()==XR_SUCCESS&&
+      h.fgEndPrepared(&layer,edvr::NativePresentationKind::Generated)==XR_SUCCESS&&
+      h.presentationCounts.generatedFrames==1&&observed.fake.endCalls==1,
+      "presentation: one actual successful generated xrEndFrame counts once, not once per eye");
+    observed.fake.frameTime+=10;observed.fake.shouldRender=false;
+    check(h.boundary.waitAndBegin()==XR_SUCCESS&&
+      h.fgEndPrepared(&layer,edvr::NativePresentationKind::Generated)==XR_SUCCESS&&
+      h.presentationCounts.generatedFrames==1&&h.presentationCounts.emptyFrames==1,
+      "presentation: shouldRender false cannot fabricate generated output");
+    observed.fake.frameTime+=10;observed.fake.shouldRender=true;observed.fake.endResult=XR_ERROR_RUNTIME_FAILURE;
+    check(h.boundary.waitAndBegin()==XR_SUCCESS&&
+      h.fgEndPrepared(&layer,edvr::NativePresentationKind::Generated)==XR_ERROR_RUNTIME_FAILURE&&
+      h.presentationCounts.generatedFrames==1&&h.presentationCounts.failedFrames==2&&observed.fake.endCalls==3,
+      "presentation: refused xrEndFrame increments failure only, not generated count");
+    check(h.timing.publishPresentation(h.presentationCounts)==S_FALSE,
+      "presentation: missing optional timing capability remains unavailable without disrupting XR");
+    h.fgEnabled=false;
+  }
   ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
   const auto create=systemD3D11CreateDevice();
   check(create&&SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context)),"FG bootstrap: WARP device");

@@ -1,5 +1,6 @@
 #include "../../src/common/native_menu.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/native_fg_readout.h"
 #include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
 #include "../../src/d3d11/menu_flat_layout.h"
@@ -711,6 +712,24 @@ int wmain(int argc, wchar_t** argv) {
         float referenceWidth = 0.f;
         check(edvr::menuPanelBuildOverlayContent(reference, readout, 1.1f, &referenceWidth),
               "overlay production content builder");
+        // Frame-generation counters must fit the actual production compact and
+        // detailed builders, including long session totals and Auto waiting.
+        edvr::NativeFgReadout fg;fg.visible=fg.automatic=true;fg.selectedMultiplier=2;
+        fg.measurement=edvr::NativeFgMeasureState::Counting;
+        fg.nativeFps=45;fg.generatedFps=45;fg.submittedFps=90;
+        fg.totals.available=fg.totals.fgEnabled=true;fg.totals.activeMultiplier=2;
+        fg.totals.generatedFrames=1234567890123456789ull;
+        char fgLine[160];edvr::formatNativeFgOverlay(fg,45,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
+        edvr::MenuContent fgContent{};
+        check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
+              "native FG compact readout with Auto mode and a long total fits the production panel");
+        fg.measurement=edvr::NativeFgMeasureState::Unavailable;fg.totals.fgEnabled=false;
+        edvr::formatNativeFgOverlay(fg,58.4,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
+        check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
+              "native FG unavailable/waiting readout keeps a visible compact panel");
+        edvr::formatNativeFgTotals(fg,fgLine,sizeof(fgLine));const char* fgLines[]={fgLine};
+        check(edvr::menuPanelBuildReadoutContent(fgContent,fgLines,1,42,0,1.1f,nullptr),
+              "native FG detailed mode and totals fit the production panel line");
         edvr::setMenuHeadLock(true, 9.f, -8.f);
         edvr::MenuGeometry pendingGeometry{};
         pendingGeometry.alpha = 1.f;

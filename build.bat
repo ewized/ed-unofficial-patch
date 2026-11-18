@@ -466,6 +466,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrPublishNativePresentation ^
     --extra-export edvrAcquireDesktopWindow ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
@@ -4081,17 +4082,6 @@ if not exist "%OBJ%\uivrsguard" mkdir "%OBJ%\uivrsguard"
 if errorlevel 1 ( echo [edvr] ERROR: UI VRS guard test build failed & exit /b 1 )
 "%OBJ%\uivrsguard\ui_vrs_guard_test.exe" --dry-run || exit /b 1
 "%OBJ%\uivrsguard\ui_vrs_guard_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_beyond_controls_test
-echo [edvr] === beyond_controls_test.exe ===
-if not exist "%OBJ%\beyondcontrols" mkdir "%OBJ%\beyondcontrols"
-%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
-    /Fo"%OBJ%\beyondcontrols\\" /Fe"%OBJ%\beyondcontrols\beyond_controls_test.exe" ^
-    "tools\beyond_controls_test\beyond_controls_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: Beyond controls test build failed & exit /b 1 )
-"%OBJ%\beyondcontrols\beyond_controls_test.exe" --dry-run || exit /b 1
-"%OBJ%\beyondcontrols\beyond_controls_test.exe" "%ROOT%" || exit /b 1
 exit /b 0
 
 :rig_native_gaze_test

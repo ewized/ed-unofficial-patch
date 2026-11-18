@@ -31,6 +31,20 @@
   void fgCancelCredit() {
     if(fgCredit){auto request=std::move(fgCredit);request->finish(false);}
   }
+  void notePresentation(edvr::NativePresentationKind kind) {
+    if(GetCurrentThreadId()!=ownerThread)return;
+    if(edvr::recordNativePresentation(presentationCounts,runtimeGeneration,kind,
+        fgEnabled.load(std::memory_order_acquire),fgMultiplier))
+      timing.publishPresentation(presentationCounts); // CPU-only optional capability
+  }
+  XrResult fgEndPrepared(const XrCompositionLayerProjection* layer,edvr::NativePresentationKind kind) {
+    const bool pixels=layer&&boundary.frame().shouldRender&&state.frameShouldRender()&&
+        !state.terminal()&&state.lifecycle()!=Lifecycle::Stopping;
+    const XrResult result=boundary.prepared(layer);
+    notePresentation(result!=XR_SUCCESS?edvr::NativePresentationKind::Failed:
+        pixels?kind:edvr::NativePresentationKind::Empty);
+    return result;
+  }
   void fgRunCredit(const std::shared_ptr<FgCreditRequest>& request,const RuntimeGate::Lease& operation) {
     if(!fgCreditLoan.run(gate,operation,runtimeGeneration,service.isOwner()&&GetCurrentThreadId()==ownerThread,
        [&]{request->run();}))request->finish(false);
@@ -235,7 +249,7 @@
     fgLifecycleReport(now,statusResult,status,requested,callerFresh);
     if(!requested) {
       if(fgEnabled.load(std::memory_order_acquire)&&!fgNativeOutstanding) {
-        if(state.frameOpen())boundary.prepared(nullptr);
+        if(state.frameOpen())fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
         fgDisable(3,operation);
       }
       if(!fgEnabled.load(std::memory_order_acquire))return false;
@@ -250,7 +264,7 @@
       nativeTracePrintf("native_fg_xr,enabled=1,multiplier=%u,single_owner=1,turbo=0,consumer_copies_all_phases=1\n",fgMultiplier);
     }
     if((status.configGeneration!=fgConfig||status.requestedMultiplier!=fgMultiplier)&&!fgNativeOutstanding) {
-      if(state.frameOpen())boundary.prepared(nullptr);
+      if(state.frameOpen())fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
       fgDisable(4,operation);return true;
     }
     fgBootstrap.sync(fgBootstrapEpoch(status));
@@ -287,7 +301,7 @@
         sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,tick.predictedDisplayTime);
       if(FAILED(polled))++fgRefused;
       if(!frameGeneration.healthy()) {
-        boundary.prepared(nullptr);publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"native_fg_copy_retirement");return true;
+        fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"native_fg_copy_retirement");return true;
       }
       imported=images.ready;
     }
@@ -330,7 +344,10 @@
       generated=false;newNative=fgDisplayedSequence!=fgFallbackSequence;
       if(pixels)fgDisplayedSequence=fgFallbackSequence;
     }
-    const XrResult ended=boundary.prepared(pixels?&layer:nullptr);
+    const auto kind=!pixels?edvr::NativePresentationKind::Empty:
+      generated?edvr::NativePresentationKind::Generated:
+      newNative?edvr::NativePresentationKind::Native:edvr::NativePresentationKind::Repeated;
+    const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind);
     if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_end");fgCancelCredit();return true;}
     if(hasUi)++fgUiPresented;
     if(!pixels)++fgEmpty;else if(generated)++fgGeneratedPresented;else if(newNative)++fgNativePresented;else ++fgRepeated;

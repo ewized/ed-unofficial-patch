@@ -296,6 +296,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint32_t fgMultiplier=0,fgAcceptedEyes=0;
   uint64_t fgTick=0,fgNextCredit=0,fgConfig=0,fgHistory=0,fgDisplayedSequence=0;
   uint64_t fgNativePresented=0,fgGeneratedPresented=0,fgRepeated=0,fgEmpty=0,fgRefused=0,fgCredits=0,fgLastLineMs=0;
+  EdvrNativePresentation presentationCounts{};
   fglifecycle::Reporter fgLifecycle;
   fgbootstrap::Bootstrap fgBootstrap;
   uint32_t fgLastDisableReason=0;
@@ -2141,7 +2142,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
       fgNativeOutstanding=false;fgAcceptedEyes=0;fgFallbackValid=false;fgDisplayedSequence=0;
       frameGeneration.invalidate(11);frameGeneration.images().ready=false;
-      if(state.frameOpen()&&boundary.prepared(nullptr)!=XR_SUCCESS)return false;
+      if(state.frameOpen()&&fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty)!=XR_SUCCESS)return false;
     }
     const auto cleared=boundary.clear();
     if(cleared!=XR_SUCCESS) {
@@ -2623,6 +2624,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
   // never submitted, has none of the eyes' work: its figures are zero and not the last scene frame's.
   void endFrameReturned(const EndFrameInfo& info) override {
+    // This observer runs once after actual ordinary/clear/loading xrEndFrame,
+    // before sceneFinished retires the withheld/replay decision.
+    const auto kind=info.result!=XR_SUCCESS?edvr::NativePresentationKind::Failed:
+      (!info.layers||state.lifecycle()==Lifecycle::Stopping)?edvr::NativePresentationKind::Empty:
+      info.background?edvr::NativePresentationKind::Background:
+      frameWithheld?edvr::NativePresentationKind::Repeated:edvr::NativePresentationKind::Native;
+    notePresentation(kind);
     const uint64_t nowMs=GetTickCount64();
     const double periodMs=double(info.periodNs)/1000000.0;
     const bool scene=info.layers&&!info.background;

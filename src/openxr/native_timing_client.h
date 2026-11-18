@@ -2,6 +2,7 @@
 
 #include "../common/native_timing.h"
 #include "../common/native_present_trace.h"
+#include "../common/native_presentation.h"
 #include <mutex>
 
 namespace edvr::openxr {
@@ -36,6 +37,8 @@ class NativeTimingClient final {
         reinterpret_cast<decltype(&edvrReadNativePresentTrace)>(trace) : nullptr;
     provider_ = provider;
     generation_ = generation;
+    const auto presentation=GetProcAddress(provider,"edvrPublishNativePresentation");
+    presentationPublish_=owned(provider,presentation)?reinterpret_cast<PublishPresentation>(presentation):nullptr;
     return S_OK;
   }
 
@@ -94,6 +97,11 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context ? table_.publishCpu(table_.context, &frame) : S_FALSE;
   }
+  // Observation only; an older graphics module simply lacks this capability.
+  HRESULT publishPresentation(const EdvrNativePresentation& value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context&&presentationPublish_?presentationPublish_(table_.context,&value):S_FALSE;
+  }
   bool gpuEnabled() {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context && table_.gpuEnabled(table_.context) == 1;
@@ -110,11 +118,13 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!table_.context) return S_FALSE;
     const auto result = table_.close(table_.context);
-    table_ = {}; presentTrace_ = nullptr; provider_ = nullptr; generation_ = 0;
+    table_ = {}; presentTrace_ = nullptr;presentationPublish_=nullptr; provider_ = nullptr; generation_ = 0;
     return result;
   }
 
  private:
+  using PublishPresentation=HRESULT(WINAPI*)(void*,const EdvrNativePresentation*);
+  PublishPresentation presentationPublish_=nullptr;
   template<class T> static bool owned(HMODULE provider, T address) {
     if (!address) return false;
     HMODULE implementation = nullptr;

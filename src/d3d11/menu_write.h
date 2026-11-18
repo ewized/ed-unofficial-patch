@@ -8,7 +8,7 @@
 namespace edvr {
 
 // Pairs: several dotted keys written in one replace of the file (F177: the aiming choice and the hide of its page), which no row owns.
-enum class WriteDestination : uint8_t { BuiltinRow, PluginSetting, AddonApproval, Pairs, BeyondVrs, BeyondVrsPoll };
+enum class WriteDestination : uint8_t { BuiltinRow, PluginSetting, AddonApproval, Pairs };
 
 struct WriteJob {
     WriteDestination destination = WriteDestination::BuiltinRow;

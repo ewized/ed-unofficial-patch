@@ -18,7 +18,7 @@
     `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
     (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
     since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
-  - Monitor page: no rows the compositor's frame timing filled (frame_flag v34).
+  - Native VRS is on Performance; Monitor and FPS readouts count actual native/generated XR submissions and Auto mode. Live VR validation remains pending.
   - Single-line overlay: fits its text, keeps its font size across OpenXR
     resolutions, shows application GPU/CPU timings. Full desktop gates
     passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
@@ -898,6 +898,35 @@ it was explaining (flown 2026-09-07).
 **Pads** (phase B): d-pad navigates and steps, A activates, B closes,
 bumpers change page, watched through `xinput_watch` and masked from the
 game through door 4.
+
+## Native VRS and frame-generation counters (2026-11-17)
+
+Native VR's Performance page places **Native eye-tracked VRS** and **VRS sharp
+region** beside **Frame generation**. The external Magic file controls and the
+separate VRS/Beyond page are removed. The native VRS configuration names remain
+`experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
+
+Monitor adds a **GENERATED** tile with generated FPS and the session total,
+and a **FRAME GENERATION** tile with the runtime mode and Auto decision.
+The compact and detailed FPS readouts show the same counters. For example,
+`90 submit fps (45 native + 45 gen) | Auto: 2x | gen total 145` describes
+observed app submissions, not a predicted multiplier or a headset benchmark.
+
+- **Native** counts new native stereo frames submitted successfully.
+- **Generated** counts generated stereo frames submitted successfully, once
+  per frame rather than once per eye or NGX batch.
+- **Repeat** counts reused native frames separately. Empty, background and
+  failed submissions do not contribute to these FPS figures.
+- Rates cover the most recent second of observations; totals last for the
+  VR session. Auto can show native cadence while previous generated frames
+  remain in the rolling window.
+- Missing, warming or stale counters are named explicitly. An older runtime
+  retains rendered FPS while generated-frame counts say unavailable.
+
+The optional `edvrPublishNativePresentation` capability preserves the existing
+native timing ABI. The XR owner publishes cumulative counters after actual
+`xrEndFrame` results; the graphics receiver validates ownership, generation
+and monotonic counts. The readouts do not claim physical compositor scanout.
 
 ## What it shows
 

@@ -84,6 +84,10 @@ four on a row the code does not read as a number, fails the build. A
 THE FLAT PANEL'S DEBUG TAB (2026-10-16) is `menu debug`: the flat profile's F8 panel has Performance (its settings) and Debug tabs (and, since 2026-10-22,
 a Visual one between them, below), and the Debug rows are the `menu debug` rows. A `menu debug` row may sit on an [advanced] key, but only one named in MENU_ADVANCED_EXCEPTIONS; any other [advanced] key with a menu token is still refused. VR's menu has no such page.
 
+THE NATIVE VRS PERFORMANCE ROWS keep their [experimental] persisted names. Only
+MENU_EXPERIMENTAL_PERFORMANCE keys may carry `menu performance` there; they are
+Fix-tier rows without a duplicate on the developer Experimental page.
+
 THE VISUAL PAGE (2026-10-22 flat, 2026-10-27 VR) is `menu visual`, in both menus. The flat profile's F8 panel has three tabs, Performance, Visual and Debug, in that
 order, and its Visual tab lists the rows of menu_flat_rows.h's kFlatVisualRows (Intro movie, Star glow), Fix tier, whatever page their token names. VR's menu has a
 Visual page too, built like Native on foot (Fix tier, the ini's own heading blocks, file order) from the rows whose token is `menu visual`: how the world looks, apart
@@ -195,6 +199,11 @@ MENU_ROW_SECTIONS = ('fix', 'visual', 'menu')
 # developer-tier rows. The flat profile's Debug tab (2026-10-16): two toggles every flat user may reach, labelled debug. Flat-only keys, so VR's
 # developer tier loses nothing by their having no row of their own there. Their page is `debug`, which only the flat panel builds.
 MENU_ADVANCED_EXCEPTIONS = ('advanced.flat_cpu_timing', 'advanced.flat_refusal_view')
+# These native VRS settings keep their persisted [experimental] names but are
+# normal Performance rows. Other experimental settings still belong to the developer page.
+MENU_EXPERIMENTAL_PERFORMANCE = ('experimental.eye_tracked_foveation',
+                                 'experimental.foveation_focus')
+MENU_PUBLIC_EXCEPTIONS = MENU_ADVANCED_EXCEPTIONS + MENU_EXPERIMENTAL_PERFORMANCE
 # Settings that were taken off every menu on purpose, and must stay off.
 #
 # The three field-of-view trims were [fix] rows on the Performance page until
@@ -1086,17 +1095,25 @@ def run(root, out, check):
     menuRows = []
     menuFix = [s for s in settings
                if s.menuPage and not s.hidden
-               and (s.section in MENU_ROW_SECTIONS or '%s.%s' % (s.section, s.key) in MENU_ADVANCED_EXCEPTIONS)
+               and (s.section in MENU_ROW_SECTIONS or '%s.%s' % (s.section, s.key) in MENU_PUBLIC_EXCEPTIONS)
                and '%s.%s' % (s.section, s.key) in code]
     for s in menuFix:
         menuRows.append((s, s.menuPage, 'Fix'))
     strayToken = [s for s in settings
                   if s.menuPage and s.section not in MENU_ROW_SECTIONS
-                  and '%s.%s' % (s.section, s.key) not in MENU_ADVANCED_EXCEPTIONS]
+                  and '%s.%s' % (s.section, s.key) not in MENU_PUBLIC_EXCEPTIONS]
     if strayToken:
         print('gen_settings_schema: ERROR: a `| menu` token belongs to a [%s] setting; '
               'elsewhere the section decides the page.' % ']/['.join(MENU_ROW_SECTIONS))
         for s in strayToken:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    misplacedVrs = [s for s in settings
+                    if '%s.%s' % (s.section, s.key) in MENU_EXPERIMENTAL_PERFORMANCE
+                    and s.menuPage and s.menuPage != 'performance']
+    if misplacedVrs:
+        print('gen_settings_schema: ERROR: the native VRS menu token must name performance.')
+        for s in misplacedVrs:
             print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
         return 1
     devSilent = []
@@ -1106,7 +1123,7 @@ def run(root, out, check):
         dotted = '%s.%s' % (s.section, s.key)
         if dotted not in code:
             continue
-        if dotted in MENU_ADVANCED_EXCEPTIONS:
+        if dotted in MENU_ADVANCED_EXCEPTIONS or (dotted in MENU_EXPERIMENTAL_PERFORMANCE and s.menuPage):
             continue   # a Fix-tier row above, not a second one in the developer tier
         if when_it_applies(s) is None:
             devSilent.append(s)
@@ -1884,6 +1901,37 @@ def self_test():
     said = case(name, debug_ini.replace('flat_cpu_timing', 'other_timing'),
                 {'a.cpp': debug_reads['a.cpp'].replace('flat_cpu_timing', 'other_timing')}, 1)
     expect_in(name, said, 'advanced.other_timing')
+
+    # Native VRS remains in the persisted experimental section while both settings
+    # appear once on Performance for everyone. This exception does not expose other probes.
+    vrs_ini = ('[fix]\n# A switch. Live.\n# ui: Alpha | live | menu performance\nalpha = on\n\n'
+               '[experimental]\n# Native VRS. Live.\n'
+               '# ui: Native eye-tracked VRS | live | menu performance\neye_tracked_foveation = 0\n\n'
+               '# The sharp region. Live.\n'
+               '# ui: VRS sharp region | choices normal, wide | live | menu performance\nfoveation_focus = normal\n\n'
+               '# A separate probe. Live.\nsome_probe = off\n')
+    vrs_reads = {'a.cpp': ('bool a = cfg.getBool("fix.alpha", true);\n'
+                          'bool v = cfg.getBool("experimental.eye_tracked_foveation", false);\n'
+                          'auto f = cfg.getString("experimental.foveation_focus", "normal");\n'
+                          'bool p = cfg.getBool("experimental.some_probe", false);\n')}
+    name = 'native-vrs-performance-rows'
+    wrote = case(name, vrs_ini, vrs_reads, 0)
+    for key in ('eye_tracked_foveation', 'foveation_focus'):
+        if wrote.count('"%s"' % key) != 1:
+            failures.append('%s: expected one normal row for %s' % (name, key))
+    if wrote.count('MenuTier::Fix, "performance"') != 3 or wrote.count('MenuTier::Experimental') != 1:
+        failures.append('%s: Alpha and both native VRS rows are normal Performance rows; only the unrelated probe is developer tier' % name)
+    expect_not_in(name, wrote, 'MenuTier::Experimental, "performance"')
+    name = 'native-vrs-token-refused-elsewhere'
+    said = case(name, vrs_ini.replace('eye_tracked_foveation', 'other_vrs'),
+                {'a.cpp': vrs_reads['a.cpp'].replace('eye_tracked_foveation', 'other_vrs')}, 1)
+    expect_in(name, said, 'experimental.other_vrs')
+    for key in ('eye_tracked_foveation', 'foveation_focus'):
+        name = 'native-vrs-wrong-page-' + key
+        changed = vrs_ini.replace('menu performance\n' + key, 'menu debug\n' + key)
+        said = case(name, changed, vrs_reads, 1)
+        expect_in(name, said, 'native VRS menu token must name performance')
+        expect_in(name, said, 'experimental.' + key)
 
     # The number-row tokens (2026-10-08) on a page of their own: `menu native_on_foot` puts a [fix] number row on that page for everyone (Fix tier), and
     # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). A `ui: hidden` key beside them gets a row in neither schema,

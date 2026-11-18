@@ -42,6 +42,51 @@ static EdvrNativeTimingTable acquire(ID3D11Device* d,uint64_t gen,Checks& c){
     EdvrNativeTimingRequest r{sizeof(r),EDVR_NATIVE_TIMING_VERSION_3,d,gen};EdvrNativeTimingTable t{sizeof(t),EDVR_NATIVE_TIMING_VERSION_3};
     c.check(edvrAcquireNativeTiming(&r,&t)==S_OK&&t.context,"acquire");return t;
 }
+static void presentationCases(const EdvrNativeTimingTable& table,Checks& c) {
+    using edvr::NativePresentationKind;
+    const auto cold=edvr::nativePresentationSnapshot();
+    c.check(cold.active&&!cold.available&&cold.generation==8&&cold.context,
+        "missing optional presentation publisher is unavailable, not zero fps");
+    EdvrNativePresentation value{};
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Native,false,0);
+    auto bad=value;bad.generation=9;
+    c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG&&
+        edvrPublishNativePresentation(nullptr,&value)==E_INVALIDARG,"presentation rejects foreign generation/context");
+    bad=value;bad.size--;
+    c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"presentation rejects wrong packet size");
+    bad=value;bad.version++;
+    c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"presentation rejects unknown protocol");
+    c.check(edvrPublishNativePresentation(table.context,&value)==S_OK,"actual native stereo submission publishes once");
+    const auto first=edvr::nativePresentationSnapshot();
+    c.check(first.available&&first.capturedAtMs&&first.sequence==1&&first.nativeFrames==1&&!first.generatedFrames,
+        "receiver records its own freshness and actual cumulative native count");
+    c.check(edvrPublishNativePresentation(table.context,&value)==E_INVALIDARG,"duplicate display ordinal cannot count again");
+    bad=value;bad.sequence=2;bad.nativeFrames=0;bad.emptyFrames=2;
+    c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"counters cannot regress within a session");
+    bad=value;bad.sequence=2;
+    c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"display ordinal requires a complete disjoint count partition");
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Generated,true,2);
+    HRESULT foreign=S_OK;
+    std::thread other([&]{foreign=edvrPublishNativePresentation(table.context,&value);});other.join();
+    c.check(foreign==E_INVALIDARG&&edvr::nativePresentationSnapshot().sequence==1,
+        "another thread cannot borrow the bound XR publisher");
+    c.check(edvrPublishNativePresentation(table.context,&value)==S_OK,"generated submission is actual, independent of multiplier");
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Repeated,true,2);
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Empty,true,2);
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Failed,true,2);
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Background,false,0);
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Native,false,0);
+    c.check(edvrPublishNativePresentation(table.context,&value)==S_OK,"cumulative publication retains intervening events");
+    const auto final=edvr::nativePresentationSnapshot();
+    c.check(final.sequence==7&&final.nativeFrames==2&&final.generatedFrames==1&&final.repeatedFrames==1&&
+        final.emptyFrames==1&&final.failedFrames==1&&final.backgroundFrames==1&&!final.fgEnabled&&!final.activeMultiplier,
+        "native/FG/native transitions preserve counts and never convert repeats/errors/empty into generated");
+    c.check(!edvr::recordNativePresentation(value,8,static_cast<NativePresentationKind>(99),false,0)&&value.sequence==7,
+        "unknown presentation classification is refused without mutation");
+    edvr::recordNativePresentation(value,9,NativePresentationKind::Native,false,0);
+    c.check(value.sequence==1&&value.nativeFrames==1&&!value.generatedFrames,
+        "a new runtime generation resets all cumulative counts");
+}
 int wmain(int argc,wchar_t** argv){
     if(argc!=2)return 2;if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_timing_test: dry-run (no WARP device)");return 0;}if(std::wcscmp(argv[1],L"--self-test"))return 2;
     SetErrorMode(3);
@@ -139,7 +184,10 @@ int wmain(int argc,wchar_t** argv){
     const auto stalePresent=edvr::nativeTimingPresentBegin(d.Get(),7000,123);
     uint64_t activeTokens[16]{};for(unsigned i=0;i<16;++i)activeTokens[i]=edvr::nativeTimingPresentBegin(d.Get(),8000+i,200+i);
     trace={sizeof(trace),EDVR_NATIVE_PRESENT_TRACE_VERSION_1};c.check(stalePresent&&activeTokens[14]&&!activeTokens[15]&&edvrReadNativePresentTrace(t2.context,8000,9000,&trace)==S_OK&&trace.overflow,"bounded active Present saturation is explicit loss");
+    presentationCases(t2,c);
     c.check(t2.close(t2.context)==S_OK,"new close");trace={sizeof(trace),EDVR_NATIVE_PRESENT_TRACE_VERSION_1,0,0,8};c.check(edvrReadNativePresentTrace(t2.context,1,2,&trace)==E_INVALIDARG,"Present trace rejects closed context");
+    c.check(!edvr::nativePresentationSnapshot().active&&!edvr::nativePresentationSnapshot().available,
+        "closed timing lease clears presentation telemetry");
     auto presentLease=acquire(d.Get(),81,c);EdvrNativePresentSpan staleSpan{7000,7001,7002,7003,7004,123,0,0,S_OK};edvr::nativeTimingNotePresent(d.Get(),stalePresent,staleSpan);trace={sizeof(trace),EDVR_NATIVE_PRESENT_TRACE_VERSION_1};c.check(edvrReadNativePresentTrace(presentLease.context,7000,7010,&trace)==S_OK&&!trace.totalObserved&&!trace.count&&!trace.overflow,"stale completion cannot enter reacquired lease");
     for(unsigned i=0;i<70;++i){const uint64_t base=1000+uint64_t(i)*10;EdvrNativePresentSpan span{base,base+1,base+2,base+3,base+4,i+1,0,0,S_OK};notePresent(d.Get(),span);}
     trace={sizeof(trace),EDVR_NATIVE_PRESENT_TRACE_VERSION_1,0,0,81};c.check(edvrReadNativePresentTrace(presentLease.context,100,1050,&trace)==S_OK&&trace.overflow,"valid overwritten maximum marks intersecting old range lost");
@@ -158,6 +206,10 @@ int wmain(int argc,wchar_t** argv){
     c.check(negativeSeen&&nanSeen,"rejected frames remain visible as invalid benchmark coverage");
     c.check(!edvr::nativeTimingReadCompletions(cursor,completed,256,dropped),"completion cursor never replays records");
     auto t3=acquire(d.Get(),9,c);
+    EdvrNativePresentation oldPresentation{sizeof(oldPresentation),EDVR_NATIVE_PRESENTATION_VERSION_1,8,1,1};
+    c.check(edvrPublishNativePresentation(t2.context,&oldPresentation)==E_INVALIDARG&&
+        !edvr::nativePresentationSnapshot().available&&edvr::nativePresentationSnapshot().generation==9,
+        "old presentation cannot contaminate a reacquired session");
     for(unsigned i=0;i<270;++i) {
         auto sequence=waitValid(t3,c);auto value=frame(sequence);
         value.inputWidth[0]=1234;value.inputHeight[0]=567;

@@ -49,6 +49,7 @@ struct Context {
     unsigned applicationSegments = 0;
     bool applicationOpen = false, applicationValid = true;
     bool completionQueued = false;
+    DWORD presentationThread = 0;
 };
 
 Context pool[kCapacity];
@@ -56,6 +57,7 @@ unsigned used = 0;
 Context* current = nullptr;
 std::mutex lifetime;
 edvr::NativeTimingSnapshot snapshot;
+edvr::NativePresentationSnapshot presentation;
 constexpr unsigned kCompletionCapacity = 256;
 struct Completion { uint64_t ordinal = 0; edvr::NativeTimingSnapshot value{}; };
 std::array<Completion,kCompletionCapacity> completions{};
@@ -468,6 +470,7 @@ HRESULT WINAPI close(void* p) {
         c->published = false;
         if (current == c) { current = nullptr; resetPresentHistory(); edvr::mapWaitArm(false); }
         snapshot = {};
+        presentation = {};
     }
     // The lock is down before anything else runs: the observer writes log lines.
     if (edvr::g_nativeTimingCloseObserver) edvr::g_nativeTimingCloseObserver();
@@ -476,6 +479,10 @@ HRESULT WINAPI close(void* p) {
 }
 
 namespace edvr {
+NativePresentationSnapshot nativePresentationSnapshot() noexcept {
+    std::lock_guard<std::mutex> lock(lifetime);
+    return presentation;
+}
 NativeTimingSnapshot nativeTimingSnapshot() noexcept {
     std::lock_guard<std::mutex> lock(lifetime);
     return snapshot;
@@ -607,8 +614,40 @@ extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*
     edvr::mapWaitArm(true);
     resetPresentHistory();
     snapshot = {}; snapshot.active = true; snapshot.generation = c.generation;
+    presentation = {};presentation.active=true;presentation.generation=c.generation;
+    presentation.context=reinterpret_cast<uintptr_t>(&c);
     table->context = &c; table->waitBegin = waitBegin; table->waitEnd = waitEnd;
     table->gpuEye = gpuEye; table->publishCpu = publishCpu; table->invalidate = invalidate; table->close = close;
     table->gpuEnabled = gpuEnabled; table->publishDeviceGpu = publishDeviceGpu;
+    return S_OK;
+}
+
+extern "C" HRESULT WINAPI edvrPublishNativePresentation(void* context,const EdvrNativePresentation* value) {
+    std::lock_guard<std::mutex> lock(lifetime);
+    Context* c=identify(context);
+    if(!c||!c->active||c!=current||!value||value->size!=sizeof(*value)||
+       value->version!=EDVR_NATIVE_PRESENTATION_VERSION_1||value->generation!=c->generation||
+       !value->sequence||value->sequence<=presentation.sequence||value->fgEnabled>1||
+       (value->activeMultiplier!=0&&value->activeMultiplier!=2&&value->activeMultiplier!=4)||
+       (!value->fgEnabled&&value->activeMultiplier)||
+       (c->presentationThread&&c->presentationThread!=GetCurrentThreadId()))return E_INVALIDARG;
+    const uint64_t counts[]={value->nativeFrames,value->generatedFrames,value->repeatedFrames,
+        value->emptyFrames,value->failedFrames,value->backgroundFrames};
+    const uint64_t previous[]={presentation.nativeFrames,presentation.generatedFrames,presentation.repeatedFrames,
+        presentation.emptyFrames,presentation.failedFrames,presentation.backgroundFrames};
+    uint64_t total=0;
+    for(unsigned i=0;i<6;++i){
+        if(counts[i]<previous[i]||counts[i]>value->sequence-total)return E_INVALIDARG;
+        total+=counts[i];
+    }
+    if(total!=value->sequence)return E_INVALIDARG;
+    c->presentationThread=GetCurrentThreadId();
+    presentation.active=presentation.available=true;presentation.generation=c->generation;
+    presentation.context=reinterpret_cast<uintptr_t>(c);presentation.capturedAtMs=nowMs();
+    presentation.sequence=value->sequence;
+    presentation.nativeFrames=value->nativeFrames;presentation.generatedFrames=value->generatedFrames;
+    presentation.repeatedFrames=value->repeatedFrames;presentation.emptyFrames=value->emptyFrames;
+    presentation.failedFrames=value->failedFrames;presentation.backgroundFrames=value->backgroundFrames;
+    presentation.fgEnabled=value->fgEnabled!=0;presentation.activeMultiplier=value->activeMultiplier;
     return S_OK;
 }

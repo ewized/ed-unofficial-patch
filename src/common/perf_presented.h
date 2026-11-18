@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include "perf_math.h"
+#include "native_fg_readout.h"
 
 namespace edvr {
 
@@ -146,6 +147,7 @@ class PresentedRing {
 
 // ---- One reading, and the words that print it --------------------------------------------------------------------------------------------------------
 struct PerfReadout {
+  NativeFgReadout nativeFg{}; // Native XR submission rates, independent of flat bridge scanout counters.
   bool haveRendered = false;
   float renderedFps = 0.0f, renderedMs = 0.0f, renderedLowFps = 0.0f, renderedLowMs = 0.0f;
   bool haveCpu = false;
@@ -167,6 +169,7 @@ inline bool readoutHasBridge(const PerfReadout& r) { return r.presented != Prese
 // An unavailable count says so in place of the number ("render 58 fps   shown n/a   cpu 9.1 ms"); a count not measured yet is "--".
 inline bool formatCompactLine(const PerfReadout& r, char* buf, size_t len) {
   if (!buf || !len) return false;
+  if (r.nativeFg.visible) { formatNativeFgCompact(r.nativeFg, buf, len, r.haveRendered ? r.renderedFps : -1.); return true; }
   if (!readoutHasBridge(r)) return false;
   if (!r.haveRendered) {
     std::snprintf(buf, len, "measuring");
@@ -184,11 +187,19 @@ inline bool formatCompactLine(const PerfReadout& r, char* buf, size_t len) {
   return true;
 }
 
+// Native VR uses actual XR submission rates plus generated totals/mode; a missing optional
+// runtime capability keeps the known rendered rate and labels generation unavailable.
 // The detailed card's two lines (menu.fps_overlay = detailed), the same in VR and flat.
 //   line 1: the rates, "render 58.4 / shown 116.8 fps", "58.4 fps" without a bridge, "render 58.4 fps   shown n/a" when the count cannot be had
 //   line 2: "17.1 ms   worst 52 fps   cpu 9.1 ms   drops 2" (cpu only when known)
 inline void formatDetailRates(const PerfReadout& r, char* buf, size_t len) {
   if (!buf || !len) return;
+  if (r.nativeFg.visible) {
+    if (r.haveRendered && r.nativeFg.measurement != NativeFgMeasureState::Counting)
+      std::snprintf(buf, len, "render %.1f fps | gen %s", r.renderedFps, nativeFgMeasureWord(r.nativeFg.measurement));
+    else formatNativeFgRates(r.nativeFg, buf, len);
+    return;
+  }
   if (!r.haveRendered) {
     std::snprintf(buf, len, "measuring");
   } else if (!readoutHasBridge(r)) {
@@ -209,7 +220,7 @@ inline void formatDetailTimes(const PerfReadout& r, char* buf, size_t len) {
   }
   char cpu[32] = "";
   if (r.haveCpu) std::snprintf(cpu, sizeof(cpu), "   cpu %.1f ms", r.cpuMs);
-  std::snprintf(buf, len, "%.1f ms   worst %.0f fps%s   drops %d", r.renderedMs, r.renderedLowFps, cpu, r.drops);
+  std::snprintf(buf, len, "%s%.1f ms   worst %.0f fps%s   drops %d", r.nativeFg.visible ? "render " : "", r.renderedMs, r.renderedLowFps, cpu, r.drops);
 }
 
 // The tiles, handed one at a time to `tile(caption, value, sub)`: the rendered rate, its frame time and 1% low, then -- when a bridge exists this session --
@@ -262,6 +273,7 @@ inline void emitRateTiles(const PerfReadout& r, Tile&& tile) {
 // without a bridge.
 inline void formatBridgeNote(const PerfReadout& r, char* buf, size_t len) {
   if (!buf || !len) return;
+  if (r.nativeFg.visible) { formatNativeFgTotals(r.nativeFg, buf, len); return; }
   buf[0] = 0;
   if (!readoutHasBridge(r)) return;
   if (r.fgStopped) std::snprintf(buf, len, "FG stopped: %s", r.stopped[0] ? r.stopped : "unknown reason");
