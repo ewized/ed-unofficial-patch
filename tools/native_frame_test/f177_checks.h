@@ -28,7 +28,7 @@ inline void run177(Check&& check) {
     char msg[512];
 
     // ---- 1. the page's words (F188: a welcome in front of the choice) -----------------------------------------------------------------------------------------------------------------------------
-    static_assert(ap::kLineChars + 1 == sizeof(edvr::MenuLine::left), "the line holds what MenuLine.left holds");
+    static_assert(ap::kLineChars + 1 <= sizeof(edvr::MenuLine::left), "MenuLine.left holds the complete prompt line and terminator");
     static_assert(ap::kPageLinesMax == edvr::kMenuMaxLines, "the page limit is the raster's");
     check(ap::kNoteCount == 13 && ap::kPageLines == 1 + 13 + 3 && ap::kPageLines == 17 && ap::kPageLines <= ap::kPageLinesMax,
           "F188: the page is the heading, thirteen lines (the last blank, between the words and the rows) and three rows (17), inside the 18 lines one raster holds");

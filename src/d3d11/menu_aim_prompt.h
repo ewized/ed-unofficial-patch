@@ -26,7 +26,7 @@ namespace aimprompt {
 constexpr const char* kPageName = "Aiming";
 constexpr const char* kHeading = "Welcome to native VR on foot";
 
-// The page's words, one line each (a blank string is a blank line). Indented lines keep their two leading spaces. A line holds at most kLineChars characters (MenuLine.left is 96 bytes).
+// The page's words, one line each (a blank string is a blank line). Indented lines keep their two leading spaces. Prompt wording stays within kLineChars characters; MenuLine.left must also hold the terminator.
 // The last line is blank: it keeps the choices apart from the words above them.
 constexpr const char* kNotes[] = {
     "On foot you are your commander: your body, hands and weapon, all in VR around you.",
@@ -49,7 +49,7 @@ enum Choice : int { kMouseAim = 0, kLookToAim = 1, kLater = 2, kChoiceCount = 3 
 constexpr const char* kRows[kChoiceCount] = {"Use mouse/controller aim", "Use look to aim", "Ask me next time"};
 constexpr const char* kFooter = "Up/Down to choose, Enter or UI Select to confirm. Esc asks next time.";
 
-constexpr int kLineChars = 95;      // MenuLine.left holds 95 characters and the terminator
+constexpr int kLineChars = 95;      // prompt wording budget, excluding the terminator
 constexpr int kPageLinesMax = 32;   // kMenuMaxLines: what one raster holds
 constexpr int kPageLines = 1 + kNoteCount + kChoiceCount;   // the heading, the notes, the three rows
 
