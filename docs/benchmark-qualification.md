@@ -3,13 +3,13 @@
 ## Status
 
 - **Purpose:** qualify captured EDVR benchmark rows without confusing collection, feature activity and physical display delivery.
-- **Inputs:** normalized records from the acquisition parser, its qualification, exact raw graphics/OpenXR logs, and a live capture receipt.
+- **Inputs:** normalized records from the acquisition parser, its qualification, the exact supplied graphics/OpenXR parser-stream bytes, and a live capture receipt.
 - **Scope:** read-only validation and optional creation of a fresh result file. This does not launch the game or change its settings.
 - **Limit:** submission counts describe application `xrEndFrame` delivery; they do not establish physical scanout or successful hardware frame generation.
 
 Run `python tools/edvr_benchmark.py --self-test` for the regression fixtures. The same gate runs in `build.bat`.
 
-The controller calls `qualify_capture` with `run`, `row`, `records`, `qualification`, `receipt`, `sources` and `collection_status`. The tool keeps wire parsing in the existing acquisition parser. A receipt binds before/after PID, process creation ticks, image and Windows session to an owned capture session, full source commit, configuration SHA-256 and exact raw source hashes/lengths. Acquire those live identities around the capture; copying an old receipt is not a fresh observation. Hashes bind data, not trust in an arbitrary producer.
+The controller calls `qualify_capture` with `run`, `row`, `records`, `qualification`, `receipt`, `sources` and `collection_status`. The tool keeps wire parsing in the existing acquisition parser. A receipt binds before/after PID, process creation ticks, image and Windows session to an owned capture session, full source commit, configuration SHA-256 and exact raw source hashes/lengths. Acquire those live identities around the capture; copying an old receipt is not a fresh observation. Hashes bind data, not trust in an arbitrary producer. When the sanctioned reader stitches rotated logs, retain its logical UTF-8 byte streams as parser sources and export the original closed on-disk segments separately with their own hashes. These are distinct source populations and their hashes can differ.
 
 For file-based use, put those arguments except `sources` in a capture JSON object and pass `--input capture.json --gfx graphics.log --openxr openxr.log`. Add `--output result.json` to create a new file; an existing output is refused. `--dry-run` prints the qualified result and creates nothing, including when `--output` is supplied.
 
