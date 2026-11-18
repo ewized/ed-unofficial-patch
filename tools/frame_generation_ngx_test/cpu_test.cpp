@@ -142,8 +142,11 @@ int main(){
 #ifdef EDVR_HAVE_NGX
     coupledInputRing();
 #endif
-    check(generatedCount(2)==1&&generatedCount(4)==3&&!generatedCount(3)&&!generatedCount(0),"exact 2x/4x only");
+    check(generatedCount(2)==1&&generatedCount(3)==2&&generatedCount(4)==3&&
+        !generatedCount(0)&&!generatedCount(1)&&!generatedCount(5),"2x to 4x request one to three generated frames");
     check(supported(2,true,false,1)&&!supported(4,true,false,1)&&supported(4,true,false,3),"capability limits have no silent downgrade");
+    check(!supported(3,true,false,1)&&supported(3,true,false,2)&&!supported(4,true,false,2),
+        "3x requires capacity for two generated frames and never degrades to 2x");
     check(!supported(2,false,false,3)&&!supported(4,true,true,3),"unavailable and old driver refuse");
     check(!completed(UINT64_MAX,1)&&!completed(0,1)&&completed(7,7),"device-removed sentinel is not completion");
     check(!reusable(6,7,1)&&!reusable(7,7,2)&&reusable(7,7,1),"GPU and consumer leases both gate reuse");
@@ -166,11 +169,16 @@ int main(){
     check(p.floats[NVSDK_NGX_DLSSG_Parameter_JitterOffsetX]==.125f&&p.floats[NVSDK_NGX_DLSSG_Parameter_MvecScaleX]==-2.f,"jitter and signed motion scale preserved");
     check(p.pointers[NVSDK_NGX_DLSSG_Parameter_Backbuffer]==reinterpret_cast<void*>(1)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_Depth]==reinterpret_cast<void*>(2)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_MVecs]==reinterpret_cast<void*>(3),"paired color depth motion bound");
     check(p.pointers[NVSDK_NGX_DLSSG_Parameter_OutputInterpolated]==reinterpret_cast<void*>(4)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_OutputDisableInterpolation]==reinterpret_cast<void*>(5),"output and suppression buffer both bound");
+    for(unsigned index=1;index<=2;++index){
+        check(frameGenerationNgxTestEvaluation(3,index,&p,&storage),"3x indexed evaluation succeeds");
+        check(p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameCount]==2&&p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameIndex]==index,
+            "3x writes two generated frames and the exact SDK phase index");
+    }
     for(unsigned index=1;index<=3;++index){
         check(frameGenerationNgxTestEvaluation(4,index,&p,&storage),"4x indexed evaluation succeeds");
         check(p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameCount]==3&&p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameIndex]==index,"actual SDK adapter count3 indexed1..3");
     }
-    const auto before=evaluations;check(!frameGenerationNgxTestEvaluation(4,0,&p,&storage)&&!frameGenerationNgxTestEvaluation(4,4,&p,&storage)&&!frameGenerationNgxTestEvaluation(3,1,&p,&storage)&&evaluations==before,"malformed modes and indices never evaluate");
+    const auto before=evaluations;check(!frameGenerationNgxTestEvaluation(4,0,&p,&storage)&&!frameGenerationNgxTestEvaluation(4,4,&p,&storage)&&!frameGenerationNgxTestEvaluation(3,3,&p,&storage)&&!frameGenerationNgxTestEvaluation(5,1,&p,&storage)&&evaluations==before,"malformed modes and indices never evaluate");
     evaluationResult=fail;check(!frameGenerationNgxTestEvaluation(2,1,&p,&storage),"NGX failure never reports evaluation success");
     check(uint32_t(NVSDK_NGX_Result_FAIL_PlatformError)==0xbad00002&&uint32_t(NVSDK_NGX_Result_FAIL_FeatureNotSupported)==0xbad00001,"PlatformError is distinct from unsupported hardware");
     initFixture=true;fixtureParameters=&p;scratchResult=NVSDK_NGX_Result_FAIL_PlatformError;scratchSize=0;scratchCalls=createCalls=0;

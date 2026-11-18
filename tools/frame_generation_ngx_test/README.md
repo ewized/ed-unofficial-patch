@@ -19,7 +19,7 @@ a successful zero scratch result.
 `build.cmd` compiles/runs that fixture, compiles `probe.exe` against the SDK,
 and runs only dry paths for both creation methods. The probe performs no DXGI/device/NGX work
 unless explicitly given `--run`. It has not been run with `--run` by this work.
-Real probe arguments require a multiplier of exactly 2 or 4, absolute
+Real probe arguments require a multiplier of exactly 2, 3 or 4, absolute
 `--feature-dir` and `--data-dir`, with optional `--width` and `--height`.
 `--guide-width`/`--guide-height` independently select paired depth/MV dimensions;
 omitting them uses the color dimensions. The explicit `--official-fg-helper`

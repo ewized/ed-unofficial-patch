@@ -65,12 +65,14 @@ static void presentationCases(const EdvrNativeTimingTable& table,Checks& c) {
     c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"counters cannot regress within a session");
     bad=value;bad.sequence=2;
     c.check(edvrPublishNativePresentation(table.context,&bad)==E_INVALIDARG,"display ordinal requires a complete disjoint count partition");
-    edvr::recordNativePresentation(value,8,NativePresentationKind::Generated,true,2);
+    edvr::recordNativePresentation(value,8,NativePresentationKind::Generated,true,3);
     HRESULT foreign=S_OK;
     std::thread other([&]{foreign=edvrPublishNativePresentation(table.context,&value);});other.join();
     c.check(foreign==E_INVALIDARG&&edvr::nativePresentationSnapshot().sequence==1,
         "another thread cannot borrow the bound XR publisher");
-    c.check(edvrPublishNativePresentation(table.context,&value)==S_OK,"generated submission is actual, independent of multiplier");
+    c.check(edvrPublishNativePresentation(table.context,&value)==S_OK,"3x publisher accepts the first actual generated submission");
+    c.check(edvr::nativePresentationSnapshot().activeMultiplier==3&&edvr::nativePresentationSnapshot().generatedFrames==1,
+        "3x mode reports one delivered phase until a second really arrives");
     edvr::recordNativePresentation(value,8,NativePresentationKind::Repeated,true,2);
     edvr::recordNativePresentation(value,8,NativePresentationKind::Empty,true,2);
     edvr::recordNativePresentation(value,8,NativePresentationKind::Failed,true,2);

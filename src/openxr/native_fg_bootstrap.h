@@ -21,7 +21,7 @@ public:
   const Epoch& epoch() const {return epoch_;}
   bool observe(const EdvrFgBatch& batch,bool importedAndUsable) {
     if(!refreshing()||!importedAndUsable||!batch.generatedCount||
-       (batch.multiplier!=2&&batch.multiplier!=4)||
+       !nativeFgFixedMultiplier(batch.multiplier)||
        batch.generatedCount!=batch.multiplier-1||batch.generation!=epoch_.generation||
        batch.configGeneration!=epoch_.config||batch.referenceGeneration!=epoch_.reference||
        batch.historyGeneration!=epoch_.history)return false;

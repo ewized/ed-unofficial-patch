@@ -85,7 +85,7 @@ inline NativeFgModeSelection nativeFgModeSelection(const NativeFgReadout& r) noe
     if(r.failed)return {NativeFgModeKind::Failed};
     if(r.backendUnavailable)return {NativeFgModeKind::Unavailable};
     const bool fresh=r.measurement==NativeFgMeasureState::Counting||r.measurement==NativeFgMeasureState::Measuring;
-    if(fresh&&r.totals.fgEnabled&&(r.totals.activeMultiplier==2||r.totals.activeMultiplier==4))
+    if(fresh&&r.totals.fgEnabled&&nativeFgFixedMultiplier(r.totals.activeMultiplier))
         return {NativeFgModeKind::Active,r.totals.activeMultiplier};
     if(r.selectedMultiplier)return {NativeFgModeKind::Waiting,r.selectedMultiplier};
     return {NativeFgModeKind::Native};

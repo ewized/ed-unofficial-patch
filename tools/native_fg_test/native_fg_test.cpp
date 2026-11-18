@@ -82,10 +82,10 @@ void lifecycle() {
   check(churn.observe(1,true,key).emit,"clock reversal cannot strand reporting");
 }
 void schedule() {
-  for(unsigned multiplier:{2u,4u}) {
+  for(unsigned multiplier:{2u,3u,4u}) {
     uint64_t next=0;unsigned credits=0;
     for(uint64_t tick=1;tick<=360;++tick)if(tick>=next){++credits;next=fgschedule::nextCredit(tick,multiplier);}
-    check(credits==360/multiplier,"native credits have exact x2/x4 ratio to independent XR ticks");
+    check(credits==360/multiplier,"native credits follow the selected ratio to independent XR ticks");
     EdvrFgBatch b{};b.multiplier=multiplier;b.generatedCount=multiplier-1;b.previousSequence=10;b.currentSequence=11;
     check(fgschedule::firstPhase(b,10)==1,"matched endpoint arms earliest generated phase");
     check(fgschedule::firstPhase(b,11)==0,"already displayed endpoint never followed by its interpolations");
@@ -109,6 +109,9 @@ void schedule() {
   check(first.pose.position.x==a.position[0]&&last.pose.position.x==b.position[0],"native endpoint positions preserved");
   EdvrFgBatch times{};times.multiplier=4;times.previousPoseDisplayTime=100;times.currentPoseDisplayTime=140;
   check(fgschedule::phaseTime(times,1)==110&&fgschedule::phaseTime(times,3)==130&&fgschedule::phaseTime(times,0)==140,"source-time convention preserves endpoints");
+  times.multiplier=3;times.currentPoseDisplayTime=130;
+  check(fgschedule::phaseTime(times,1)==110&&fgschedule::phaseTime(times,2)==120&&fgschedule::phaseTime(times,0)==130,
+    "3x schedules the first and second generated phases at one-third and two-thirds");
 }
 void credits() {
   OwnerService owner;std::atomic<unsigned> ticks{0};std::atomic<bool> ownerThread{false};

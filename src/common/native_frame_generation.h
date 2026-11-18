@@ -1,4 +1,5 @@
 #pragma once
+#include "native_fg_multiplier.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <stdint.h>
@@ -36,7 +37,7 @@ enum EdvrFgState : uint32_t {
 };
 struct EdvrFgStatus {
   uint32_t size, version;
-  uint32_t requestedMultiplier, activeMultiplier; // exactly 0,2,4
+  uint32_t requestedMultiplier, activeMultiplier; // exactly 0, 2, 3 or 4
   uint32_t state, lastFailure;
   uint64_t generation, configGeneration, historyGeneration;
   uint64_t sourcePairs, generatedPairs, suppressedPairs, refusedPairs, busyPairs;

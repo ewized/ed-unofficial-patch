@@ -628,7 +628,7 @@ extern "C" HRESULT WINAPI edvrPublishNativePresentation(void* context,const Edvr
     if(!c||!c->active||c!=current||!value||value->size!=sizeof(*value)||
        value->version!=EDVR_NATIVE_PRESENTATION_VERSION_1||value->generation!=c->generation||
        !value->sequence||value->sequence<=presentation.sequence||value->fgEnabled>1||
-       (value->activeMultiplier!=0&&value->activeMultiplier!=2&&value->activeMultiplier!=4)||
+       (value->activeMultiplier!=0&&!edvr::nativeFgFixedMultiplier(value->activeMultiplier))||
        (!value->fgEnabled&&value->activeMultiplier)||
        (c->presentationThread&&c->presentationThread!=GetCurrentThreadId()))return E_INVALIDARG;
     const uint64_t counts[]={value->nativeFrames,value->generatedFrames,value->repeatedFrames,

@@ -485,7 +485,7 @@ HRESULT WINAPI close(void* pointer) {
 
 namespace {
 void setEffectiveMultiplier(uint32_t multiplier,bool userConfiguration) noexcept {
-    if (multiplier != 2 && multiplier != 4) multiplier = 0;
+    if (!nativeFgFixedMultiplier(multiplier)) multiplier = 0;
     const bool changed = requested.exchange(multiplier, std::memory_order_acq_rel) != multiplier;
     if (userConfiguration) ++configuration;
     if (auto* c = current.load(std::memory_order_acquire)) {
@@ -502,7 +502,7 @@ void setEffectiveMultiplier(uint32_t multiplier,bool userConfiguration) noexcept
 void nativeFgSetRequestedMultiplier(uint32_t multiplier) noexcept {
     std::lock_guard<std::mutex> lock(autoMutex);
     const bool wasAutomatic=automatic.exchange(false,std::memory_order_acq_rel);
-    const unsigned effective=multiplier==2||multiplier==4?multiplier:0;
+    const unsigned effective=nativeFgFixedMultiplier(multiplier)?multiplier:0;
     setEffectiveMultiplier(effective,wasAutomatic||requested.load()!=effective);
 }
 void nativeFgSetAutoMode() noexcept {
@@ -874,7 +874,9 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
     check(table.getStatus(table.context,&report)==S_OK && report.state==EDVR_FG_FAILED);
     auto fatalOutput=outputStatus;fatalOutput.quarantined=true;refuseOutput(*c,fatalOutput);
     check(table.getStatus(table.context,&report)==S_OK && report.state==EDVR_FG_FAILED);
-    nativeFgSetRequestedMultiplier(3);table.getStatus(table.context,&report);check(report.requestedMultiplier==0 && report.state==EDVR_FG_OFF);
+    nativeFgSetRequestedMultiplier(5);table.getStatus(table.context,&report);check(report.requestedMultiplier==0 && report.state==EDVR_FG_OFF);
+    nativeFgSetRequestedMultiplier(3);table.getStatus(table.context,&report);
+    check(report.requestedMultiplier==3 && report.state==EDVR_FG_ARMING && !report.activeMultiplier);
     nativeFgSetAutoMode();table.getStatus(table.context,&report);
     const auto autoConfiguration=report.configGeneration;
     const auto* sameProducer=c->producer.get();

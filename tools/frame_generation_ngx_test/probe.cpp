@@ -1,4 +1,5 @@
 #include "../../src/d3d11/frame_generation_ngx.h"
+#include "../../src/common/native_fg_multiplier.h"
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
@@ -103,7 +104,7 @@ int wmain(int argc,wchar_t** argv){
         else if(i+1<argc&&wcscmp(argv[i],L"--guide-height")==0)guideHeight=unsigned(_wtoi(argv[++i]));
         else if(i+1<argc&&wcscmp(argv[i],L"--native-frames")==0)nativeFrames=unsigned(_wtoi(argv[++i]));
         else if(i+1<argc&&wcscmp(argv[i],L"--warmup-frames")==0)warmupFrames=unsigned(_wtoi(argv[++i]));
-        else {std::puts("usage: probe [--run --multiplier 2|4 --feature-dir ABS --data-dir ABS [--official-fg-helper] [--shared-native-pair-suppression] [--width W --height H --guide-width GW --guide-height GH] [--native-frames N --warmup-frames N] [--diagnostic-suppressed-output]]");return 2;}
+        else {std::puts("usage: probe [--run --multiplier 2|3|4 --feature-dir ABS --data-dir ABS [--official-fg-helper] [--shared-native-pair-suppression] [--width W --height H --guide-width GW --guide-height GH] [--native-frames N --warmup-frames N] [--diagnostic-suppressed-output]]");return 2;}
     }
     if(!guideWidth)guideWidth=width;if(!guideHeight)guideHeight=height;
     if(!nativeFrames||nativeFrames>64||warmupFrames>=nativeFrames){std::puts("native frames must be1..64 with warmup smaller than frame count");return 2;}
@@ -111,7 +112,7 @@ int wmain(int argc,wchar_t** argv){
 #ifndef EDVR_HAVE_NGX
     std::puts("REFUSED: this build has no NGX/DLSS SDK support; no GPU or driver calls were made.");return 3;
 #endif
-    if((multiplier!=2&&multiplier!=4)||feature.empty()||data.empty()||!width||!height){std::puts("invalid explicit-run configuration");return 2;}
+    if(!nativeFgFixedMultiplier(multiplier)||feature.empty()||data.empty()||!width||!height){std::puts("invalid explicit-run configuration");return 2;}
     // Everything below this line is an explicit GPU probe. No WARP/shader FG
     // fallback, game attachment, XR session, priority or system setting change.
     ComPtr<IDXGIFactory4> factory;if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return 3;

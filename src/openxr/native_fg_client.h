@@ -56,7 +56,7 @@ class NativeFgClient final {
     const HRESULT collected=collectImportPins();if(FAILED(collected))return collected;
     const HRESULT hr=table_.getStatus(table_.context,&out);
     if(hr==S_OK&&(out.size!=sizeof(out)||out.version!=EDVR_NATIVE_FRAME_GENERATION_VERSION_1||
-       (out.requestedMultiplier!=0&&out.requestedMultiplier!=2&&out.requestedMultiplier!=4)))return E_UNEXPECTED;
+       (out.requestedMultiplier!=0&&!nativeFgFixedMultiplier(out.requestedMultiplier))))return E_UNEXPECTED;
     return hr;
   }
   HRESULT begin(const EdvrFgSource& source) {return onOwner()&&table_.context?table_.beginSource(table_.context,&source):E_UNEXPECTED;}
@@ -86,6 +86,7 @@ class NativeFgClient final {
                uint32_t width,uint32_t height,XrTime now) {
     if(quarantined_)return E_PENDING;
     if(!onOwner()||!table_.context||!device_)return S_FALSE;
+    if(!nativeFgFixedMultiplier(multiplier))return E_INVALIDARG;
     const HRESULT collected=collectImportPins();if(collected!=S_OK)return collected;
     if(images_.ready)return S_FALSE;
     if(!pending_.token) {

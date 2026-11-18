@@ -1,4 +1,5 @@
 #pragma once
+#include "native_fg_multiplier.h"
 #include <stdint.h>
 
 #define EDVR_NATIVE_PRESENTATION_VERSION_1 1u
@@ -10,7 +11,7 @@ struct EdvrNativePresentation {
     uint32_t size,version;
     uint64_t generation,sequence;
     uint64_t nativeFrames,generatedFrames,repeatedFrames,emptyFrames,failedFrames,backgroundFrames;
-    uint32_t fgEnabled,activeMultiplier; // 0=native cadence, otherwise 2 or 4
+    uint32_t fgEnabled,activeMultiplier; // 0=native cadence, otherwise 2, 3 or 4
 };
 static_assert(sizeof(EdvrNativePresentation)==80,"native presentation v1 ABI");
 
@@ -35,7 +36,7 @@ inline bool recordNativePresentation(EdvrNativePresentation& out,uint64_t genera
     case NativePresentationKind::Background:++out.backgroundFrames;break;
     }
     out.fgEnabled=enabled?1u:0u;
-    out.activeMultiplier=enabled&&(multiplier==2||multiplier==4)?multiplier:0u;
+    out.activeMultiplier=enabled&&nativeFgFixedMultiplier(multiplier)?multiplier:0u;
     return true;
 }
 

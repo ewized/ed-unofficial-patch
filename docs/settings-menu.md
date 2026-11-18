@@ -287,6 +287,17 @@ that is not in `[fix]` and on a key `kFlatPageRows` does not list (the row would
 rigs `flat_sharpen_test` and `sharp_weapons_test` hold the placement, the dimming and VR's page. The installer's
 window, VR view, still lists the row.
 
+### Native VR Frame Generation
+
+**Frame generation (experimental)** (`fix.frame_generation`) is on VR's Performance tab. It defaults to Off and
+supports Auto, 2x, 3x and 4x. The fixed modes request one, two or three generated frames per native source pair.
+The NVIDIA runtime must report enough capacity, so a requested 3x mode needs support for at least two generated
+frames. Auto uses the existing native and 2x policy. Monitor and FPS readouts count actual native, generated and
+repeated XR submissions. The selected multiplier alone does not establish generated delivery.
+
+See the [NVIDIA DLSS-G options](https://github.com/NVIDIA-RTX/Streamline/blob/main/include/sl_dlss_g.h) for the
+multiplier convention. EDVR queries its NVIDIA NGX runtime for available capacity.
+
 ### XeSS Frame Generation rows (2026-11-12)
 
 Two flat-only rows (`menu flat_performance`, so none on VR's pages) on the Performance tab, under the DLSS preset

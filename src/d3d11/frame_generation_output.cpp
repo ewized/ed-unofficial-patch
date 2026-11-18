@@ -69,7 +69,7 @@ bool sourceValid(const EdvrFgSource& source, unsigned width, unsigned height) no
 }
 bool pairValid(const FrameGenerationOutputSource& source, unsigned width, unsigned height,
                bool generated) noexcept {
-    if ((source.multiplier != 2 && source.multiplier != 4) || !source.historyGeneration ||
+    if (!nativeFgFixedMultiplier(source.multiplier) || !source.historyGeneration ||
         !sourceValid(source.current, width, height)) return false;
     if (!generated) return true;
     const auto& previous = source.previous;

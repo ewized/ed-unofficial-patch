@@ -79,7 +79,7 @@
   void fgAnnounceSource(const Frame& frame,const GeometryInput& located) {
     if(!fgAvailable.load(std::memory_order_acquire))return;
     EdvrFgStatus status{};
-    if(frameGeneration.status(status)!=S_OK||(status.requestedMultiplier!=2&&status.requestedMultiplier!=4)||
+    if(frameGeneration.status(status)!=S_OK||!edvr::nativeFgFixedMultiplier(status.requestedMultiplier)||
        status.state==EDVR_FG_FAILED||status.state==EDVR_FG_CLOSING)return;
     // An unavailable source returns to ordinary native pacing, but keeps
     // authentic metadata flowing. A later supported pair can recover without
@@ -190,14 +190,14 @@
       (unsigned long long)fgUiPresented);
   }
   void fgLifecycleReport(uint64_t now,HRESULT statusResult,const EdvrFgStatus& status,bool requested,bool callerFresh) {
-    const bool armed=(statusResult==S_OK&&(status.requestedMultiplier==2||status.requestedMultiplier==4))||
+    const bool armed=(statusResult==S_OK&&edvr::nativeFgFixedMultiplier(status.requestedMultiplier))||
       fgEnabled.load(std::memory_order_acquire);
     if(!armed&&!fgLifecycle.observing())return;
     const bool sceneReady=featureFrameKnown&&featureFrame.sceneReady;
     const bool loadingVisible=loading.visible(),enabled=fgEnabled.load(std::memory_order_acquire);
     const bool separate=separateGraphics(),vrProfile=edvr::vrProfileActive();
     const bool generationValid=status.generation==runtimeGeneration,configValid=status.configGeneration!=0;
-    const bool multiplierValid=status.requestedMultiplier==2||status.requestedMultiplier==4;
+    const bool multiplierValid=edvr::nativeFgFixedMultiplier(status.requestedMultiplier);
     const bool stateValid=status.state==EDVR_FG_OFF||status.state==EDVR_FG_ARMING||status.state==EDVR_FG_READY;
     const bool trimmed=fovTrim.trimmed(),trimPending=fovTrim.pending();
     const bool zoomStrip=!(zoomStripNow<=0.f),eyeShare=featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10&&
@@ -239,7 +239,7 @@
     EdvrFgStatus status{};
     const HRESULT statusResult=frameGeneration.status(status);
     const bool requested=statusResult==S_OK&&status.generation==runtimeGeneration&&status.configGeneration&&
-      (status.requestedMultiplier==2||status.requestedMultiplier==4)&&
+      edvr::nativeFgFixedMultiplier(status.requestedMultiplier)&&
       (status.state==EDVR_FG_OFF||status.state==EDVR_FG_ARMING||status.state==EDVR_FG_READY)&&separateGraphics()&&edvr::vrProfileActive()&&
       !loading.visible()&&featureFrameKnown&&featureFrame.sceneReady&&!fgMenuVisible&&!frameWithheld&&
       !fovTrim.trimmed()&&!fovTrim.pending()&&!zoomAppliedNow&&zoomStripNow<=0.f&&!circleNow.on&&

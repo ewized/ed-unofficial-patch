@@ -208,11 +208,11 @@ void run() {
     const auto syntheticStart = GetTickCount64();
     while (syntheticReady->GetCompletedValue() < 1 && GetTickCount64() - syntheticStart < 3000) Sleep(1);
     check(syntheticReady->GetCompletedValue() == 1, "synthetic inputs ready before admission stub");
-    for (unsigned route = 0; route < 5; ++route) {
+    for (unsigned route = 0; route < 6; ++route) {
         const uint64_t sequence = route + 2;
         admission = route == 1 ? FrameGenerationNgxCompletion::Suppressed :
             route == 2 ? FrameGenerationNgxCompletion::FailedEvaluation : FrameGenerationNgxCompletion::Ready;
-        const unsigned multiplier = route >= 3 ? 2 : 4;
+        const unsigned multiplier = route == 5 ? 3 : route >= 3 ? 2 : 4;
         check(interop.begin(runtime.producerContext.Get(), sequence, 1), "begin immutable stereo source");
         std::array<std::array<ComPtr<ID3D11Texture2D>, 5>, 2> sources;
         for (unsigned e = 0; e < 2; ++e) {
@@ -262,6 +262,8 @@ void run() {
         check(batch.uiFlags==(hasGenerated?EDVR_FG_UI_NATIVE_COVERAGE:0u),"only generated batches carry independent native-pose UI");
         check(batch.phaseMask == (hasGenerated ? (1u << multiplier) - 1 : 1u), "suppression/error never invents generated readiness");
         check(batch.generatedCount == (hasGenerated ? multiplier - 1 : 0u), "native-only batches advertise zero available generated frames");
+        if (multiplier == 3) check(!batch.textures[3][0] && !batch.textures[3][1],
+            "3x publishes both intermediate stereo phases without a fourth phase");
         check(!std::memcmp(batch.currentViews, source.current.views, sizeof(batch.currentViews)) &&
             batch.currentPoseDisplayTime == source.current.poseDisplayTime, "physical endpoint pose metadata copied exactly");
         ComPtr<ID3D11Fence> ready; hr(consumer5->OpenSharedFence(batch.readyFence, IID_PPV_ARGS(&ready)), "XR-style shared ready fence import");

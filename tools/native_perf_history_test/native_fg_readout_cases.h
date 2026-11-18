@@ -38,6 +38,9 @@ template<class Check> void nativeFgReadoutCases(Check check) {
     h.clear();s=sample(1000,100,100);s.activeMultiplier=4;h.observe(s,1000);
     for(unsigned i=1;i<=10;++i){s=sample(1000+i*100,100+30*i/10,100+90*i/10);s.activeMultiplier=4;h.observe(s,s.capturedAtMs);}
     r=h.read(2000);check(nearValue(r.nativeFps,30)&&nearValue(r.generatedFps,90)&&nearValue(r.submittedFps,120),"native FG: 4x counts three generated frames per actual native frame, not one completed batch");
+    r.totals.activeMultiplier=3;
+    formatNativeFgMode(r,text,sizeof(text));check(std::string(text)=="3x","native FG: monitor shows the active 3x mode");
+    formatNativeFgTileValue(r,text,sizeof(text));check(std::string(text)=="3x","native FG: compact tile keeps the 3x mode");
     h.clear();s=sample(1000,100,0);h.observe(s,1000);
     for(unsigned i=1;i<=10;++i){s=sample(1000+i*100,100+45*i/10,0,45*i/10);h.observe(s,s.capturedAtMs);}
     r=h.read(2000);check(nearValue(r.generatedFps,0)&&nearValue(r.repeatedFps,45)&&nearValue(r.submittedFps,90),"native FG: repeated native frames never become generated frames, even with a selected 2x pump");

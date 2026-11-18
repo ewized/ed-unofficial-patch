@@ -1990,6 +1990,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                 const auto value = cfg.getString("fix.frame_generation", "off");
                 const uint32_t multiplier = flat ? 0u :
                     _stricmp(value.c_str(), "2x") == 0 ? 2u :
+                    _stricmp(value.c_str(), "3x") == 0 ? 3u :
                     _stricmp(value.c_str(), "4x") == 0 ? 4u : 0u;
                 if(!flat&&_stricmp(value.c_str(),"auto")==0)nativeFgSetAutoMode();
                 else nativeFgSetRequestedMultiplier(multiplier);

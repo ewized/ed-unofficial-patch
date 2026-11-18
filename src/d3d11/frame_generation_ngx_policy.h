@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/native_fg_multiplier.h"
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -29,7 +30,9 @@ void prepareSuppressionFlag(bool sharedNativePair,unsigned index,bool reused,Tra
     initialize();
     transition(SuppressionState::CopyDestination,SuppressionState::UnorderedAccess);
 }
-inline unsigned generatedCount(unsigned multiplier) noexcept {return multiplier==2?1u:multiplier==4?3u:0u;}
+constexpr unsigned generatedCount(unsigned multiplier) noexcept {
+    return nativeFgFixedMultiplier(multiplier) ? multiplier - 1 : 0;
+}
 inline bool supported(unsigned multiplier,bool available,bool needsDriver,unsigned maximum) noexcept {
     const auto count=generatedCount(multiplier);return count&&available&&!needsDriver&&maximum>=count;
 }
