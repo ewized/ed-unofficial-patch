@@ -364,9 +364,8 @@ struct State {
     edvr::FlatNoticeQueue flatNotice;
     edvr::ScreenNoticeState screenNotice;
 
-    // The head-locked readout (menu.fps_overlay), shown while the menu is
-    // down: re-anchored to the head every frame, re-rasterised twice a
-    // second.
+    // The head-locked readout (menu.fps_overlay), shown while the menu is down.
+    // Native OpenXR reuses the compositor image between raster updates.
     bool     overlay = false;   // menu.fps_overlay is compact or detailed
     FpsOverlayMode overlayMode = FpsOverlayMode::Off;
     ScreenReadoutState flatReadout;   // flat: the readout's raster is the live one on the monitor slot (menu_policy.h)
@@ -5898,9 +5897,10 @@ void menuTick(ID3D11Device* dev) {
                     float pose[12];
                     if (!layeredFps) s.anchorValid = headPose(pose);
                     if (layeredFps || s.anchorValid) {
-                        // compact: twice a second; detailed: about four times a second, and always re-rasterised (its strip moves).
                         const bool detailed = s.overlayMode == FpsOverlayMode::Detailed;
-                        if (!s.overlayUp || dueMs(s.overlayTextMs, detailed ? 250 : 500)) {
+                        // Opening the readout or changing its mode forces a
+                        // fresh raster before the steady refresh interval.
+                        if (!s.overlayUp || dueMs(s.overlayTextMs, menuFpsOverlayRefreshMs(detailed, layeredFps))) {
                             s.overlayTextMs = stampMs();
                             if (detailed) {
                                 MenuContent c;
@@ -5954,7 +5954,7 @@ void menuTick(ID3D11Device* dev) {
             const bool detailed = s.overlayMode == FpsOverlayMode::Detailed;
             const bool sizeChanged = g_flatOutW.load(std::memory_order_relaxed) != s.readoutSized[0] ||
                                      g_flatOutH.load(std::memory_order_relaxed) != s.readoutSized[1];
-            const bool refreshDue = sizeChanged || dueMs(s.overlayTextMs, detailed ? 250 : 500);
+            const bool refreshDue = sizeChanged || dueMs(s.overlayTextMs, menuFpsOverlayRefreshMs(detailed, false));
             if (s.flatReadout.tick(wanted, refreshDue, menuPanelMonitorRasterSerial()) && (s.flatReadout.submitted || dueMs(s.overlayTextMs, 250))) {
                 s.overlayTextMs = stampMs();   // also paces a build that fails
                 const uint32_t before = menuPanelMonitorRasterSerial();

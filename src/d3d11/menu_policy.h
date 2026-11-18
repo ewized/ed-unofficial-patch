@@ -90,6 +90,13 @@ inline bool menuNotDrawn(bool open, uint64_t now, uint64_t openedMs, uint64_t la
   return open && now - openedMs > closeMs && now - lastDrawnMs > closeMs;
 }
 
+// The independent OpenXR layer reuses a released image between raster
+// updates. Keep its one-second counters live while limiting Detailed work
+// on the worker and XR upload path to two refreshes a second.
+constexpr uint64_t menuFpsOverlayRefreshMs(bool detailed, bool independentLayer) {
+  return detailed && !independentLayer ? 250 : 500;
+}
+
 // ---- The notice on the flat screen -------------------------------------------------------------------------------------------------------------
 // The flat screen draws no toasts: a notice is the panel's own raster at a toast's size, composited in the upper left corner while it is up. `shown` is set
 // once that raster (not the menu's) is the live one; `rasterStale` holds the panel back after a notice until the menu's own content has been rasterised, so a

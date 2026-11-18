@@ -49,6 +49,13 @@ void policyCases() {
     check(menuPolicyFor(true).anchor == flat.anchor && menuPolicyFor(false).anchor == vr.anchor, "the policy is a pure function of the profile");
 }
 
+void fpsOverlayRefreshCases() {
+    check(menuFpsOverlayRefreshMs(true, true) == 500, "native OpenXR Detailed readout refreshes twice a second");
+    check(menuFpsOverlayRefreshMs(true, false) == 250, "flat and legacy Detailed readout keep the 250 ms interval");
+    check(menuFpsOverlayRefreshMs(false, true) == 500 && menuFpsOverlayRefreshMs(false, false) == 500,
+          "Compact keeps the 500 ms interval with both compositing paths");
+}
+
 void summonCases() {
     using A = MenuSummonAction;
     //                         pressed open padNav padReady capture shift recentre
@@ -557,6 +564,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     policyCases();
+    fpsOverlayRefreshCases();
     summonCases();
     escapeCases();
     drawnCases();
