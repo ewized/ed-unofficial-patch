@@ -129,3 +129,10 @@ of each prediction as the display mode. All observed application CPU/GPU
 windows aborted with a scope-change record. Their printed workload
 dimensions, FOV, and treatment stayed the same. The independent frame-cycle
 windows above remained valid.
+
+Using the reported 90 Hz display rate, `bae4fd1a` completed a contained
+30-second CPU/GPU benchmark with both tools enabled. All 1,695 samples were
+valid in each series, with zero invalid or missing entries. The CPU median,
+p95, and p99 were 6.478, 8.422, and 9.564 ms. The GPU values were 12.814,
+14.154, and 14.687 ms. The frame used 2257 × 2257 per eye as DLSS input and
+3892 × 3892 per eye as OpenXR output.
