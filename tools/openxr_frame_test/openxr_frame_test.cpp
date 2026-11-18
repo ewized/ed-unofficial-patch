@@ -104,7 +104,7 @@ struct Fake {
     current->lastLayerCount=info->layerCount;
     std::fill_n(current->lastLayerTypes,3,XR_TYPE_UNKNOWN);
     current->fpsSwapchain=XR_NULL_HANDLE;
-    for(uint32_t index=0;index<std::min(info->layerCount,3u);++index) {
+    for(uint32_t index=0;index<(std::min)(info->layerCount,3u);++index) {
       const auto* layer=info->layers[index];
       current->lastLayerTypes[index]=layer->type;
       if(layer->type==XR_TYPE_COMPOSITION_LAYER_QUAD)
