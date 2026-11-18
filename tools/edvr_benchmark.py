@@ -324,8 +324,12 @@ def qualify_capture(run, row, records, qualification, receipt, sources, *, colle
     diagnostics, windows = row_diagnostics(records, start, end)
     submissions = submission_summary(records, start, end)
     supported = row.get('supported') is True and row.get('apply_allowed') is not False and requested['fg'] != '3x'
-    features = (_feature_activity(qualification, requested, windows, row, submissions) if supported else
-                {feature: {'status': 'unsupported'} for feature in REQUESTS})
+    if supported:
+        features = _feature_activity(qualification, requested, windows, row, submissions)
+    else:
+        features = {feature: {'status': 'unavailable', 'reason': 'row_not_applied'} for feature in REQUESTS}
+        if requested['fg'] == '3x':
+            features['fg'] = {'status': 'unsupported', 'reason': 'fg_3x_not_implemented'}
     return {
         'schema': 1, 'build': build, 'source_fingerprints': fingerprints, 'requested': requested,
         'collection_status': collection_status if supported else 'unsupported',

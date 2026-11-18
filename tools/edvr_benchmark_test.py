@@ -62,6 +62,21 @@ def capture(records=None):
 
 
 class BenchmarkQualificationTests(unittest.TestCase):
+    def test_unsupported_fg_row_does_not_imply_aa_or_vrs_incompatibility(self):
+        args, sources = capture([])
+        args['row'].update(nominal_mode='quality', vrs='on', frame_generation='3x',
+                           supported=False, apply_allowed=False)
+        args['run'].update(aa='quality', vrs=True, fg='3x')
+        args['qualification']['requested'] = dict(aa='quality', vrs='on', fg='3x')
+        result = qualify_capture(**args, sources=sources)
+        self.assertEqual(result['collection_status'], 'unsupported')
+        self.assertEqual(result['timing']['status'], 'unsupported')
+        self.assertEqual(result['features'], {
+            'aa': {'status': 'unavailable', 'reason': 'row_not_applied'},
+            'vrs': {'status': 'unavailable', 'reason': 'row_not_applied'},
+            'fg': {'status': 'unsupported', 'reason': 'fg_3x_not_implemented'},
+        })
+
     def test_counter_specific_coverage_and_total_common_span(self):
         args, sources = capture([window(),
                                  packet(1, 2000, 10, 0, 5), packet(5, 3000, 13, 0, 6),
