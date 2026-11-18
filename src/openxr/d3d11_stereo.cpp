@@ -217,7 +217,11 @@ XrResult D3D11Stereo::createFpsOverlaySwapchain(FpsOverlay& overlay,uint32_t wid
   info.usageFlags=XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT|XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
   info.format=format_;info.sampleCount=1;
   info.width=width;info.height=height;info.faceCount=info.arraySize=info.mipCount=1;
-  const auto created=dispatch_.createSwapchain(session_,&info,&overlay.swapchain);
+  XrSwapchain swapchain=XR_NULL_HANDLE;
+  const auto created=dispatch_.createSwapchain(session_,&info,&swapchain);
+  // A failed call gives us no handle. SESSION_LOSS_PENDING is a success
+  // code, so retain any returned handle for teardown without using it.
+  if(XR_SUCCEEDED(created))overlay.swapchain=swapchain;
   if(created!=XR_SUCCESS)return created;
   if(!overlay.swapchain)return XR_ERROR_RUNTIME_FAILURE;
   std::vector<XrSwapchainImageD3D11KHR> images;
@@ -256,21 +260,23 @@ XrResult D3D11Stereo::renderFpsOverlay(XrSpace view,const EdvrNativeFpsOverlay& 
     }
     return slot.creationResult;
   };
+  // maxLayerCount limits layers submitted at once, not allocated chains.
+  // Reserve the original full-size fallback before any optional tier can
+  // use up the last swapchain handle this runtime allows.
   auto* selected=&fpsOverlayFull_;
-  XrResult created=XR_SUCCESS;
+  const auto fullCreated=ensure(*selected,maxWidth,maxHeight);
+  if(fullCreated!=XR_SUCCESS)return fullCreated;
   struct Tier { FpsOverlay* slot;uint32_t width,height; };
   const Tier tiers[]={{&fpsOverlaySmall_,2048,256},{&fpsOverlayMedium_,1536,512}};
   for(const auto& tier:tiers) {
     const auto width=(std::min)(maxWidth,tier.width),height=(std::min)(maxHeight,tier.height);
     if(raster.width>width||raster.height>height)continue;
     if(width==maxWidth&&height==maxHeight)break;
-    created=ensure(*tier.slot,width,height);
+    const auto created=ensure(*tier.slot,width,height);
     if(created==XR_SUCCESS)selected=tier.slot;
     else if(!canFallbackFpsBacking(created))return created;
     break;
   }
-  if(selected==&fpsOverlayFull_)created=ensure(*selected,maxWidth,maxHeight);
-  if(created!=XR_SUCCESS)return created;
   // Pending acquire and last released revision belong to the chosen chain.
   // Leave any other chain's unfinished wait alone until that chain is used
   // again. Releasing it without fresh pixels could replace a cached quad.

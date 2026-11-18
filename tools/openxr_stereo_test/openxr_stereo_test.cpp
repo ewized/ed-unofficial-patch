@@ -39,8 +39,9 @@ struct Fake {
   ComPtr<ID3D11Device> device,foreign;ComPtr<ID3D11DeviceContext> context;Eye eyes[5];
   unsigned creates=0,destroys=0,formatCalls=0;std::vector<std::string> trace;
   unsigned width=size,height=size;
+  unsigned fpsHandleLimit=3;
   std::string failure;XrResult error=XR_ERROR_RUNTIME_FAILURE;
-  bool noFormats=false,wrongDimensions=false,wrongDevice=false,typeless=true,unorm=false,grow=false,badCount=false;
+  bool noFormats=false,wrongDimensions=false,wrongDevice=false,typeless=true,unorm=false,grow=false,badCount=false,poisonCreateOutput=false;
   ID3D11RenderTargetView* preservedRtv=nullptr;
 };
 Fake* fake=nullptr;
@@ -68,7 +69,13 @@ XrResult XRAPI_PTR create(XrSession s,const XrSwapchainCreateInfo* ci,XrSwapchai
   const XrSwapchainUsageFlags usage=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT|(quad?XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT:0);
   check((quad?(ci->width>0&&ci->height>0):(ci->width==fake->width&&ci->height==fake->height))&&
     ci->arraySize==1&&ci->faceCount==1&&ci->mipCount==1&&ci->sampleCount==1&&ci->usageFlags==usage,"swapchain shape/usage");
-  XrResult r=outcome("C",eye);if(r!=XR_SUCCESS)return r;
+  XrResult r=outcome("C",eye);
+  if(r!=XR_SUCCESS) {
+    if(XR_FAILED(r)&&fake->poisonCreateOutput)*out=reinterpret_cast<XrSwapchain>(uintptr_t(12345));
+    return r;
+  }
+  if(quad&&unsigned(std::count_if(fake->eyes+2,fake->eyes+_countof(fake->eyes),[](const Eye& chain){return chain.alive;}))
+      >=fake->fpsHandleLimit)return XR_ERROR_LIMIT_REACHED;
   auto& e=fake->eyes[eye];
   for(auto& image:e.images){
     D3D11_TEXTURE2D_DESC d{};d.Width=ci->width+(fake->wrongDimensions?1:0);d.Height=ci->height;d.MipLevels=d.ArraySize=1;
@@ -148,54 +155,76 @@ void fpsOverlayBackingSelfTest() {
   {
     Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize owned device");
     check(render(f)==XR_SUCCESS,"FPS backing: Compact raster uploads");
-    const auto small=layer.subImage.swapchain;
-    check(small&&backing(f,small,2048,256)&&layer.subImage.imageRect.extent.width==1718&&
+    const auto compactChain=layer.subImage.swapchain;
+    check(compactChain&&backing(f,compactChain,2048,256)&&layer.subImage.imageRect.extent.width==1718&&
       layer.subImage.imageRect.extent.height==158&&layer.space==space&&layer.size.width==raster.widthMeters,
       "FPS backing: smaller chain keeps original crop, view space and physical width");
-    check(f.pixel(2,0,0,0)==0x69696969u,"FPS backing: original pixels reached the quad");
+    check(compactChain&&f.runtime.eyes[3].images[0]&&f.pixel(3,0,0,0)==0x69696969u,"FPS backing: original pixels reached the quad");
     f.runtime.trace.clear();
-    check(render(f)==XR_SUCCESS&&f.runtime.trace.empty()&&layer.subImage.swapchain==small,
+    check(render(f)==XR_SUCCESS&&f.runtime.trace.empty()&&layer.subImage.swapchain==compactChain,
       "FPS backing: unchanged revision reuses the released small image");
-    ++raster.revision;f.runtime.failure="W2";f.runtime.error=XR_TIMEOUT_EXPIRED;
-    check(render(f)==XR_TIMEOUT_EXPIRED&&f.runtime.trace==std::vector<std::string>({"A2","W2"}),
+    ++raster.revision;f.runtime.failure="W3";f.runtime.error=XR_TIMEOUT_EXPIRED;
+    check(render(f)==XR_TIMEOUT_EXPIRED&&f.runtime.trace==std::vector<std::string>({"A3","W3"}),
       "FPS backing: timeout holds the acquired small image without a release");
 
     ++raster.revision;raster.width=1200;raster.height=460;f.runtime.failure.clear();
-    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain!=small&&backing(f,layer.subImage.swapchain,1536,512)&&
-      f.runtime.eyes[2].acquired&&!f.runtime.eyes[2].waited&&f.runtime.destroys==0,
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain!=compactChain&&backing(f,layer.subImage.swapchain,1536,512)&&
+      f.runtime.eyes[3].acquired&&!f.runtime.eyes[3].waited&&f.runtime.destroys==0,
       "FPS backing: Detailed uses the middle chain while the smaller wait remains pending");
     ++raster.revision;raster.width=1718;raster.height=158;f.runtime.trace.clear();
-    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain==small&&f.runtime.trace==std::vector<std::string>({"W2","R2"}),
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain==compactChain&&f.runtime.trace==std::vector<std::string>({"W3","R3"}),
       "FPS backing: returning to Compact resumes the old wait without a second acquire");
 
     ++raster.revision;raster.width=2050;
-    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&f.runtime.destroys==0,
-      "FPS backing: an oversized raster takes the full chain without retiring smaller chains");
-    ++raster.revision;raster.width=1718;f.runtime.failure="W2";f.runtime.trace.clear();
+    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&f.runtime.creates==5&&f.runtime.destroys==0,
+      "FPS backing: an oversized raster uses the reserved chain without allocating or retiring another");
+    ++raster.revision;raster.width=1718;f.runtime.failure="W3";f.runtime.trace.clear();
     check(render(f)==XR_TIMEOUT_EXPIRED,"FPS backing: another timeout before shutdown");
     check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==5&&
-      std::find(f.runtime.trace.begin(),f.runtime.trace.end(),"R2")==f.runtime.trace.end(),
+      std::find(f.runtime.trace.begin(),f.runtime.trace.end(),"R3")==f.runtime.trace.end(),
       "FPS backing: after the GPU drain shutdown destroys each chain without releasing unready pixels");
   }
   {
     Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize allocation fallback fixture");
-    f.runtime.failure="C2";f.runtime.error=XR_ERROR_LIMIT_REACHED;
+    f.runtime.failure="C3";f.runtime.error=XR_ERROR_LIMIT_REACHED;f.runtime.poisonCreateOutput=true;
     check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&f.runtime.creates==4,
       "FPS backing: a recoverable smaller allocation failure tries the full chain");
     ++raster.revision;
     check(render(f)==XR_SUCCESS&&f.runtime.creates==4,"FPS backing: allocation failure is retained for the session");
+    check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==3,
+      "FPS backing: a failed call's output is never treated as an owned chain");
   }
   {
     Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize partial enumeration fixture");
-    f.runtime.failure="I2";f.runtime.error=XR_ERROR_SIZE_INSUFFICIENT;
+    f.runtime.failure="I3";f.runtime.error=XR_ERROR_SIZE_INSUFFICIENT;
     check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024)&&
-      f.runtime.eyes[2].alive&&f.runtime.destroys==0,"FPS backing: partial smaller chain remains owned until shutdown");
+      f.runtime.eyes[3].alive&&f.runtime.destroys==0,"FPS backing: partial smaller chain remains owned until shutdown");
     check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==4,"FPS backing: shutdown reclaims the partially enumerated chain");
+  }
+  {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize runtime with one FPS handle available");
+    f.runtime.fpsHandleLimit=1;
+    check(render(f)==XR_SUCCESS&&backing(f,layer.subImage.swapchain,2600,1024),
+      "FPS backing: Compact still renders when the reserved full chain fills the quota");
+    const auto owned=layer.subImage.swapchain;
+    ++raster.revision;raster.width=1200;raster.height=460;
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain==owned&&layer.subImage.imageRect.extent.height==460,
+      "FPS backing: switching to Detailed still renders on the same reserved chain");
+    ++raster.revision;raster.width=1718;raster.height=158;
+    check(render(f)==XR_SUCCESS&&layer.subImage.swapchain==owned&&f.runtime.creates==5,
+      "FPS backing: returning to Compact neither retries failed optional chains nor drops the quad");
+    check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==3,"FPS backing: only the three owned chains are destroyed");
   }
   for(auto error:{XR_ERROR_SESSION_LOST,XR_ERROR_INSTANCE_LOST,XR_ERROR_GRAPHICS_DEVICE_INVALID,XR_SESSION_LOSS_PENDING}) {
     Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize terminal result fixture");
     f.runtime.failure="C2";f.runtime.error=error;
     check(render(f)==error&&f.runtime.creates==3&&!layer.subImage.swapchain,"FPS backing: terminal result cannot trigger a full allocation");
+  }
+  {
+    Fixture f;check(f.init(true)==XR_SUCCESS,"FPS backing: initialize optional terminal result fixture");
+    f.runtime.failure="C3";f.runtime.error=XR_ERROR_SESSION_LOST;
+    check(render(f)==XR_ERROR_SESSION_LOST&&f.runtime.trace.back()=="C3"&&!layer.subImage.swapchain,
+      "FPS backing: terminal optional result cannot upload to the reserved chain");
   }
 }
 // The whole of one swapchain image, read back row by row (the fixture's pixel() reads one texel per copy).
