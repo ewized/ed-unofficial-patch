@@ -1,5 +1,7 @@
 // Production coverage command recording and HLSL on D3D11 WARP.
 #include "../../src/d3d11/ui_layer_coverage.h"
+#include "../../src/d3d11/ui_vrs_guard.h"
+#include "../../src/d3d11/native_vrs.h"
 #include "../../src/d3d11/ui_layer_shaders.h"
 #include "temporal_shader_bytecode.h"
 #include <d3dcompiler.h>
@@ -11,6 +13,10 @@
 #include <cstdlib>
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
+namespace edvr {
+std::atomic<bool> g_nativeVrsLive{false};
+void nativeVrsFullRate(ID3D11DeviceContext*) noexcept {}
+}
 unsigned checks = 0;
 void check(bool ok, const char* text) { ++checks; if (!ok) { std::fprintf(stderr,"FAIL: %s\n",text); std::exit(1); } }
 void hr(HRESULT result) { check(SUCCEEDED(result),"D3D operation"); }
@@ -45,6 +51,12 @@ struct FinishSpy {
     ~FinishSpy(){setTable(original);active=previous;}
 };
 unsigned executed = 0;
+unsigned beforeRecordCalls = 0;
+void beforeRecord(ID3D11DeviceContext* ctx) {
+    check(ctx && ctx->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED, "VRS record callback receives the deferred context");
+    ++beforeRecordCalls;
+}
+int __cdecl fakeVrsEntry(IUnknown*, UiVrsResetDesc*) { return 0; }
 void executeRaw(ID3D11DeviceContext* ctx, ID3D11CommandList* list, int restore) {
     check(restore==1,"immediate state restoration requested");++executed;ctx->ExecuteCommandList(list,restore);
 }
@@ -127,11 +139,23 @@ int main(int argc,char** argv) {
     check(spy.calls==4 && executed==4,"uncached command count measured");
     UiCoverageCommandCache cache;const unsigned before=spy.calls;
     for(unsigned frame=0;frame<4;++frame) {
-        f.content(frame);f.bindSentinel();check(cache.execute(f.ctx.Get(),f.deferred.Get(),f.bindings(),executeRaw),"cached production coverage executes");
+        f.content(frame);f.bindSentinel();check(cache.execute(f.ctx.Get(),f.deferred.Get(),f.bindings(),executeRaw,nullptr,beforeRecord),"cached production coverage executes");
         f.state();check(f.read()==baseline[frame],"old/new exact output with dynamically updated source");
     }
     check(spy.calls-before==1 && executed==8,"four cached executions record only once");
+    check(beforeRecordCalls==1,"cached coverage records the VRS guard once without accumulating commands on cache hits");
     std::printf("coverage cached: %u FinishCommandList calls / 4 executions; dynamic-source exact output\n",spy.calls-before);
+    UiVrsGuard lateGuard;uint64_t activation=0;
+    check(!lateGuard.invalidateCache(activation),"pre-attach coverage cache is retained");
+    lateGuard.configure(true,fakeVrsEntry);
+    const unsigned beforeAttach=spy.calls;
+    for(unsigned frame=0;frame<4;++frame) {
+        if(lateGuard.invalidateCache(activation))cache.reset();
+        f.content(frame);f.bindSentinel();
+        check(cache.execute(f.ctx.Get(),f.deferred.Get(),f.bindings(),executeRaw,nullptr,beforeRecord),"late-attach coverage executes");
+        f.state();check(f.read()==baseline[frame],"late-attach re-record preserves dynamic-source pixels");
+    }
+    check(spy.calls-beforeAttach==1 && beforeRecordCalls==2,"late API activation re-records the guarded coverage exactly once");
     auto b=f.bindings();
     auto mutation=[&](const UiCoverageBindings& changed,const char* why) {
         const unsigned count=spy.calls;f.content(1);f.bindSentinel();

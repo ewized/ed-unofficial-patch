@@ -1,6 +1,8 @@
 #include "../common/native_temporal.h"
 
 #include "temporal_pass.h"
+#include "frame_generation_coordinator.h"
+#include "native_gaze_readiness.h"
 #include "dlss_floor.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"     // the layer-only door's preflight gaps and its first-eight-reasons log
@@ -70,6 +72,7 @@ struct State {
   DWORD thread = 0;
   uint64_t generation = 0;
   bool active = false, begun = false, standDown = false;
+  edvr::NativeGazeReadiness gazeReadiness;
   uint64_t sequence = 0, reference = 0;
   float head[12]{}, eyes[2][12]{}, frusta[2][4]{};
   // B3 (the scope zoom's window, common/scope_zoom_window.h): eye 0's frustum in frusta[0] is the zoomed window this frame (zoomedNow), and preZoom is the one the game would have been told
@@ -115,6 +118,8 @@ struct State {
 };
 
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
+uint64_t gazeEpoch=0; // monotonic across acquisitions, invalidations and closes
+std::atomic<uint64_t> gazeReadyEpoch{0};
 
 // fix.ui_quality's surfaces read the recommendation from INSIDE
 // CreateTexture2D, and the temporal pass makes its targets (NGX's) inside
@@ -218,6 +223,8 @@ void clearZoom(State& s) {
   edvr::lightGridCacheNoteZoomedFrame(false);
 }
 void reset(State& s) {
+  gazeReadyEpoch.store(0,std::memory_order_release);
+  s.gazeReadiness.reset(++gazeEpoch);
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
   for(unsigned e=0;e<2;++e){s.continuity[e]=0;s.verdictPending[e]=false;s.verdictWaits[e]=0;}
 }
@@ -418,12 +425,14 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   for(int e=0;e<2;++e) if(!rigid(f->eyeToHead[e])||!frustum(f->frusta[e])) return E_INVALIDARG;
   const Settings next=s->pendingSettings;
   const bool settingsChanged=!sameHistorySettings(next,s->currentSettings);
-  if(!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||settingsChanged) reset(*s);
+  const bool frameReset=!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||settingsChanged;
+  if(frameReset) reset(*s);
   if(settingsChanged)edvr::Log::get().note("native temporal: mode=%s, motion=%d, jitter=%u; history reset at the frame boundary.",mode(next),next.motion,unsigned(next.jitter));
   std::memcpy(s->previousJitter,s->renderedJitter,sizeof(s->previousJitter));
   std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));
   s->currentSettings=next;
   s->begun=true;s->sequence=f->sequence;s->reference=f->referenceGeneration;
+  s->gazeReadiness.begin(f->sequence);
   s->recW=f->recommendedWidth;s->recH=f->recommendedHeight;
   g_recommended.store((uint64_t(s->recW)<<32)|s->recH,std::memory_order_release);
   std::memcpy(s->head,f->head,sizeof(s->head));std::memcpy(s->eyes,f->eyeToHead,sizeof(s->eyes));std::memcpy(s->frusta,f->frusta,sizeof(s->frusta));
@@ -481,6 +490,8 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
   g_frameSequence.store(f->sequence,std::memory_order_release);   // last: the head, eyes, frusta and shift above are this frame's
+  edvr::nativeFgBeginTemporal(*f,frameReset,s->currentSettings.on&&!s->standDown&&
+      s->currentSettings.engine==edvr::TemporalEngine::Nvidia&&!s->mapOpen&&!s->zoomedNow);
   return S_OK;
 }
 
@@ -615,13 +626,17 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   }
   edvrTemporalAaNoteHead(int(eye),pd?s->history[eye].head:nullptr,pd?s->head:nullptr,pd?eyeOffset:nullptr);
   edvr::temporalPassNoteEyes(int(eye),pd?previousEyes:nullptr,pd?s->eyes:nullptr);
+  edvr::nativeFgBeforeTemporalEye(seq,eye,source);
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
   s->treated[eye]=true;
-  if(!raw){s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
+  if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;gazeReadyEpoch.store(0,std::memory_order_release);edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;
+  s->gazeReadiness.succeeded(seq,eye);
+  if(s->gazeReadiness.pairReady)gazeReadyEpoch.store(s->gazeReadiness.epoch,std::memory_order_release);
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
   // layer arms for the next frame only behind a frame the pass produced.
   edvr::uiLayerNoteTemporal(seq,eye,result);
+  edvr::nativeFgAfterTemporalEye(seq,eye,result);
   if(resetHistory&&!mapEdge){++s->resets;++s->resetsEye[eye];if(zoomMoved)++s->zoomEdgeResets;}   // a map's opening and closing frames are counted as map_frames, not as resets
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
@@ -632,11 +647,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;hst.zoomed=zoomedHere;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;edvr::nativeFgInvalidateProducer(2);reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   edvr::uiLayerMapRunEnd(nullptr);   // as in treat
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
+  edvr::nativeFgInvalidateProducer(2);
   // The transition-flash fix withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
   // lets go of the world and resets its resolver's history with the eyes'. A no-op with the key off.
   edvr::vrWorldRouteNoteSceneReset();
@@ -664,6 +680,30 @@ HRESULT WINAPI close(void* p){
 }
 
 namespace edvr {
+namespace {
+bool gazeOwner(ID3D11Device* device,unsigned long thread) {
+  if(!current||!current->active||!current->begun||!current->device||!device||
+     !current->currentSettings.on||current->standDown||!current->gazeReadiness.pairReady||
+     thread!=current->thread||thread!=GetCurrentThreadId())return false;
+  IUnknown *a=nullptr,*b=nullptr;
+  const bool same=SUCCEEDED(device->QueryInterface(IID_IUnknown,(void**)&a))&&
+      SUCCEEDED(current->device->QueryInterface(IID_IUnknown,(void**)&b))&&a==b;
+  if(a)a->Release();if(b)b->Release();return same;
+}
+}
+NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device* device,unsigned long thread) {
+  if(t_insideTreat)return {};
+  std::lock_guard<std::mutex> lock(mutex);
+  return {gazeEpoch,current?current->gazeReadiness.pairSequence:0,gazeOwner(device,thread)};
+}
+uint64_t nativeTemporalGazeEpoch() noexcept {return gazeReadyEpoch.load(std::memory_order_acquire);}
+bool nativeTemporalWithGazeReady(ID3D11Device* device,unsigned long thread,uint64_t epoch,
+                                NativeGazeReadyCallback callback,void* user) {
+  if(t_insideTreat||!callback)return false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if(!epoch||epoch!=gazeEpoch||!gazeOwner(device,thread))return false;
+  callback(user,epoch);return true;
+}
 // The device and thread the live channel's treat() will insist on (the
 // sameDevice and GetCurrentThreadId checks above), for the NGX warm-up in
 // temporal_pass.cpp to gate on. No AddRef: acquire stores the raw pointer
@@ -847,6 +887,6 @@ bool nativeTemporalTrueVerticalTangents(float* up, float* down) {
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest* r,EdvrNativeTemporalTable* t){
   if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};
   if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;
-  std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.active=true;current=&s;
+  std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.gazeReadiness.reset(++gazeEpoch);s.active=true;current=&s;
   t->context=&s;t->beginFrame=begin;t->noteProjection=noteProjection;t->treatEye=treat;t->invalidate=invalidate;t->close=close;t->skipEye=skipEye;return S_OK;
 }

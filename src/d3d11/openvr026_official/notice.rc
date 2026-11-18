@@ -1,0 +1,7 @@
+// Carry the complete upstream BSD notice in every graphics DLL, including
+// the same DLL payload embedded in the standalone installer.
+40069 RCDATA
+BEGIN
+    "OpenVR SDK 2.15.6 - Copyright (c) 2015, Valve Corporation. All rights reserved.\0"
+END
+40070 RCDATA "src/d3d11/openvr026_official/LICENSE.txt"

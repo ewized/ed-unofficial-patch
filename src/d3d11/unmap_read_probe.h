@@ -26,7 +26,7 @@ enum Reader : int {
     kPanel = 0,      // the composite constants' shadow: memcpy of the whole block (State::shadow, 512 bytes at most)
     kCamGlitch,      // glitchFrameObserve: 3 floats, only inside an engine-fix event window
     kCamSunglare,    // sunglareSceneRows on the camera block: 12 floats at float 932, fix.sunglare world shader only
-    kCamTemporal,    // temporalPassNoteSceneWrite: 12 floats at 932 and 2 at 792, only while the temporal pass wants them
+    kCamTemporal,    // temporalPassNoteSceneWrite: 12 floats at 932, floats794/795, and conditionally rows270..273; estimate120 bytes
     kSceneCb,        // sunglareSceneRows on the world shader's scene block (a 208-byte block never qualifies)
     kParticle,       // particleCapture: the plume shader's slot-1 block
     kBillboard,      // billboardCapture: the sun glare train's block, at most 512 bytes

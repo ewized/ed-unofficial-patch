@@ -58,6 +58,7 @@
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/gpu_timing.h"
 #include "../../src/d3d11/journal_watch.h"
+#include "../../src/d3d11/render_boundary.h"
 #include "../../src/d3d11/shader_swap.h"
 #include "../../src/d3d11/ui_depth.h"
 #include "../../src/d3d11/ui_layer.h"
@@ -123,6 +124,11 @@ Stubs g_stubs;
 
 // ============================================================================== the neighbours, stubbed
 namespace edvr {
+// Shared by the world, device-change, flat-weapon and world-mutation rigs.
+// These whole-module fixtures have no registered native render owner and do
+// not exercise FG capture; its optional route must stay refused here. The
+// product links render_boundary.cpp and retains its real ownership check.
+bool renderBoundaryValidateOwner(ID3D11Device*, ID3D11DeviceContext*) noexcept { return false; }
 thread_local bool g_flatComputeInternal = false;
 thread_local bool g_vrWorldInternal = false;
 // The back-off trail's two hooks that ui_layer.cpp calls: flat_ui_layer.cpp defines them in the product, and this rig does not link it.

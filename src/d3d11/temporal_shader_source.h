@@ -24,6 +24,15 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format (main)
 RWTexture2D<float4> N : register(u1);    // the new history
+// FG_MOTION_DECL_BEGIN
+#ifndef EDVR_FG_MOTION
+#define EDVR_FG_MOTION 0
+#endif
+#if EDVR_FG_MOTION
+// Only mv uses this alias; main's history N is eliminated from that entry.
+RWTexture2D<float2> FGPhysicalMotion : register(u1);
+#endif
+// FG_MOTION_DECL_END
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 unused (the mover mask's, retired); 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
@@ -1058,6 +1067,14 @@ R"HLSL(
         bool hidden = engineMasked || freshEdit || (!trackedForeground && !uiHere && backgroundHistoryHidden(local,p,motion,zraw,zPred));
         // Keep physical motion for diagnostics/reactivity. Only NVIDIA's
         // history lookup is invalidated, as with new source-screen pixels.
+// FG_MOTION_WRITE_BEGIN
+#if EDVR_FG_MOTION
+        // SR reactivity rejects history, not physical correspondence. Only an
+        // actually unavailable vector uses NGX's exactly representable sentinel.
+        bool fgValid = projectionValid && !engineMasked && all(isfinite(motion)) && all(abs(motion) < 65504.0);
+        FGPhysicalMotion[id.xy] = fgValid ? motion : float2(65504.0, 65504.0);
+#endif
+// FG_MOTION_WRITE_END
         float2 written = hidden ? float2(size)*2 : motion;
         MV[id.xy] = written;
 #if EDVR_TEMPORAL_TRACE

@@ -14,7 +14,7 @@ enum class GateHolder : uint8_t {
     Distance, CensusSkip, QuadSkip, CensusAuto, FssRes, FssPanel, Remlok, Holo, TargetSharp, UiDepth, SunGlare, DrawCensus, BlendProbe, ObjectProbe,
     PanelCurve, Particle, Backdrop, Scrim, QuadProbe, LoaderPanel, IntroPanel, WakePulse, NightVision, SpaceDustHidden, WitchspaceStarsHidden,
     DepthProbe, Footprint, IntroCurve, SrvTurretHud,
-    Count
+    NativeVrs, Count
 };
 constexpr size_t kGateHolders = static_cast<size_t>(GateHolder::Count);
 static_assert(kGateHolders <= 32, "the holder set is one 32-bit mask");
@@ -23,7 +23,7 @@ inline const char* gateHolderName(size_t h) {
     static const char* const names[kGateHolders] = {
         "distance", "census_skip", "quad_skip", "census_auto", "fss_res", "fss_panel", "remlok", "holo", "target_sharp", "ui_depth", "sun_glare",
         "draw_census", "blend_probe", "object_probe", "panel_curve", "particle", "backdrop", "scrim", "quad_probe", "loader_panel", "intro_panel",
-        "wake_pulse", "night_vision", "space_dust_hidden", "witchspace_stars_hidden", "depth_probe", "footprint", "intro_curve", "srv_turret_hud"};
+        "wake_pulse", "night_vision", "space_dust_hidden", "witchspace_stars_hidden", "depth_probe", "footprint", "intro_curve", "srv_turret_hud", "native_vrs"};
     return h < kGateHolders ? names[h] : "unknown";
 }
 constexpr uint32_t gateHolderBit(GateHolder h) { return 1u << static_cast<unsigned>(h); }

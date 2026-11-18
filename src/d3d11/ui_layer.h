@@ -59,6 +59,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
@@ -476,6 +477,78 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4],
                                   bool ownedFrame = false, bool resolved = true);
+
+// FG owns these references until its GPU completion fence retires. Capture and
+// replay run only on the existing render owner, on its immediate context. The
+// snapshot contains private pixel copies, never references to mutable UI layers.
+// This first contract refuses the live scope/ripple and layer-only world routes;
+// a refusal keeps the caller on the unchanged native presentation path.
+enum class UiLayerFgRefusal : uint32_t {
+    None, InvalidArgument, ForeignOwner, Unavailable, WrongSequence, EyeUnproven,
+    SizeMismatch, ScopeActive, RippleActive, WorldRoute, IncompletePublication,
+    CopyFailed, CompositeFailed
+};
+struct UiLayerFgInfo {
+    bool fullSupported = false, empty = false;
+    UiLayerFgRefusal refusal = UiLayerFgRefusal::Unavailable;
+    uint64_t sequence = 0;
+    uint32_t eye = 2, width = 0, height = 0, ownerThread = 0, frameFormat = 0;
+    uintptr_t sourceDevice = 0;
+    bool smoothingApplied = false;
+};
+// Pure admission policy, shared with the contract falsifiers. "available"
+// means the recognized UI path is live and has not stood down; it does not
+// claim that all possible game UI shaders are recognized.
+struct UiLayerFgFacts {
+    bool arguments = false, owner = false, available = false, sequence = false;
+    bool eye = false, size = false, scope = false, ripple = false, world = false;
+    bool complete = false, hasUi = false;
+};
+inline UiLayerFgRefusal uiLayerFgAdmission(const UiLayerFgFacts& f) noexcept {
+    if (!f.arguments) return UiLayerFgRefusal::InvalidArgument;
+    if (!f.owner) return UiLayerFgRefusal::ForeignOwner;
+    if (!f.available) return UiLayerFgRefusal::Unavailable;
+    if (!f.sequence) return UiLayerFgRefusal::WrongSequence;
+    if (!f.eye) return UiLayerFgRefusal::EyeUnproven;
+    if (!f.size) return UiLayerFgRefusal::SizeMismatch;
+    if (f.scope) return UiLayerFgRefusal::ScopeActive;
+    if (f.ripple) return UiLayerFgRefusal::RippleActive;
+    if (f.world) return UiLayerFgRefusal::WorldRoute;
+    if (!f.complete) return UiLayerFgRefusal::IncompletePublication;
+    return UiLayerFgRefusal::None;
+}
+class UiLayerFgSnapshot;
+struct UiLayerFgPlanes {
+    UiLayerFgInfo info;
+    // Borrowed, immutable pixels; retain the snapshot through every GPU reader's
+    // completion fence. Layer is null only for an empty snapshot; multiply is
+    // null when useMult is false.
+    ID3D11Texture2D* layer = nullptr;
+    ID3D11Texture2D* multiply = nullptr;
+    float layerUv[4] = {0, 0, 1, 1};
+    // Smoothing is already baked into layer when info.smoothingApplied is true.
+    bool useMult = false, smooth = false;
+};
+bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
+                        UiLayerFgPlanes* planes) noexcept;
+// New FG producer only, before its first capture. Retire the cache's references
+// to old leased pixels while their snapshots/fences retain them; keep unleased
+// planes, SMAA and the established render-owner binding. Ordinary frames do not
+// call this. A foreign owner/context refuses without changing either eye.
+bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept;
+// Capture frame must be this eye/sequence's exact temporal output, before RCAS
+// and before uiLayerComposite. Unknown post-sharpen identity is refused. The
+// coordinator may separately bind later RCAS world color to this immutable lease.
+std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
+    ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgInfo* info = nullptr) noexcept;
+// Output has its own COM reference and its own pixels on every successful
+// replay, including empty snapshots. Never overwrites the generated source.
+bool uiLayerFgReplay(ID3D11DeviceContext* context,
+    const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
+    ID3D11Texture2D* generatedWorld, ID3D11Texture2D** output,
+    UiLayerFgInfo* info = nullptr) noexcept;
 // The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
 // (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
 bool uiLayerDoorFromPass(uint32_t eye);

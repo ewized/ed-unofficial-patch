@@ -832,6 +832,11 @@ int boundarySourceChecks(const std::string& root) {
         body = hookText.substr(begin, i - begin);
     }
     const std::string tickBody = body;   // the ticks, before they are taken out below
+    verify(hookText.find("EDVR_BOUNDARY_TICK(tkNativeVrsClock, \"native_vrs_clock\")") != std::string::npos &&
+               tickBody.find("++g_state->frameCounter;") < tickBody.find("tkNativeVrsClock.run(") &&
+               tickBody.find("tkNativeVrsClock.run(") < tickBody.find("if (graphicsRuntimeDisabled())") &&
+               tickBody.find("vScreenNativeFrameBoundary(g_state->frameCounter)") != std::string::npos,
+           "native VRS recovery uses the sole Present ordinal under its own tick budget before graphics standdown");
     // Every tick call out, then what is left.
     size_t pos = 0;
     int tickCalls = 0;
@@ -1714,6 +1719,57 @@ int drawPathSourceChecks(const std::string& root) {
         verify(hits.empty(), "no interestHas, draw_interest.h, RecomputeInterest or g_drawInterestPtr anywhere in src (closing build):" + hits);
     }
 
+    // Native attribution: subtract only the first raw primary call. Keep the
+    // existing sampling owner; preparation and mirrors belong to EDVR.
+    {
+        const std::string text = load("vscreen.cpp");
+        const std::string start = "constint64_tr0=clock.on?qpcNow():0;";
+        const std::string finish = "if(clock.on)clock.realCall(r0);";
+        const std::string prep = "nativeBeforeOriginal(self);";
+        struct ClockCase { char kind; const char* raw; int timers, calls; };
+        const ClockCase cases[] = {
+            {'D', "g_state->realDraw(self,count,start);", 1, 1},
+            {'I', "g_state->realDrawIndexed(self,count,startIndex,baseVertex);", 1, 2},
+            {'N', "g_state->realDrawInstanced(self,perInstance,drawn,startVertex,startInstance);", 1, 1},
+            {'X', "g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);", 2, 3},
+        };
+        const auto scope = [&](char kind) {
+            const std::string needle = std::string("forwardWithVerdict(self, v, flags, '") + kind + "'";
+            const size_t from = text.find(needle);
+            if (from == std::string::npos) return std::string();
+            const size_t open = text.find('(', from), end = closingParen(text, open);
+            return end == std::string::npos ? std::string() : withoutSpaces(text.substr(from, end - from + 1));
+        };
+        const auto valid = [&](const std::string& body, const ClockCase& c) {
+            if (body.empty() || countOf(body, start) != c.timers || countOf(body, finish) != c.timers ||
+                countOf(body, c.raw) != c.calls || countOf(body, prep) != 1 ||
+                body.find("if(!pane.withheld()){" + prep) == std::string::npos ||
+                body.find(prep) >= body.find(start) || countOf(body, start + c.raw + finish) != c.timers) return false;
+            if (c.kind == 'X' && body.find("VrsWorkReferenceScopereference(self,") >= body.find(start)) return false;
+            const size_t mirror = body.find("while(pane.nextMirrorPass())");
+            return mirror == std::string::npos || body.find(finish) < mirror;
+        };
+        for (const auto& c : cases) {
+            const std::string body = scope(c.kind), label = std::string("native attribution ") + c.kind;
+            verify(valid(body, c), label + ": preparation/reference setup excluded, raw primary only, withheld unclocked, mirrors outside");
+            std::string moved = body;
+            const size_t timer = moved.find(start), preparation = moved.find(prep);
+            if (timer != std::string::npos && preparation != std::string::npos) {
+                moved.erase(timer, start.size());
+                moved.insert(preparation, start);
+            }
+            verify(!valid(moved, c), label + ": charging native preparation to the forwarded draw fails");
+            moved = body;
+            const size_t end = moved.find(finish);
+            if (end != std::string::npos) { moved.erase(end, finish.size()); moved += finish; }
+            verify(!valid(moved, c), label + ": broad completion after pane/mirror work fails");
+            verify(!valid(body + c.raw, c), label + ": an extra raw primary call fails");
+        }
+        const std::string compact = withoutSpaces(text);
+        verify(compact.find("on(perfMonitorSampleDraws()&&(++t_drawClockOrdinal%kPerfMonitorDrawTimeStride)==0)") != std::string::npos &&
+                   compact.find("if(!forwarded)real+=qpcNow()-start;forwarded=true;") != std::string::npos,
+               "native attribution retains the existing sample ordinal/stride and first-forwarded-call rule");
+    }
     // vscreen.cpp: the draw's own flags replaced the thread_locals.
     const std::string vs = load("vscreen.cpp");
     verify(!vs.empty(), "could not read src\\d3d11\\vscreen.cpp");

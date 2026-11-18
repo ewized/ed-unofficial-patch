@@ -80,8 +80,23 @@ struct StereoDispatch {
   PFN_xrReleaseSwapchainImage releaseSwapchainImage = nullptr;
 };
 
+// Full-eye, premultiplied native coverage. Source views use the same coordinate
+// frame as renderCaptured's world views; only relative rotation is applied.
+struct StereoNativeUi {
+  const EyeCapture* pixels=nullptr;
+  XrView views[2]{};
+};
+
 class D3D11Stereo final {
  public:
+  struct FailureInfo {
+    const char* stage="none";
+    uint32_t eye=UINT32_MAX;
+    XrResult result=XR_SUCCESS;
+    HRESULT hresult=S_OK,removed=S_OK;
+    bool hresultAvailable=false,removedAvailable=false;
+  };
+  const FailureInfo& failureInfo() const {return failureInfo_;}
   // XR renderer: records private command lists unless an exclusively owned
   // immediate scene context is explicitly selected. Not a game-device pass.
   // Borrowed session/dispatch must remain valid until shutdown/destruction.
@@ -133,7 +148,10 @@ class D3D11Stereo final {
                           const StereoPlacement* placement = nullptr,
                           float fade = 0.0f, const XrPosef* headPose = nullptr, float leftEyeShare = 0.0f,
                           const StereoHiddenArea* rightHidden = nullptr, float leftStripBlack = 0.0f, bool leftZoomed = false,
-                          const XrPosef* seatOrigin = nullptr, const StereoViewCircle* circle = nullptr);
+                          const XrPosef* seatOrigin = nullptr, const StereoViewCircle* circle = nullptr,
+                          bool renderPlugins = true, const StereoNativeUi* nativeUi = nullptr);
+  // nativeUi requires raw world pixels: its full-eye coverage is sampled at
+  // the supplied source orientation and composed before the single plugin pass.
   // circle (F206, StereoViewCircle above): with it on and the mirror drawn each eye gets one more draw of the share shader in its circle mode, over its finished image, before the fade, by the
   // mirror's weight; the share and the mirror are drawn as they were and the circle goes over them. Nothing else changes, so with no circle (or no mirror) both eyes are bit for bit what they were.
   // leftStripBlack, 0..1 (B3, the scope zoom's window, scope_zoom_window.h): with a share drawn, the part of the left eye the right eye does not cover (its outer strip, and the fade
@@ -181,6 +199,10 @@ class D3D11Stereo final {
   double initShaderMs() const { return initShaderMs_; }
 
  private:
+  HRESULT ensureNativeUiResources();
+  XrResult noteFailure(const char*,uint32_t,XrResult,HRESULT=S_OK,bool=false);
+  FailureInfo failureInfo_{};
+  unsigned failureLines_=0;
   struct Eye {
     XrSwapchain swapchain = XR_NULL_HANDLE;
     std::vector<ID3D11Texture2D*> images;
@@ -211,6 +233,9 @@ class D3D11Stereo final {
   Microsoft::WRL::ComPtr<ID3D11PixelShader> blitPixelShader_;
   Microsoft::WRL::ComPtr<ID3D11Buffer> blitConstants_;
   Microsoft::WRL::ComPtr<ID3D11SamplerState> blitSampler_;
+  Microsoft::WRL::ComPtr<ID3D11PixelShader> nativeUiPixelShader_;
+  Microsoft::WRL::ComPtr<ID3D11Buffer> nativeUiConstants_;
+  Microsoft::WRL::ComPtr<ID3D11SamplerState> nativeUiSampler_;
   // F106: the left eye's share: its pixel shader (run with the blit's vertex shader), constants, blend (rgb by the source's alpha, the left image's alpha kept), and the
   // right eye's hidden-area mask with what it was built from.
   Microsoft::WRL::ComPtr<ID3D11PixelShader> sharePixelShader_;

@@ -26,6 +26,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include "../common/comfort_fade.h"
 #include "../common/left_eye_share.h"
 #include "../common/scope_zoom_window.h"
@@ -37,6 +38,12 @@
 #include "native_device.h"
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
+#include "native_fg_client.h"
+#include "native_fg_schedule.h"
+#include "native_fg_projection_policy.h"
+#include "native_fg_credit.h"
+#include "native_fg_lifecycle.h"
+#include "native_fg_bootstrap.h"
 #include "native_sharpen_client.h"
 #include "native_desktop_window_client.h"
 #include "onfoot_recorder_client.h"
@@ -279,6 +286,27 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeDevice graphics; SessionBinding binding; D3D11Stereo stereo; SessionState state;
   EyeCapture captured;
   EyeCapture previousPair;
+  NativeFgClient frameGeneration;
+  uint64_t fgUiPresented=0;
+  using FgCreditRequest=NativeFgCreditRequest;
+  NativeFgCreditLoan fgCreditLoan;
+  std::shared_ptr<FgCreditRequest> fgCredit;
+  std::atomic<bool> fgAvailable{false},fgEnabled{false};
+  bool fgPreparingCredit=false,fgNativeOutstanding=false,fgNativePixels=false,fgFallbackValid=false,fgMenuVisible=false;
+  uint32_t fgMultiplier=0,fgAcceptedEyes=0;
+  uint64_t fgTick=0,fgNextCredit=0,fgConfig=0,fgHistory=0,fgDisplayedSequence=0;
+  uint64_t fgNativePresented=0,fgGeneratedPresented=0,fgRepeated=0,fgEmpty=0,fgRefused=0,fgCredits=0,fgLastLineMs=0;
+  fglifecycle::Reporter fgLifecycle;
+  fgbootstrap::Bootstrap fgBootstrap;
+  uint32_t fgLastDisableReason=0;
+  XrTime fgLastSourceTime=0;XrDuration fgLastAge=0;unsigned fgLastPhase=0;
+  EyeCapture fgFallback;
+  EyeCapture fgWorldFallback,fgUiFallback;
+  bool fgSplitFallbackValid=false;
+  XrView fgFallbackViews[2]{};
+  XrSpace fgFallbackSpace=XR_NULL_HANDLE;
+  XrTime fgFallbackTime=0;
+  uint64_t fgFallbackSequence=0,fgFallbackReference=0;
   bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
   XrView previousViews[2]{};
   StereoPlacement previousPlacement[2]{};
@@ -289,6 +317,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t replaysAcrossOrigin=0;
   XrPosef previousHeadPose{};bool previousHeadValid=false; // the located head of previousViews' frame, for the plugin API's headPose
   uint64_t previousReference=0,withheldPairs=0,replayedPairs=0,emptyWithholds=0;
+  uint64_t previousPairSequence=0;XrTime previousPairTime=0;
   NativeFrameClient features;
   NativeFovTrim fovTrim;
   EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
@@ -1114,6 +1143,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return;
     }
     if(lifecycle==Lifecycle::Stopping&&state.running()) {
+      fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
+      frameGeneration.invalidate(7);fgFallbackValid=false;
       r=boundary.drain();
       if(r==XR_SUCCESS)r=state.stop();
       serviceStopped=r==XR_SUCCESS;
@@ -1128,12 +1159,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // Idle service work is CPU/XR only. A loading projection needs an explicit
     // render-caller boundary; it cannot borrow the game context between calls.
     if(visibilityMaskDirty&&state.running())refreshHiddenMasks("runtime_event");
+    if(fgTickOwner(operation))return;
     flatClearTick();
   }
   void loadingBoundary() {
     if(GetCurrentThreadId()!=ownerThread||serviceStopped||serviceFailed)return;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation){publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"loading_operation");return;}
+    if(fgEnabled.load(std::memory_order_acquire))return;
     if(loading.work(state.frameOpen())==LoadingWork::None||!state.running())return;
     const auto r=loadingStep();
     if(r!=XR_SUCCESS)publishFatalFailure(boundary.failed()?boundary.lastResult():r,"loading_frame");
@@ -1465,6 +1498,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     timingFrame.baseDisplayHz=system.displayFrequencyAvailable&&std::isfinite(system.displayFrequency)&&system.displayFrequency>0?system.displayFrequency:0;
   }
   bool invalidateOrigin(const char* reason="reference_change") {
+    if(fgEnabled.load(std::memory_order_acquire)) {
+      frameGeneration.invalidate(8);frameGeneration.images().ready=false;
+      fgFallbackValid=false;fgDisplayedSequence=0;
+    }
     menu.invalidate(); // CPU only, including callers without a producer boundary.
     invalidateEyeTreatments();
     features.invalidate();previousPairValid=false;
@@ -1477,6 +1514,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   CompositorRead compositorRead() const override {return poses.read();}
   void compositorUnsupported(unsigned slot) noexcept override {nativeTracePrintf("compositor_unavailable,slot=%u\n",slot);}
+#include "native_fg_host.inl"
   vr::EVRCompositorError waitPoses(uint64_t generation,CompositorRead& out) override {
     gameFrameCallMs.store(GetTickCount64(),std::memory_order_relaxed); // the game's call, from any thread: flatClearTick's quiet window
     clearOverlapHandoff();
@@ -1493,7 +1531,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       auto result=vr::VRCompositorError_InvalidTexture;
       FrameCycleStats::Shape cycleShape{};
-      const bool dispatched=service.invoke([&]{
+      const bool dispatched=fgInvokeWait([&]{
         frameCycleWaitToken.store(cycleToken,std::memory_order_release);frameCycles.waitOwnerBegin(cycleToken,frameCycleUs());
         result=waitPoses(generation,out);
         cycleShape.generation=runtimeGeneration;cycleShape.featureEpoch=featureChanges;cycleShape.pacing=unsigned(lastPacing);
@@ -1501,7 +1539,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         cycleShape.sceneReady=featureFrameKnown&&featureFrame.sceneReady?1u:0u;
         for(unsigned i=0;i<2;++i){const auto submitted=fovTrim.lastSubmitted(i);cycleShape.width[i]=submitted.width;cycleShape.height[i]=submitted.height;cycleShape.outputWidth[i]=sizes[i].recommendedImageRectWidth;cycleShape.outputHeight[i]=sizes[i].recommendedImageRectHeight;}
         frameCycles.waitOwnerEnd(cycleToken,frameCycleUs());frameCycleWaitToken.store(0,std::memory_order_release);
-      },OwnerCallKind::WaitPoses);
+      });
       // Start after the route returns so the dispatch/rendezvous is outside
       // the application interval. Direct owner calls have no producer-side
       // route return and therefore do not claim this interval.
@@ -1541,7 +1579,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(!frameCycleWaitToken.load(std::memory_order_acquire))frameCycles.noteDirectOwner();
     if(GetCurrentThreadId()!=ownerThread)return vr::VRCompositorError_InvalidTexture;
-    auto operation=gate.tryEnter(runtimeGeneration);
+    if(fgEnabled.load(std::memory_order_acquire)&&!fgPreparingCredit)return vr::VRCompositorError_InvalidTexture;
+    auto operation=fgCreditLoan.admit(gate,runtimeGeneration,service.isOwner());
     if(!operation||generation!=compositorGeneration||!poses.read().connected||!state.running()||state.terminal()||serviceStopped||serviceFailed||!seated.space()||!changes.active())
       return vr::VRCompositorError_InvalidTexture;
     // The game is calling again: any Submit from here on belongs to a frame it begins, not to the one flatClearTick ended.
@@ -1568,21 +1607,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
-    if(seatPoll())return vr::VRCompositorError_InvalidTexture;     // the stored seat went back: this frame's pose update is given up, as an intro recentre's is
-    if(introRecentreRequested()) {
-      switch(seatIntro()) {
-        case SeatIntro::Todays:
-          if(applyIntroRecentre())clearIntroRecentreRequest();
-          return vr::VRCompositorError_InvalidTexture;
-        case SeatIntro::Applied: clearIntroRecentreRequest();return vr::VRCompositorError_InvalidTexture;
-        case SeatIntro::Skipped: clearIntroRecentreRequest();break;
-        case SeatIntro::Sampling: case SeatIntro::Retry: break;     // the ask stays; the next frame samples or applies again
-      }
-    }
+    if(!fgPreparingCredit&&!poseSeatReady())return vr::VRCompositorError_InvalidTexture;
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingApplicationSequence.store(timingSequence,std::memory_order_release);
     timingResetFrame(timingSequence);
+    // A native source credit does not compose/end an XR display frame.
+    // Its measured composition work is zero; independent display work has
+    // its own FG counters and must not invalidate producer GPU publication.
+    if(fgPreparingCredit)timingFrame.composeMs=0;
     if(submitStats.advance(GetTickCount64()))nativeTracePrintf("native_submit_window_begin,window=%llu,warmup=%u,samples=%u,interval_ms=30000\n",
       (unsigned long long)submitStats.window(),SubmissionStats::warmup,SubmissionStats::capacity);
     submitSample={};transferWall={};submitSample.sequence=timingSequence;submitCallbacksBegin=graphicsCalls.calls;
@@ -1595,14 +1628,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(boundary.failed())publishFatalFailure(boundary.lastResult(),"pose_boundary");
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
-    const FramePacing pacing=featureFrameKnown&&featureFrame.deferredPacing?FramePacing::Deferred:FramePacing::Runtime;
+    const FramePacing pacing=!fgPreparingCredit&&featureFrameKnown&&featureFrame.deferredPacing?FramePacing::Deferred:FramePacing::Runtime;
     if(pacing!=lastPacing){lastPacing=pacing;++pacingChanges;++featureChanges;
       nativeTracePrintf("native_pacing,mode=%s,sequence=%llu,changes=%llu\n",
         pacing==FramePacing::Deferred?"deferred":"runtime",
         (unsigned long long)(frameSequenceOffset+compositorWaits),(unsigned long long)pacingChanges);}
     // A call made from here until the publish below is answered from the cache's `next` slot (pose_cache.h).
     if(poseCacheOn.load(std::memory_order_acquire))poseCache.beginWait();
-    lastCompositorResult=boundary.waitAndBegin(pacing);
+    lastCompositorResult=fgPreparingCredit?XR_SUCCESS:boundary.waitAndBegin(pacing);
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
     loading.sceneWaited();
@@ -1776,6 +1809,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       timingFrame.outputHeight[eye]=sizes[eye].recommendedImageRectHeight;
     }
     timingFrame.featureEpoch=featureChanges;
+    if(locatedValid&&frame.shouldRender)fgAnnounceSource(frame,located);
     if(temporal.acquired()&&locatedValid&&frame.shouldRender) {
       // ...and what the game is told now, which leads that during an
       // adoption: fix.ui_quality's surfaces size a panel the game makes for
@@ -1795,6 +1829,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     frameViews[0]=located.views[0];frameViews[1]=located.views[1];
     frameContentViews[0]=frameViews[0];frameContentViews[1]=frameViews[1];
     framePlacement[0]={};framePlacement[1]={};
+    if(fgPreparingCredit) {
+      fgNativePixels=geometryValid&&frame.shouldRender;
+    }
     auto snapshot=poses.read();snapshot.sequence=frame.sequence;snapshot.renderTime=render.time;snapshot.gameTime=game.time;
     snapshot.renderPose=render.pose;snapshot.gamePose=game.pose;snapshot.posesAvailable=true;
     if(!poses.publish(snapshot)){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
@@ -1811,7 +1848,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       timingInvalidate();
     if(timingFrameActive) {
       const bool enabled=timing.gpuEnabled();
-      if(deviceTimingReady)deviceTiming.beginFrame(timingSequence,enabled);
+      if(deviceTimingReady&&!fgPreparingCredit)deviceTiming.beginFrame(timingSequence,enabled);
       else {
         EdvrNativeDeviceGpuSample missing{sizeof(missing),EDVR_NATIVE_TIMING_VERSION_3,
           timingSequence,GetTickCount64(),enabled ? uint32_t(separateGraphics()?EdvrNativeGpuQueryFailure:EdvrNativeGpuNotSeparate) : uint32_t(EdvrNativeGpuDisabled)};
@@ -1894,6 +1931,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
     bool pairReady=false;
+    if(fgEnabled.load(std::memory_order_acquire))return fgSubmitNative(eye,texture,bounds,flags);
     // Not `captured`: that name is the EyeCapture member (C4458).
     const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
     // frame_end_overlap scope: separate device (finishPair below then needs
@@ -2064,7 +2102,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   }
   void publishSubmitTimingIfComplete(vr::EVREye eye) {
     timingFrameMask|=1u<<unsigned(eye); if(timingFrameMask!=3)return;
-    deviceTiming.acceptFrame(timingSequence);
+    if(!fgEnabled.load(std::memory_order_acquire))deviceTiming.acceptFrame(timingSequence);
     pollDeviceTiming();
     // Version 5: the caller work of the cycle this frame's own pose wait
     // closed (frame_cycle_stats.h, callerWorkForCurrent). The caller thread
@@ -2084,9 +2122,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       submitSample.producerFlushMs=transferWall.producerFlush;
       submitSample.consumerAcquireMs=transferWall.consumerAcquire;
       submitSample.consumerFlushMs=transferWall.consumerFlush;
-      submitSample.endFrameMs=boundary.endFrameMs();
-      submitSample.waitFrameMs=boundary.waitBlockMs();
-      submitSample.pacerBlockMs=boundary.pacerBlockMs();
+      const bool independentFg=fgEnabled.load(std::memory_order_acquire);
+      submitSample.endFrameMs=independentFg?0.:boundary.endFrameMs();
+      submitSample.waitFrameMs=independentFg?0.:boundary.waitBlockMs();
+      submitSample.pacerBlockMs=independentFg?0.:boundary.pacerBlockMs();
       submitSample.deferred=boundary.turbo()?1u:0u;
       if(!frameWithheld&&submitStats.add(submitSample))reportSubmitStats();
       timingRetire();
@@ -2098,6 +2137,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
     if(!operation||generation!=compositorGeneration||serviceStopped||serviceFailed)return false;
+    if(fgEnabled.load(std::memory_order_acquire)) {
+      fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
+      fgNativeOutstanding=false;fgAcceptedEyes=0;fgFallbackValid=false;fgDisplayedSequence=0;
+      frameGeneration.invalidate(11);frameGeneration.images().ready=false;
+      if(state.frameOpen()&&boundary.prepared(nullptr)!=XR_SUCCESS)return false;
+    }
     const auto cleared=boundary.clear();
     if(cleared!=XR_SUCCESS) {
       if(boundary.failed())publishFatalFailure(boundary.lastResult(),"clear_boundary");
@@ -2162,7 +2207,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     if(GetCurrentThreadId()!=ownerThread)return false;
     auto operation=gate.tryEnter(runtimeGeneration);
-    if(!operation||generation!=compositorGeneration||state.frameOpen())return false;
+    if(!operation||generation!=compositorGeneration||
+       (fgEnabled.load(std::memory_order_acquire)?fgNativeOutstanding:state.frameOpen()))return false;
     ++compositorHandoffs;return true; // the completed pair already ended its frame
   }
   XrResult closeDiagnosticFrame() {
@@ -2359,6 +2405,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
+    fgMenuVisible=menuTreated;
+    if(fgEnabled.load(std::memory_order_acquire)&&menuTreated) {
+      // The provider's HUD snapshot excludes this runtime menu. A generated
+      // pair cannot stand in for an eye which the menu actually changed.
+      frameGeneration.invalidate(6);frameGeneration.images().ready=false;fgFallbackValid=false;++fgRefused;
+    }
     D3D11_TEXTURE2D_DESC outputDesc{};treated->GetDesc(&outputDesc);
     submitSample.outputWidth[unsigned(eye)]=outputDesc.Width;
     submitSample.outputHeight[unsigned(eye)]=outputDesc.Height;
@@ -2782,6 +2834,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       previousPlacement[0]=framePlacement[0];previousPlacement[1]=framePlacement[1];
       previousZoomed=zoomAppliedNow;   // a replay of it draws the same narrowed left picture, which the share's dimming has to know
       previousReference=poses.read().originGeneration;previousPairValid=true;
+      previousPairSequence=activeFrameSequence;previousPairTime=frameGeometry.displayTime;
     } else previousPairValid=false;
   }
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
@@ -4123,6 +4176,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);service.setFlatWaits({});}
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
+    fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
     clearOverlapHandoff();
     if(serviceFailed)return;
     serviceFailed=true;
@@ -4142,6 +4196,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     tracedLifecycle=lifecycle;
   }
   bool applyFrameSequence(Frame& frame) {
+    if(fgPreparingCredit) {
+      if(lastPublishedFrameSequence==(std::numeric_limits<uint64_t>::max)())return false;
+      frame.sequence=++lastPublishedFrameSequence;activeFrameSequence=frame.sequence;return true;
+    }
     if(!frame.sequence||frameSequenceOffset>(std::numeric_limits<uint64_t>::max)()-frame.sequence)return false;
     frame.sequence+=frameSequenceOffset;activeFrameSequence=frame.sequence;
     if(frame.sequence>lastPublishedFrameSequence)lastPublishedFrameSequence=frame.sequence;
@@ -4167,6 +4225,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     return true;
   }
   bool close() {
+    fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
     clearOverlapHandoff();
     // A pacer wait kicked by the last frame's finish() must not be left
     // running past this point: stop() below joins the FramePacer thread, and
@@ -4203,6 +4262,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
     desktopWindow.close(); // CPU only: the graphics half lets the held eye images go at its next Present
+    if(FAILED(frameGeneration.close()))return clean=false;
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(features.close()))return clean=false;
@@ -4268,7 +4328,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
     }
     ShutdownTrace captureStage("host_capture_release",tracing);
-    skybox.shutdown();captured.shutdown();previousPair.shutdown();captureStage.end(true);
+    skybox.shutdown();captured.shutdown();previousPair.shutdown();fgFallback.shutdown();
+    fgWorldFallback.shutdown();fgUiFallback.shutdown();captureStage.end(true);
     ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
     const auto stereoResult=stereo.shutdown();
     clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);
@@ -4554,6 +4615,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         nativeTracePrintf("native_temporal,acquire_failure=%08lx\n",(unsigned long)acquired);return false;
       }
       nativeTracePuts("native_temporal,provider_acquired=1");
+      acquired=E_FAIL;
+      if(graphicsCalls.invoke([&]{acquired=frameGeneration.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})&&acquired==S_OK) {
+        // acquire validates the provider on the producer boundary; its table
+        // callbacks and all following ownership belong to the XR owner.
+        frameGeneration.bindOwner();
+        fgAvailable.store(true,std::memory_order_release);
+        nativeTracePuts("native_fg,provider_acquired=1,default_off=1");
+      } else nativeTracePrintf("native_fg,optional_unavailable=%08lx\n",(unsigned long)acquired);
       acquired=E_FAIL;
       if(!graphicsCalls.invoke([&]{acquired=sharpen.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);})||acquired!=S_OK) {
         nativeTracePrintf("native_sharpen,acquire_failure=%08lx\n",(unsigned long)acquired);return false;

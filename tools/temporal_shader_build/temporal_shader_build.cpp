@@ -39,6 +39,7 @@
 #include "../../src/d3d11/supercruise_bars_shader.h"
 #include "../../src/d3d11/sky_ring_shader.h"          // the sky ring (TEMPORARY, diag.sky_ring)
 #include "../../src/openxr/stereo_shader_source.h"
+#include "../../src/openxr/native_fg_overlay_shader.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -397,11 +398,12 @@ static std::vector<Variant> stereoVariants() {
         {"kStereoSkyboxVsBytecode", "EDVR skybox", "vs", nullptr, {}, false, edvr::openxr::kStereoSkyboxHlsl, "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
         {"kStereoSkyboxPsBytecode", "EDVR skybox", "ps", nullptr, {}, false, edvr::openxr::kStereoSkyboxHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
         {"kStereoSharePsBytecode", "EDVR left eye share", "ps", nullptr, {}, false, edvr::openxr::kStereoShareHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
+        {"kStereoNativeUiPsBytecode", "EDVR native UI overlay", "ps", nullptr, {}, false, edvr::openxr::kStereoNativeUiHlsl, "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0},
     };
 }
 // The texts the stereo key covers, in the variants' order.
 static std::string stereoSources() {
-    return std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl + edvr::openxr::kStereoShareHlsl;
+    return std::string(edvr::openxr::kStereoBlitHlsl) + edvr::openxr::kStereoSkyboxHlsl + edvr::openxr::kStereoShareHlsl + edvr::openxr::kStereoNativeUiHlsl;
 }
 
 // The stereo header: its own key over the text, the variant table (names, entries, profiles, flags) and the compiler DLL, reused when current.
@@ -469,6 +471,9 @@ static int generateTemporal(const Options& o) {
     static const D3D_SHADER_MACRO fast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {nullptr, nullptr}};
     static const D3D_SHADER_MACRO diagnostic[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {nullptr, nullptr}};
     static const D3D_SHADER_MACRO trace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO fgFast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO fgDiagnostic[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO fgTrace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
     const std::string mapEasu = mapEasuSource();   // outlives the variants below, which keep its text
     const std::string mapSmaaEdges = mapSmaaSource(edvr::kMapSmaaEdgesHlsl);
     const std::string mapSmaaWeights = mapSmaaSource(edvr::kMapSmaaWeightsHlsl);
@@ -530,6 +535,9 @@ static int generateTemporal(const Options& o) {
         {"kFlatMonoFinishHdrBytecode", "flat_mono_finish_hdr_ps", "finishHdr", nullptr, {}, true, nullptr, "ps_5_0"},
         {"kFlatMonoSpatialHdrBytecode", "flat_mono_spatial_hdr_ps", "spatialHdr", nullptr, {}, true, nullptr, "ps_5_0"}
     };
+    variants.push_back({"kTemporalMvFgFastBytecode", "temporal_mv_fg_fast_cs", "mv", fgFast, {}});
+    variants.push_back({"kTemporalMvFgBytecode", "temporal_mv_fg_cs", "mv", fgDiagnostic, {}});
+    variants.push_back({"kTemporalMvFgTraceBytecode", "temporal_mv_fg_trace_cs", "mv", fgTrace, {}});
     const std::string core = extractCore(edvr::kTemporalCsHlsl); // validate before fixed source assembly
     const auto fixed = fixedVariants(core);
     variants.insert(variants.end(), fixed.begin(), fixed.end());
@@ -1457,7 +1465,7 @@ static void selfTest() {
             {"kStereoSkyboxPsBytecode", "EDVR skybox", "ps", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0x1F8D73118F42ED8Bull, false},
         };
         auto stereo = stereoVariants();
-        check(stereo.size() == 5 && sizeof(contracts) / sizeof(contracts[0]) == 4, "the four former stereo shaders and F106's share shader are registered");
+        check(stereo.size() == 6 && sizeof(contracts) / sizeof(contracts[0]) == 4, "the four former stereo shaders, share and native UI overlay are registered");
         for (size_t i = 0; i < 4 && i < stereo.size(); ++i) {
             auto& shader = stereo[i]; const auto& legacy = contracts[i];
             for (size_t j = 0; j < i; ++j) check(std::strcmp(stereo[j].symbol, shader.symbol) != 0, "stereo symbols do not collide");
@@ -1485,7 +1493,7 @@ static void selfTest() {
         }
         // F106's share shader: new, so held to what d3d11_stereo.cpp binds rather than to a former call. Its own symbol, source name and text; ps_5_0 with the
         // strictness flag and no macros; the share's constants at b0, the right eye's capture at t0, the hidden-area mask at t1, the blit's sampler at s0, and nothing else.
-        if (stereo.size() == 5) {
+        if (stereo.size() >= 5) {
             auto& share = stereo[4];
             for (size_t j = 0; j < 4; ++j) check(std::strcmp(stereo[j].symbol, share.symbol) != 0, "stereo symbols do not collide");
             check(!std::strcmp(share.symbol, "kStereoSharePsBytecode") && !std::strcmp(share.sourceName, "EDVR left eye share") && !std::strcmp(share.entry, "ps") &&
@@ -1506,6 +1514,25 @@ static void selfTest() {
             D3D11_SHADER_BUFFER_DESC cbDesc{};
             ok = ok && reflection->GetConstantBufferByName("Share") && SUCCEEDED(reflection->GetConstantBufferByName("Share")->GetDesc(&cbDesc)) && cbDesc.Size == 192;
             check(ok, "F106: the share shader is SM5 pixel, binds the share's 192-byte constants at b0, the right eye at t0, the mask at t1 and the sampler at s0, and nothing else");
+        }
+        if(stereo.size()==6) {
+            auto& shader=stereo[5];
+            check(!std::strcmp(shader.symbol,"kStereoNativeUiPsBytecode")&&!std::strcmp(shader.sourceName,"EDVR native UI overlay")&&
+                !std::strcmp(shader.entry,"ps")&&!std::strcmp(shader.profile,"ps_5_0")&&!shader.macros&&
+                shader.flags1==D3DCOMPILE_ENABLE_STRICTNESS&&shader.flags2==0&&shader.alternate&&
+                !std::strcmp(shader.alternate,edvr::openxr::kStereoNativeUiHlsl),"native UI shader registration contract");
+            check(compile(compiler.fn,shader.alternate,shader,true),"native UI shader compiles before test-header emission");
+            ComPtr<ID3D11ShaderReflection> reflection;D3D11_SHADER_DESC desc{};
+            bool ok=SUCCEEDED(reflect(shader.bytes.data(),shader.bytes.size(),__uuidof(ID3D11ShaderReflection),reinterpret_cast<void**>(reflection.GetAddressOf())))&&
+                reflection&&SUCCEEDED(reflection->GetDesc(&desc))&&D3D11_SHVER_GET_TYPE(desc.Version)==D3D11_SHVER_PIXEL_SHADER&&
+                D3D11_SHVER_GET_MAJOR(desc.Version)==5&&desc.ConstantBuffers==1&&desc.BoundResources==5;
+            const char* names[]={"NativeUi","worldTexture","uiTexture","worldSampler","uiSampler"};
+            const D3D_SHADER_INPUT_TYPE types[]={D3D_SIT_CBUFFER,D3D_SIT_TEXTURE,D3D_SIT_TEXTURE,D3D_SIT_SAMPLER,D3D_SIT_SAMPLER};
+            const UINT slots[]={0,0,1,0,1};
+            for(unsigned j=0;j<5;++j){D3D11_SHADER_INPUT_BIND_DESC binding{};ok=ok&&SUCCEEDED(reflection->GetResourceBindingDescByName(names[j],&binding))&&binding.Type==types[j]&&binding.BindPoint==slots[j];}
+            D3D11_SHADER_BUFFER_DESC cb{};
+            ok=ok&&reflection->GetConstantBufferByName("NativeUi")&&SUCCEEDED(reflection->GetConstantBufferByName("NativeUi")->GetDesc(&cb))&&cb.Size==128;
+            check(ok,"native UI shader: 128-byte constants, two eye textures and two samplers at exact slots");
         }
         // The text really is the old call's: a one-byte edit of either changes the hash (the control for the hashes above), and the two texts differ.
         Fnv1a64 edited; std::string tweaked = edvr::openxr::kStereoBlitHlsl; tweaked[tweaked.size() / 2] ^= 1; edited.add(tweaked.data(), tweaked.size());

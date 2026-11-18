@@ -219,18 +219,19 @@ std::string pageList(bool flat, bool developer) {
 }
 
 void pageCases() {
-    const std::string vr = "Performance,Fixes,Visual,Mirror window,Native on foot,Hotkeys,Plugins,Monitor,Status";
+    const std::string vr = "Performance,VRS / Frame generation,Fixes,Visual,Mirror window,Native on foot,Hotkeys,Plugins,Monitor,Status";
     check(pageList(true, false) == "Performance,Visual,Hotkeys,Status,Debug", "the flat profile's pages are Performance, Visual, Hotkeys, Status, Debug (Debug last): the Monitor is a panel of its own there");
     check(!menuProfileHasPage(MenuPageSource::Monitor, true) && menuProfileHasPage(MenuPageSource::Monitor, false) &&
               menuPolicyFor(true).monitorPanel && !menuPolicyFor(false).monitorPanel,
           "the Monitor is a tab where it is not a panel: VR's tab, flat's panel");
     check(menuProfileHasPage(MenuPageSource::Hotkeys, true) && menuProfileHasPage(MenuPageSource::Hotkeys, false), "both profiles have a Hotkeys page: the capture, note and clash work in menuTick follows the page table, not a policy field");
+    check(!menuProfileHasPage(MenuPageSource::VrsFrameGeneration, true) && menuProfileHasPage(MenuPageSource::VrsFrameGeneration, false), "VRS/FG controls and native status have a VR-only page");
     check(!menuProfileHasPage(MenuPageSource::Plugins, true) && menuProfileHasPage(MenuPageSource::Plugins, false), "only VR has a Plugins page");
     check(!menuProfileHasPage(MenuPageSource::Actions, false), "a developer-only page (Instruments) is not a profile's own");
     check(pageList(true, true) == "Performance,Visual,Hotkeys,Status,Debug", "developer mode adds no flat page");
     check(pageList(false, false) == vr, "the VR profile's pages without developer mode");
     check(pageList(false, true) == vr + ",Advanced,Experimental,Instruments", "developer mode adds Advanced, Experimental and Instruments to VR, after Status");
-    check(kMenuPages[6].post == MenuPagePost::AimChoiceAfterLookToAim && std::strcmp(kMenuPages[6].name, "Native on foot") == 0, "the Native on foot page moves the aiming row under Look to aim");
+    check(kMenuPages[7].post == MenuPagePost::AimChoiceAfterLookToAim && std::strcmp(kMenuPages[7].name, "Native on foot") == 0, "the Native on foot page moves the aiming row under Look to aim");
     size_t posts = 0;
     for (size_t i = 0; i < kMenuPageCount; ++i) posts += kMenuPages[i].post != MenuPagePost::None;
     check(posts == 1, "only Native on foot has a post step");
