@@ -276,6 +276,7 @@ python tools\run_jobs.py ^
     --gate "tools\check_tool_conventions.py" ^
     --gate "tools\dump_io.py --self-test" ^
     --gate "tools\log_session.py --self-test" ^
+    --gate "tools\edvr_benchmark.py --self-test" ^
     --gate "tools\layer_fixtures.py --self-test" ^
     --gate "tools\blackhole_optics.py --self-test" ^
     --gate "tools\sgra_optics.py --self-test" ^
