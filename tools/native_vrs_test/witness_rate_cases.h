@@ -33,22 +33,24 @@ inline void witnessRateCases(void (*check)(bool,const char*)){
     ViewportRates lastMode=ViewportRates::Disabled;
     auto setRates=[&](ViewportRates mode){lastMode=mode;++rates;return 0;};
     auto setResource=[&](uintptr_t){++resources;return 0;};
-    check(palette(ViewportRates::Foveated)[0]==kFullRate,"zero tile index selects one shade per raster pixel");
-    check(!bindWitnessMap(cache,7,9,setResource)&&resources==0,"unknown vendor state cannot start a private map");
-    check(applyCoarse(cache,7,setRates,setResource)&&!bindWitnessMap(cache,8,9,setResource)&&
-          !bindWitnessMap(cache,7,7,setResource),"private map requires the matching active eye and a distinct zero map");
-    check(bindWitnessMap(cache,7,9,setResource)&&cache.uniformWitnessMap()&&!cache.fullRateKnown()&&!cache.active(9)&&
-          lastMode==ViewportRates::Foveated&&rates==1&&resources==2,
-          "the zero map keeps the foveated table and publishes neither coarse nor public full rate");
-    check(applyCoarse(cache,7,setRates,setResource)&&cache.active(7)&&rates==1&&resources==3,
-          "same-eye fine and material draws require two resource switches and no viewport changes");
-    check(bindWitnessMap(cache,7,9,setResource)&&applyFullRate(cache,setRates,setResource)&&cache.fullRateKnown()&&
-          lastMode==ViewportRates::Disabled&&!cache.uniformWitnessMap()&&rates==2&&resources==5,
-          "external boundary disables viewport shading and removes the zero map");
-    applyCoarse(cache,7,setRates,setResource);bindWitnessMap(cache,7,9,setResource);cache.invalidate();
-    check(!cache.uniformWitnessMap()&&!bindWitnessMap(cache,7,9,setResource)&&!cache.fullRateKnown(),
-          "command-list invalidation discards the private map acknowledgement");
+    bool uniform=true;
+    for(auto entry:palette(ViewportRates::Uniform1x1))uniform=uniform&&entry==kFullRate;
+    check(uniform,"every retained map index resolves to per-pixel shading during the witness");
+    check(!pauseForWitness(cache,7,setRates)&&rates==0,"unknown vendor state cannot be retained");
+    check(applyCoarse(cache,7,setRates,setResource)&&!pauseForWitness(cache,8,setRates)&&rates==1,
+          "another eye cannot borrow the originally bound view");
+    check(pauseForWitness(cache,7,setRates)&&lastMode==ViewportRates::Uniform1x1&&
+          cache.retainedForWitness(7)&&!cache.fullRateKnown()&&!cache.active(7),
+          "the private uniform palette publishes neither coarse nor public full rate");
+    check(applyCoarse(cache,7,setRates,setResource)&&lastMode==ViewportRates::Foveated&&cache.active(7)&&rates==3&&resources==1,
+          "same-eye fine and coarse issues require two rate changes and zero resource changes");
+    check(pauseForWitness(cache,7,setRates)&&applyFullRate(cache,setRates,setResource)&&cache.fullRateKnown()&&
+          lastMode==ViewportRates::Disabled&&!cache.retainedForWitness(7)&&rates==5&&resources==2,
+          "external full-rate boundary disables the uniform viewport and unbinds its retained view");
+    applyCoarse(cache,7,setRates,setResource);pauseForWitness(cache,7,setRates);cache.invalidate();
+    check(!cache.retainedForWitness(7)&&!pauseForWitness(cache,7,setRates)&&!cache.fullRateKnown(),
+          "command-list invalidation discards any retained-view proof");
     applyCoarse(cache,7,setRates,setResource);
-    check(!bindWitnessMap(cache,7,9,[](uintptr_t){return -1;})&&!cache.bindingKnown&&!cache.ratesKnown&&
-          applyFullRate(cache,setRates,setResource)&&cache.fullRateKnown(),"failed zero-map switch permits a strong recovery");
+    check(!pauseForWitness(cache,7,[](ViewportRates){return -1;})&&!cache.bindingKnown&&!cache.ratesKnown&&
+          applyFullRate(cache,setRates,setResource)&&cache.fullRateKnown(),"failed uniform palette loses both acknowledgements and permits strong recovery");
 }

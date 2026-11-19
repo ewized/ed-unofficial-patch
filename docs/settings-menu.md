@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** in the stationary on-foot tutorial, median application GPU time was about 9.8 ms off and 55.8 ms with the paired motion and material draws on in `4778c602`. Suppressing pairs while keeping ordinary material VRS active yielded 10.9 ms. The individual costs of changing rates, replaying geometry and copying depth remain unresolved.
+- **VRS performance investigation:** in the stationary on-foot tutorial, median application GPU time was about 9.8 ms off and 55.8 ms with the paired motion and material draws on in `4778c602`. Suppressing pairs while keeping ordinary material VRS active yielded 10.9 ms. An RTX 5090 reproduced a loss of coarse material shading when a subsequent experiment switched only the rate-map view. The individual GPU costs of the paired draws remain unresolved.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1026,10 +1026,18 @@ recorded 2,600 valid samples, a 10.901 ms GPU median and a 7.981 ms CPU
 median. Restoring normal VRS at the same pose produced 516 valid samples
 in completed 30-second window 22. Median GPU time returned to 55.751 ms
 and CPU time to 22.299 ms. This diagnostic includes an extra CPU wrapper.
-The comparison isolates the combined cost of the paired path. A separate
-experiment keeps the viewport rate table fixed and switches only the
-tile-index view between the fine and material draws to measure the
-contribution of per-pair rate-table changes.
+The comparison isolates the combined cost of the paired path.
+
+In the RTX 5090 fixture, `a58c8695` held the viewport rate table fixed and
+switched the tile-index view between fine and material draws. Coarse
+shading resumed with fixed render targets. With the production split's
+render-target, depth and shader changes, a coplanar material draw and a
+guarded overlay both shaded an outer 8×8 patch at full rate. Their depth,
+stencil, motion and skin data passed the exact comparisons. In
+`64223926`, reissuing the identical rate table restored the 4×4 footprint
+for the coplanar draw alone. The guarded material still shaded each pixel.
+Neither experiment proceeded to game timing. The correction restores
+the retained eye map and the two viewport palettes from `4778c602`.
 
 ### Simulator validation (2026-11-19)
 

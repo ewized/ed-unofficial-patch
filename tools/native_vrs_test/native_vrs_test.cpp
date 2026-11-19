@@ -143,17 +143,18 @@ int main(){
     check(r.calls[3].palette[0]==5&&r.calls[3].palette[1]==8&&r.calls[3].palette[2]==11,"actual adapter passes public palette");
     check(std::all_of(r.calls[3].palette,r.calls[3].palette+16,[](uint32_t value){return value!=0;}),"actual adapter has no CULL entry");
     r=run({DriverOp::Full,DriverOp::Left,DriverOp::WitnessLeft,DriverOp::Left,DriverOp::WitnessLeft,DriverOp::Full});
-    check(r.count==9&&r.calls[3].rates&&std::equal(p.begin(),p.end(),r.calls[3].palette)&&
-          !r.calls[4].rates&&r.calls[4].resource==0x300&&!r.calls[5].rates&&r.calls[5].resource==0x100&&
-          !r.calls[6].rates&&r.calls[6].resource==0x300,
-          "private witness binds the zero-index view and restores the eye view with the same viewport table");
+    const auto& uniform=r.calls[4];
+    check(r.count==9&&uniform.rates&&uniform.version==0x10010&&uniform.count==1&&uniform.enabled&&
+          std::all_of(uniform.palette,uniform.palette+16,[](uint32_t rate){return rate==kFullRate;})&&
+          r.calls[5].rates&&r.calls[5].enabled&&std::equal(p.begin(),p.end(),r.calls[5].palette),
+          "private witness and material use enabled viewports with all-1x1 and foveated palettes on the same view");
     check(r.publicationCount==6&&r.publications[2].vendorKnown&&!r.publications[2].fullKnown&&!r.publications[2].coarseKnown&&
           r.calls[7].rates&&r.calls[7].count==0&&!r.calls[8].rates&&!r.calls[8].resource&&r.fullKnown,
           "public boundary globally disables and unbinds after the private witness");
-    r=run({DriverOp::Full,DriverOp::Left,DriverOp::FailResource,DriverOp::WitnessLeft});
-    check(r.count==7&&r.calls[4].result==-10&&r.calls[5].rates&&r.calls[5].count==0&&
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::FailRate,DriverOp::WitnessLeft});
+    check(r.count==7&&r.calls[4].result==-9&&r.calls[5].rates&&r.calls[5].count==0&&
           !r.calls[6].rates&&!r.calls[6].resource&&r.fullKnown&&!r.coarseKnown&&r.refused,
-          "failed private resource change latches refusal and recovers the strong full-rate state");
+          "failed private palette change latches refusal and recovers the strong full-rate state");
     r=run({DriverOp::Full,DriverOp::Left,DriverOp::Invalidate});
     check(r.count==6&&r.fullKnown&&!r.coarseKnown,"cache invalidation forces both reset calls");
     r=run({DriverOp::Full,DriverOp::FailRate,DriverOp::Left});

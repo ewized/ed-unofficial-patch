@@ -76,8 +76,7 @@ bool activateWhileCurrent(Current current,Activate activate,Reset reset) {
     if(current() && activate() && current())return true;
     reset();return false;
 }
-enum class ViewportRates {Disabled,Foveated};
-enum class RateMap {None,Eye,Witness};
+enum class ViewportRates {Disabled,Uniform1x1,Foveated};
 inline std::array<uint32_t,16> palette(ViewportRates mode) noexcept {
     std::array<uint32_t,16> result{};
     result.fill(kFullRate);
@@ -118,42 +117,38 @@ inline bool buildMap(uint8_t* output,size_t capacity,unsigned worldWidth,unsigne
 struct VendorStateCache {
     bool ratesKnown=false,bindingKnown=false;
     ViewportRates mode=ViewportRates::Disabled;
-    RateMap map=RateMap::None;
     uintptr_t binding=0;
-    void invalidate() noexcept {ratesKnown=bindingKnown=false;binding=0;map=RateMap::None;}
+    void invalidate() noexcept {ratesKnown=bindingKnown=false;binding=0;}
     bool hasRates(ViewportRates requested)const noexcept {return ratesKnown&&mode==requested;}
     bool fullRateKnown()const noexcept {return hasRates(ViewportRates::Disabled)&&bindingKnown&&!binding;}
-    bool active(uintptr_t view)const noexcept {return hasRates(ViewportRates::Foveated)&&bindingKnown&&map==RateMap::Eye&&view&&binding==view;}
-    bool uniformWitnessMap()const noexcept {return hasRates(ViewportRates::Foveated)&&bindingKnown&&map==RateMap::Witness&&binding;}
+    bool active(uintptr_t view)const noexcept {return hasRates(ViewportRates::Foveated)&&bindingKnown&&view&&binding==view;}
+    bool retainedForWitness(uintptr_t view)const noexcept {return hasRates(ViewportRates::Uniform1x1)&&bindingKnown&&view&&binding==view;}
     bool acceptRates(int result,ViewportRates requested) noexcept {
         if(result){invalidate();return false;}ratesKnown=true;mode=requested;return true;
     }
-    bool acceptResource(int result,uintptr_t view,RateMap role) noexcept {
-        if(result){invalidate();return false;}bindingKnown=true;binding=view;map=role;return true;
+    bool acceptResource(int result,uintptr_t view) noexcept {
+        if(result){invalidate();return false;}bindingKnown=true;binding=view;return true;
     }
 };
-// NVAPI's viewport shadingRateTable maps each SRRV tile index to a rate.
-// The immutable witness view contains index 0 in every tile; palette entry
-// 0 is NV_PIXEL_X1_PER_RASTER_PIXEL. Public full rate disables all
-// viewports and unbinds the SRRV. See NVIDIA/nvapi 51e5aae4, nvapi.h,
-// NV_D3D11_VIEWPORT_SHADING_RATE_DESC_V1 and NV_PIXEL_SHADING_RATE.
-template<class Resource>
-bool bindWitnessMap(VendorStateCache& cache,uintptr_t eye,uintptr_t witness,Resource&& resource) {
-    return cache.active(eye) && witness && witness!=eye &&
-        cache.acceptResource(resource(witness),witness,RateMap::Witness);
+// NVAPI's viewport shadingRateTable maps every SRRV index to a rate.
+// The private witness keeps its acknowledged eye view and maps every index
+// to NV_PIXEL_X1_PER_RASTER_PIXEL. Public full rate requires a global
+// disable (numViewports == 0) and a null SRRV.
+template<class Rates>
+bool pauseForWitness(VendorStateCache& cache,uintptr_t view,Rates&& rates) {
+    return cache.active(view) && cache.acceptRates(rates(ViewportRates::Uniform1x1),ViewportRates::Uniform1x1);
 }
 template<class Rates,class Resource>
 bool applyFullRate(VendorStateCache& cache,Rates&& rates,Resource&& resource) {
     bool ok=true;
     if(!cache.hasRates(ViewportRates::Disabled))ok=cache.acceptRates(rates(ViewportRates::Disabled),ViewportRates::Disabled);
-    if(!cache.bindingKnown||cache.binding)ok=cache.acceptResource(resource(0),0,RateMap::None)&&ok;
+    if(!cache.bindingKnown||cache.binding)ok=cache.acceptResource(resource(0),0)&&ok;
     return ok&&cache.fullRateKnown();
 }
 template<class Rates,class Resource>
 bool applyCoarse(VendorStateCache& cache,uintptr_t view,Rates&& rates,Resource&& resource) {
     if(!view)return false;
-    if((!cache.bindingKnown||cache.binding!=view||cache.map!=RateMap::Eye)&&
-       !cache.acceptResource(resource(view),view,RateMap::Eye))return false;
+    if((!cache.bindingKnown||cache.binding!=view)&&!cache.acceptResource(resource(view),view))return false;
     if(!cache.hasRates(ViewportRates::Foveated)&&!cache.acceptRates(rates(ViewportRates::Foveated),ViewportRates::Foveated))return false;
     return cache.active(view);
 }

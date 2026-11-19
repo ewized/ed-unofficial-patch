@@ -58,7 +58,7 @@ struct Shared {
     std::atomic<uint64_t> ticks{0},polls{0},valid{0},invalid{0},stale{0};
     std::atomic<uint64_t> world{0},accepted{0},full{0},invalidations{0};
     std::atomic<uint64_t> expandedAccepted[2]{};
-    std::atomic<uint64_t> witnessMapReactivations{0},witnessMapCreations{0};
+    std::atomic<uint64_t> retainedWitnessReactivations{0};
     std::atomic<uint64_t> updates[2]{},bytes{0},rates{0},resources{0},errors{0};
     std::atomic<uint64_t> contextRefusals{0},frameRefusals{0},targetRefusals{0};
 };
@@ -66,7 +66,6 @@ Shared& shared(){static Shared* const value=new Shared;return *value;}
 struct EyeMap {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<NvRateView> view;
-    ComPtr<NvRateView> witnessView; // immutable zero indices, shared with equal-sized eye
     ComPtr<ID3D11RenderTargetView> target;
     ComPtr<ID3D11DepthStencilView> depth;
     unsigned worldW=0,worldH=0,mapW=0,mapH=0;
@@ -241,9 +240,9 @@ bool activateMap(State& s,uintptr_t view) {
     if(!ok){refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));fullRate(s);return false;}
     publish(s);return true;
 }
-bool prepareWitnessRate(State& s,uintptr_t view,uintptr_t witness) {
+bool prepareWitnessRate(State& s,uintptr_t view) {
     if(!s.cache.active(view))return fullRate(s);
-    if(!native_vrs::bindWitnessMap(s.cache,view,witness,[&](uintptr_t v){return setResource(s,v);})){
+    if(!native_vrs::pauseForWitness(s.cache,view,[&](ViewportRates mode){return setRates(s,mode);})){
         refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));
         fullRate(s);return false;
     }
@@ -329,36 +328,6 @@ bool sameProjection(const NativeVrsProjection& a,const NativeVrsProjection& b) {
 NativeVrsWitnessStamp witnessStamp(const State& s,unsigned eye) {
     return {eye,reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get()),s.frame,s.config,s.gazeEpoch,s.invalidation};
 }
-// Supply initial tile indices only for the immutable witness texture. Its
-// SRRV owns the texture, just as the eye view owns its writable map.
-bool createRateMap(State& s,const native_vrs::MapShape& shape,const uint8_t* initial,
-                   ComPtr<ID3D11Texture2D>& texture,ComPtr<NvRateView>& view) {
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width=shape.width;desc.Height=shape.height;desc.MipLevels=desc.ArraySize=1;
-    desc.Format=DXGI_FORMAT_R8_UINT;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-    desc.Usage=initial?D3D11_USAGE_IMMUTABLE:D3D11_USAGE_DEFAULT;
-    const D3D11_SUBRESOURCE_DATA data{initial,shape.width,0};
-    if(FAILED(s.device->CreateTexture2D(&desc,initial?&data:nullptr,&texture))){refuse(s,NativeVrsFailure::MapCreate);return false;}
-    SrrvDesc vd{0x10018,DXGI_FORMAT_R8_UINT,4,0,0,0};int result=kCallFault;
-    guarded("nativeVrs/createView",[&]{result=s.create(s.device.Get(),texture.Get(),&vd,&view);});
-    callResult(result);
-    if(result||!view){refuse(s,NativeVrsFailure::MapCreate,result);return false;}
-    return true;
-}
-bool ensureWitnessView(State& s,unsigned eye) {
-    auto& map=s.eyes[eye];
-    if(map.witnessView)return true;
-    const auto& other=s.eyes[1-eye];
-    if(other.witnessView && other.mapW==map.mapW && other.mapH==map.mapH){
-        map.witnessView=other.witnessView;return true;
-    }
-    const auto shape=native_vrs::mapShape(map.worldW,map.worldH);
-    if(!shape.bytes||shape.width!=map.mapW||shape.height!=map.mapH)return false;
-    const std::vector<uint8_t> zeros(shape.bytes,0);
-    ComPtr<ID3D11Texture2D> texture;
-    if(!createRateMap(s,shape,zeros.data(),texture,map.witnessView))return false;
-    ++shared().witnessMapCreations;return true;
-}
 bool prepareMap(State& s,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection& projection) {
     auto& map=s.eyes[eye];unsigned width=0,height=0;
     if(!sceneTargetsBound(s,rtv,dsv))return false;
@@ -378,8 +347,14 @@ bool prepareMap(State& s,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthSte
         // Unbind before replacing a resource whose vendor view may be current.
         if(!fullRate(s))return false;
         ComPtr<ID3D11Texture2D> texture;ComPtr<NvRateView> view;
-        if(!createRateMap(s,shape,nullptr,texture,view))return false;
-        map.witnessView.Reset();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width=shape.width;desc.Height=shape.height;desc.MipLevels=desc.ArraySize=1;
+        desc.Format=DXGI_FORMAT_R8_UINT;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        if(FAILED(s.device->CreateTexture2D(&desc,nullptr,&texture))){refuse(s,NativeVrsFailure::MapCreate);return false;}
+        SrrvDesc vd{0x10018,DXGI_FORMAT_R8_UINT,4,0,0,0};int result=kCallFault;
+        guarded("nativeVrs/createView",[&]{result=s.create(s.device.Get(),texture.Get(),&vd,&view);});
+        callResult(result);
+        if(result||!view){refuse(s,NativeVrsFailure::MapCreate,result);return false;}
         map.texture=std::move(texture);map.view=std::move(view);map.mapW=shape.width;map.mapH=shape.height;
     }
     map.cpu.resize(shape.bytes);
@@ -513,8 +488,7 @@ bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11Ren
         syncInvalidation(s);
         if(s.failed || !prepareMap(s,eye,rtv,dsv,projection))return false;
         const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
-        if(s.cache.active(view) && !ensureWitnessView(s,eye)){fullRate(s);return false;}
-        if(!prepareWitnessRate(s,view,reinterpret_cast<uintptr_t>(s.eyes[eye].witnessView.Get())))return false;
+        if(!prepareWitnessRate(s,view))return false;
         if(nativeVrsWitnessReady(context) && s.invalidation==shared().invalidateVersion.load(std::memory_order_acquire)){
             prepared.stamp=witnessStamp(s,eye);
             s.pendingWitness=reinterpret_cast<uintptr_t>(&prepared);
@@ -554,9 +528,9 @@ bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11Render
             ++a.stale;a.failure.store(NativeVrsFailure::GazeStale,std::memory_order_relaxed);return false;
         };
         const auto view=reinterpret_cast<uintptr_t>(map.view.Get());
-        const bool switched=prepared && s.cache.uniformWitnessMap();
+        const bool switched=prepared && s.cache.retainedForWitness(view);
         if(!native_vrs::activateWhileCurrent(current,[&]{return activateMap(s,view);},[&]{syncInvalidation(s);fullRate(s);}))return false;
-        if(switched)++a.witnessMapReactivations;
+        if(switched)++a.retainedWitnessReactivations;
         if(a.highlight.load(std::memory_order_relaxed))s.eyes[eye].highlightFrame=s.frame;
         if(expandedMaterial)++a.expandedAccepted[eye];
         ++a.accepted;return true;
@@ -610,7 +584,7 @@ NativeVrsStatus nativeVrsStatus() noexcept {
     for(unsigned eye=0;eye<2;++eye)out.expandedMaterialAccepted[eye]=a.expandedAccepted[eye].load();
     for(unsigned i=0;i<2;++i)out.mapUpdates[i]=a.updates[i].load();
     out.mapBytes=a.bytes.load();out.rateSets=a.rates.load();out.resourceSets=a.resources.load();out.driverErrors=a.errors.load();
-    out.witnessMapReactivations=a.witnessMapReactivations.load();out.witnessMapCreations=a.witnessMapCreations.load();
+    out.retainedWitnessReactivations=a.retainedWitnessReactivations.load();
     out.contextRefusals=a.contextRefusals.load();out.frameRefusals=a.frameRefusals.load();out.targetRefusals=a.targetRefusals.load();return out;
 }
 void nativeVrsPsMeasureConfigure(bool enabled,NativeVrsPsSink sink)noexcept {
@@ -741,7 +715,7 @@ DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
             case DriverOp::Full:nativeVrsFullRate(context);break;
             case DriverOp::Left:activateMap(s,0x100);break;
             case DriverOp::Right:activateMap(s,0x200);break;
-            case DriverOp::WitnessLeft:prepareWitnessRate(s,0x100,0x300);break;
+            case DriverOp::WitnessLeft:prepareWitnessRate(s,0x100);break;
             case DriverOp::Invalidate:nativeVrsInvalidate(context);break;
             case DriverOp::NextFrame:s.frame=++emittedOrdinal;break;
             case DriverOp::FailRate:c.nextRate=-9;break;
