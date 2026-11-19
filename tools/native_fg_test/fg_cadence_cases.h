@@ -101,6 +101,40 @@ template<class Check> void runFgCadenceCases(Check check) {
   proof.previousSequence=2;proof.currentSequence=3;rejected.observeBehind(proof,true);
   rejected.completeNative(4);
   check(!defer(rejected,3,4,3),"FG failed cold trial cannot rearm from another timely behind batch");
+
+  // Capture 62c1b3aa, slots 2099–2105. The owner presented G(51810,51811)
+  // and 51811. G(51811,51812) was then 67 ns late with no trial in progress,
+  // so the owner presented the newer complete 51813 immediately.
+  constexpr int64_t origin=24697100000000LL;
+  constexpr int64_t pose51812=24697117797500LL-origin,slot2101=24697151130900LL-origin;
+  constexpr int64_t pose51814=24697162248700LL-origin,slot2104=24697184463900LL-origin;
+  constexpr int64_t slot2105=24697195575200LL-origin;
+  Bootstrap recovered;recovered.sync(epoch);recovered.displayNative(51810);
+  proof.previousSequence=51810;proof.currentSequence=51811;
+  recovered.displayGenerated(proof);recovered.displayNative(51811);recovered.completeNative(51813);
+  check(!recovered.acceptPhase(slot2101,pose51812,period,2,1),"FG slot 2101 still rejects the strictly late phase");
+  recovered.consumeNative(51813);recovered.displayNative(51813);
+  proof.previousSequence=51812;proof.currentSequence=51813;
+  recovered.observeBehind(proof,true);
+  recovered.completeNative(51814);
+  const bool held51814=recovered.deferNative(51813,51814,51813,pose51814,slot2104,runtimePeriod,period,2);
+  check(interpolationFits(slot2105,pose51814,period,2,1)&&
+    firstPhase(51813,51814,1,held51814?51813:51814)==1,
+    "FG slot 2105 presents source 51814 after an isolated unheld late import");
+
+  // A real phase replenishes the cold trial. Suppression clears warm proof,
+  // so recovery requires a timely batch for the exact displayed endpoints.
+  Bootstrap retry;retry.sync(epoch);retry.displayNative(1);
+  proof.previousSequence=1;proof.currentSequence=2;
+  retry.displayGenerated(proof);retry.displayNative(2);retry.miss();retry.completeNative(3);
+  check(!defer(retry,2,3,2),"FG recovery needs real phase delivery or exact cold proof");
+  retry.observeBehind(proof,true);
+  check(defer(retry,2,3,2),"FG a presented phase replenishes one cold recovery trial");
+  check(!retry.acceptPhase(slot2101,pose51812,period,2,1),"FG a late phase still fails the spent recovery trial");
+  retry.displayNative(3);retry.completeNative(4);
+  proof.previousSequence=2;proof.currentSequence=3;retry.observeBehind(proof,true);
+  check(!defer(retry,3,4,3)&&creditDue(4,5,false),"FG a failed recovery trial cannot loop on behind evidence");
+
   check(creditDue(20,21,false),"no-render tick cannot spend a spacing slot");
   check(!interpolationFits(17*period,13*period,period,2,1),"late 2x phase cannot restart a handoff");
   check(interpolationFits(24*period,20*period,period,3,1)&&

@@ -183,8 +183,8 @@
       }
       if(imported)images.next=fgschedule::firstPhase(b,fgDisplayedSequence);
       if(images.ready&&images.next&&
-         !fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
-        images.next=0;fgBootstrap.miss();return Outcome::Late;
+         !fgBootstrap.acceptPhase(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
+        images.next=0;return Outcome::Late;
       }
       if(images.next)return Outcome::Generated;
       if(!b.generatedCount)return Outcome::NativeOnly;

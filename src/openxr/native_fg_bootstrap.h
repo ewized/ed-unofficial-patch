@@ -35,7 +35,7 @@ inline bool interpolationFits(int64_t now,int64_t sourceTime,int64_t period,
 
 class Bootstrap {
   Epoch epoch_{};
-  bool generated_=false,bootstrapUsed_=false,attempted_=false;
+  bool generated_=false,trialSpent_=false,attempted_=false;
   uint64_t completed_=0,firstPending_=0,displayed_=0,previousDisplayed_=0;
   uint64_t bootstrapEndpoint_=0,committed_=0;
 
@@ -74,29 +74,38 @@ public:
   bool deferNative(uint64_t displayed,uint64_t latestQueued,uint64_t latestExported,
                    int64_t sourceTime,int64_t displayTime,int64_t nextPeriod,int64_t admissionPeriod,
                    unsigned multiplier) {
-    if(attempted_||!displayed||(!generated_&&(bootstrapUsed_||bootstrapEndpoint_!=displayed))||
+    if(attempted_||!displayed||(!generated_&&(trialSpent_||bootstrapEndpoint_!=displayed))||
        completed_<=displayed||completed_-displayed!=1||
        firstPending_!=completed_||latestQueued!=completed_||latestExported>=completed_||
        nextPeriod<=0||displayTime<=0||displayTime>(std::numeric_limits<int64_t>::max)()-nextPeriod||
        !interpolationFits(displayTime+nextPeriod,sourceTime,admissionPeriod,multiplier,1))return false;
     attempted_=true;
-    bootstrapUsed_=true;
+    trialSpent_=true;
     return true;
   }
   void miss(){generated_=false;bootstrapEndpoint_=0;}
   void abandonNativeAttempt(){if(attempted_)miss();}
+  bool acceptPhase(int64_t displayTime,int64_t sourceTime,int64_t period,unsigned multiplier,unsigned phase) {
+    const bool timely=interpolationFits(displayTime,sourceTime,period,multiplier,phase);
+    // An unheld late result misses its own slot. A spent trial additionally
+    // loses pacing proof when it fails to deliver within that same deadline.
+    if(!timely)abandonNativeAttempt();
+    return timely;
+  }
 
-  // Permit a cold trial after a timely result for the exact displayed A->B
-  // pair. After that, only a submitted generated phase can re-arm a hold.
+  // A timely result for the exact displayed A->B pair can prove one cold
+  // trial. Only a submitted generated phase replenishes that allowance.
   template<class Batch> void observeBehind(const Batch& batch,bool timely) {
-    if(!bootstrapUsed_&&timely&&provesSynthesis(batch)&&previousDisplayed_&&
+    if(!trialSpent_&&timely&&provesSynthesis(batch)&&previousDisplayed_&&
        batch.previousSequence==previousDisplayed_&&batch.currentSequence==displayed_)
       bootstrapEndpoint_=displayed_;
   }
   template<class Batch> void displayGenerated(const Batch& batch) {
     if(provesSynthesis(batch)) {
       committed_=batch.currentSequence;
-      bootstrapUsed_=true;
+      attempted_=false;
+      trialSpent_=false;
+      bootstrapEndpoint_=0;
       generated_=true;
     }
   }
