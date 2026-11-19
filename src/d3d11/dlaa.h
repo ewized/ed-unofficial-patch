@@ -19,7 +19,7 @@
 // executable, where NGX looks for it; its absence is also a plain answer.
 #pragma once
 
-#include <cstdint>
+#include "dlss_feature_policy.h"
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -90,8 +90,9 @@ inline DlssMode dlssModeByRatio(unsigned w, unsigned outW) {
          :                   DlssMode::UltraPerformance;
 }
 
-// Chooses a mode from four already-queried ranges (ensureFeature now
-// queries all four every time -- see the 2026-09-23 entry in
+// Chooses a mode from four already-queried ranges (ensureFeature queries
+// the complete ladder, reusing a complete answer for the same output; see
+// the 2026-09-23 entry in
 // docs/anti-aliasing.md: a `break` on the first failed query used to hide
 // every mode below it on the ladder, and cost a flight where ultra
 // performance should have held a 1229x1412 input against a 3070x3032
@@ -134,23 +135,22 @@ inline bool dlssChooseMode(const DlssModeRange modes[kDlssModeCount], unsigned w
     return true;
 }
 
-// Is DLAA usable on this device? Initialises NGX on the first ask (once
-// per session, whatever the answer) and says why not when it is not:
-// the reason is a static string for the log. Cheap after the first call.
+// Is DLSS usable on this device? Initializes NGX on first use and remembers
+// that device's answer until a replacement device or shutdown.
 bool dlaaAvailable(ID3D11Device* dev, const char** reason);
 
-// The loading-screen warm-up (temporal_pass.cpp, warmTrainedOnce): initialises
-// NGX on ctx's device and makes the two full-frame features exactly as
-// dlaaEvaluate's next call would -- the same slots, the same key (w x h in
-// and out, DLAA, the current preset generation) -- so that call finds them
-// made and reuses them, or recreates on a size or preset mismatch as it
-// always did. initMs is the initialisation's duration (about zero
-// when NGX was already asked), createMs[eye] each create's (zero when the
-// feature already stood). False, with its reason, on the first refusal;
-// the state it leaves behind is the state the first evaluation would have
-// left, so nothing here needs undoing. Render thread only, like the rest.
-bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
+// Initialize NGX on the render thread. Create both eye features only for a
+// known startup key that NGX serves unchanged; an empty key means init only.
+// Reports init/create timings and whether features were actually prepared.
+bool dlaaWarm(ID3D11DeviceContext* ctx, const DlssFeatureKey& size,
+              bool* prepared,
               double* initMs, double createMs[2], const char** reason);
+
+// Cheap same-slot gate before the eye pass builds SR inputs. `historyChanged`
+// is an upstream history break and must not include resets caused by fallback.
+bool dlaaRetryReady(int eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
+                    bool historyChanged, bool hdr = false);
+void dlaaClearFailures();
 
 // One eye, one frame (`eye` is the upscaler feature slot, kUpscalerSlots above:
 // 0 and 1 the eyes', 2 the VR world route's, each with its own feature and
@@ -190,7 +190,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,
                   uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason, bool hdr = false);
+                  float frameMs, const char** reason, bool hdr = false, bool historyChanged = false);
 
 // The model NVIDIA runs, as its render-preset number (nvsdk_ngx_defs.h:
 // 11 = K, 12 = L, 13 = M; NGX also has 10 = J and 0 = the driver's own choice,

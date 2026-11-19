@@ -76,6 +76,50 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "--self-test")) return 2;
 
     {
+        const DlssFeatureKey balanced{2228, 1253, 3840, 2160, 1, 0};
+        DlssRetryPolicy retry;
+        CHECK(retry.ready(balanced, 0, false));
+        retry.failed(balanced, 10, DlssFailure::Transient);
+        CASE("C14.ngx-backoff.no-frame-retry", !retry.ready(balanced, 11, false));
+        CHECK(retry.ready(balanced, 30, true)); // real change to the incoming history
+        retry.attempting(balanced, 30);
+        retry.failed(balanced, 30, DlssFailure::Transient);
+        CASE("C14.ngx-backoff.only-one-early-retry", !retry.ready(balanced, 31, true));
+        CHECK(!retry.ready(balanced, 529, false));
+        CHECK(retry.ready(balanced, 530, false));
+        retry.failed(balanced, 530, DlssFailure::Permanent);
+        CHECK(!retry.ready(balanced, 100000, true));
+
+        auto changed = balanced;
+        changed.outHeight -= 2;
+        CHECK(retry.ready(changed, 100000, false));
+        changed = balanced;
+        ++changed.presetGeneration;
+        CHECK(retry.ready(changed, 100000, false));
+        changed = balanced;
+        changed.createFlags = 1;
+        CHECK(retry.ready(changed, 100000, false));
+        retry.clear(); // device/engine lifecycle or a successful evaluation
+        CHECK(retry.ready(balanced, 100000, false));
+        retry.failed(balanced, 100000, DlssFailure::Transient);
+        CHECK(!retry.ready(balanced, 100249, false) && retry.ready(balanced, 100250, false));
+        for (const uint64_t now : {100250ull, 100750ull, 101750ull, 103750ull, 107750ull}) {
+            CHECK(retry.ready(balanced, now, false));
+            retry.failed(balanced, now, DlssFailure::Transient);
+        }
+        CHECK(!retry.ready(balanced, 111749, false) && retry.ready(balanced, 111750, false));
+
+        const auto warm = dlssWarmSize(DlssQuality::Balanced, .75f, 3840, 2160);
+        CASE("C15.startup-sizing.no-dlaa-pair",
+             warm.width == 2229 && warm.height == 1254 && warm.outWidth == 3840 && warm.outHeight == 2160);
+        const auto antialias = dlssWarmSize(DlssQuality::Dlaa, .85f, 3840, 2160);
+        CHECK(antialias.width >= 3840 && antialias.height >= 2160 &&
+              antialias.outWidth == antialias.width && antialias.outHeight == antialias.height);
+        CHECK(!dlssWarmSize(DlssQuality::Custom, .75f, 3840, 2160).width);
+        CHECK(!dlssWarmSize(DlssQuality::Performance, 0.f, 3840, 2160).width);
+    }
+
+    {
         NativeDlssEvidence evidence;
         using Status = NativeDlssQualityStatus;
         constexpr auto selected = DlssQuality::Performance;

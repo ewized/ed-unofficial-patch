@@ -29,14 +29,19 @@ import rig_mutants_lib as lib  # noqa: E402
 ROOT = HERE.parents[1]
 FILES = {
     "floor": ROOT / "src" / "d3d11" / "dlss_floor.h",
+    "feature": ROOT / "src" / "d3d11" / "dlss_feature_policy.h",
 }
-# the rig includes its sources by relative path (../../src/d3d11/...), so the rig itself and the header it includes beside dlss_floor.h sit in the temp tree
-TREE_EXTRA = [
-    ("tools/dlaa_mode_test/dlaa_mode_test.cpp", HERE / "dlaa_mode_test.cpp"),
-    ("src/d3d11/dlaa.h", ROOT / "src" / "d3d11" / "dlaa.h"),
-]
+# The rig uses relative includes, so stage its unmutated dependencies alongside
+# the mutated header in the temporary tree.
+TREE_EXTRA = [(path, ROOT / path) for path in (
+    "tools/dlaa_mode_test/dlaa_mode_test.cpp",
+    "src/d3d11/dlaa.h",
+    "src/d3d11/native_dlss_evidence.h",
+    "src/d3d11/native_dlss_quality.h",
+    "src/common/dlss_quality.h",
+)]
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("floor",), pin_keys=(), rig=HERE / "dlaa_mode_test.cpp",
+    here=__file__, files=FILES, header_keys=("floor", "feature"), pin_keys=(), rig=HERE / "dlaa_mode_test.cpp",
     rig_label=":rig_dlaa_mode_test", rig_source_in_bat="tools\\dlaa_mode_test\\dlaa_mode_test.cpp", rig_exe_in_bat="dlaa_mode_test.exe",
     case_prefix="C", include_dirs=(), min_mutants=20, run_timeout=120.0, tree_extra=TREE_EXTRA, rig_in_tree=True,
     rig_args=lambda root: ["--self-test"])   # this rig takes exactly one argument
@@ -45,6 +50,7 @@ CONFIG = lib.Config(
 ZERO_LADDER, ANSWERED_LADDER, SINGLE_POINT, PARTIAL = "C1", "C2", "C3", "C4"
 CEILING_8268, CEILING_TALL, CEILING_SQUARE, CEILING_ODD, CEILING_NONE = "C5", "C6", "C7", "C8", "C9"
 CEILING_VERIFIED, CEILING_CALLS, CEILING_PIXEL_MODEL, WINDOW_MODE = "C10", "C11", "C12", "C13"
+NGX_BACKOFF, STARTUP_SIZING = "C14", "C15"
 
 ANSWERED = ("return m.ok && m.optW && m.optH && m.minW && m.minH && m.maxW && m.maxH &&\n"
             "           m.minW <= m.maxW && m.minH <= m.maxH;")
@@ -104,6 +110,13 @@ MUTANTS = [
       "an input exactly at a mode's maximum is not served"),
     M("serve-ignores-max", (ZERO_LADDER, WINDOW_MODE), "floor", [(SERVE_MAX, "")],
       "a mode serves any input above its minimum: the zero ladder serves every size"),
+    M("ngx-retry-every-frame", NGX_BACKOFF, "feature", [("nowMs >= retryAt_ ||", "true ||")],
+      "the same transient NGX refusal can retry every frame"),
+    M("ngx-repeated-history-retry", NGX_BACKOFF, "feature", [("historyChanged && !usedEarlyRetry_", "historyChanged")],
+      "repeated upstream history resets bypass the cooldown"),
+    M("ngx-warm-dlaa-for-upscale", STARTUP_SIZING, "feature",
+      [("return {width, height, outputWidth, outputHeight};", "return {outputWidth, outputHeight, outputWidth, outputHeight};")],
+      "a named upscale warms the old 1:1 pair and discards it at the first evaluation"),
 ]
 
 if __name__ == "__main__":

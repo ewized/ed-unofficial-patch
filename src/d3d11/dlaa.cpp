@@ -75,6 +75,7 @@ bool fullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs) {
 #ifdef EDVR_HAVE_NGX
 
 ID3D11Device*       g_device = nullptr;
+ID3D11Device*       g_attemptedDevice = nullptr; // held until shutdown or device change
 NVSDK_NGX_Parameter* g_params = nullptr;
 // The capability block, kept: the optimal-settings query only answers on
 // THIS block (the SDK's helper looks its callback up here and returns
@@ -83,6 +84,7 @@ NVSDK_NGX_Parameter* g_params = nullptr;
 // the review of 2026-09-04, F2).
 NVSDK_NGX_Parameter* g_caps = nullptr;
 bool                 g_optimalFailNoted = false;
+uint32_t             g_modesLoggedW = 0, g_modesLoggedH = 0;
 
 // Stage 0 price report (docs/foveated-dlss-design-2026-09-14.md): the
 // environment stamp's one new fact, off adapterName (gpu_adapter_name.h,
@@ -95,12 +97,8 @@ bool                 g_optimalFailNoted = false;
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
     const char* modeName = "none";
-    uint32_t          w = 0, h = 0;
-    uint32_t          outW = 0, outH = 0;
-    uint64_t          presetGen = 0;   // the preset generation the feature was created under
-    // The flat HDR route's input is HDR with automatic exposure (section 81). The flags are creation-time, so
-    // the feature key carries the bit: a route flip remakes the feature and its history starts again.
-    bool              hdr = false;
+    DlssFeatureKey key{};
+    DlssRetryPolicy retry;
 };
 
 // The flag set is hdr_backend_flags.h's, pure so a rig can pin it; every constant is checked against the SDK's own
@@ -256,16 +254,66 @@ const char* ngxResultName(NVSDK_NGX_Result r) {
     }
 }
 
-char g_reasonBuf[256];
+char g_reasonBuf[384];
+
+// A live feature is tied to creation flags as well as size and model. That
+// includes the difference between automatic VR and fixed flat HDR exposure.
+DlssFeatureKey featureKey(uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, bool hdr) {
+    if (!outW || !outH) { outW = w; outH = h; }
+    return {w, h, outW, outH, g_presetGen, flatDlssCreateFlags(hdr, runtimeFlatProfile())};
+}
+
+DlssFailure classifyFailure(NVSDK_NGX_Result result) {
+    switch (result) {
+        case NVSDK_NGX_Result_FAIL_FeatureNotSupported:
+        case NVSDK_NGX_Result_FAIL_OutOfDate:
+        case NVSDK_NGX_Result_FAIL_UnsupportedParameter:
+        case NVSDK_NGX_Result_FAIL_Denied:
+            return DlssFailure::Permanent;
+        default:
+            // Memory pressure, invalid inputs and ambiguous driver errors
+            // might clear without a dimension or model change.
+            return DlssFailure::Transient;
+    }
+}
+
+void releaseFeature(EyeFeature& f) {
+    if (f.handle) NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
+    f.handle = nullptr;
+}
 
 void releaseFeatures() {
     for (EyeFeature& f : g_feature) {
-        if (f.handle) {
-            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
-            f.handle = nullptr;
-        }
-        f.w = f.h = 0;
+        releaseFeature(f);
+        f.key = {};
+        f.retry.clear();
     }
+}
+
+void shutdownDevice() {
+    releaseFeatures();
+    if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
+    for (QuerySlot& q : g_qring) releaseQuerySlot(q);
+    if (g_params) {
+        NVSDK_NGX_D3D11_DestroyParameters(g_params);
+        g_params = nullptr;
+    }
+    if (g_caps) {
+        NVSDK_NGX_D3D11_DestroyParameters(g_caps);
+        g_caps = nullptr;
+    }
+    if (g_device) {
+        NVSDK_NGX_D3D11_Shutdown1(g_device);
+        g_device = nullptr;
+    }
+    if (g_attemptedDevice) {
+        g_attemptedDevice->Release();
+        g_attemptedDevice = nullptr;
+    }
+    g_modesLoggedW = g_modesLoggedH = 0;
+    g_optimalFailNoted = false;
+    g_tried = false;
+    g_available = false;
 }
 
 // DlssMode/DlssModeRange/dlssModeByRatio/dlssChooseMode live in dlaa.h,
@@ -281,8 +329,6 @@ constexpr NVSDK_NGX_PerfQuality_Value kNgxLadder[kDlssModeCount] = {
 // initially, so the first ladder walk always logs. Not per-eye -- the
 // query depends only on the output size, so both eyes share one line,
 // and a preset-only change (same output) does not repeat it.
-uint32_t g_modesLoggedW = 0, g_modesLoggedH = 0;
-
 // Point 1 of the 2026-09-23 hardening: whatever the selection below does
 // with these four answers, name them all, once per output size, so a
 // refusal is always explained after the fact rather than needing a second
@@ -310,6 +356,40 @@ void logDlssModesOnce(uint32_t outW, uint32_t outH, const DlssModeRange modes[kD
     Log::get().note("dlss: modes for %ux%u: %s", outW, outH, line);
 }
 
+// Shared ladder lookup for the native door, the warm-up and feature creation.
+// Keep the most recent complete answer, so probing both eyes and then
+// creating their features does not query the same NGX callback again.
+struct ModeQuery {
+    uint32_t w = 0, h = 0;
+    DlssModeRange modes[kDlssModeCount]{};
+    unsigned errors[kDlssModeCount]{};
+};
+ModeQuery g_lastModes;
+
+ModeQuery queryModes(uint32_t w, uint32_t h, bool quiet) {
+    if (g_lastModes.w == w && g_lastModes.h == h) {
+        if (!quiet) logDlssModesOnce(w, h, g_lastModes.modes, g_lastModes.errors);
+        return g_lastModes;
+    }
+    ModeQuery result;
+    bool complete = true;
+    for (int k = 0; k < kDlssModeCount; ++k) {
+        auto& mode = result.modes[k];
+        const auto code = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, w, h, kNgxLadder[k],
+            &mode.optW, &mode.optH, &mode.maxW, &mode.maxH, &mode.minW, &mode.minH, &mode.sharpness);
+        result.errors[k] = static_cast<unsigned>(code);
+        mode.ok = !NVSDK_NGX_FAILED(code);
+        if (!mode.ok) complete = false; // A refusal may be transient; keep walking the ladder.
+    }
+    if (complete) {
+        result.w = w;
+        result.h = h;
+        g_lastModes = result;
+    }
+    if (!quiet) logDlssModesOnce(w, h, result.modes, result.errors);
+    return result;
+}
+
 // The full-frame feature for one upscaler slot (an eye's, or the VR world route's third): made when it is missing or its key
 // (the sizes, the preset generation, the route's bit) has moved, left alone otherwise. Each slot keeps its own key, its own
 // handle and so its own history; the preset generation is shared, so dlaaSetPreset remakes every slot's feature. The
@@ -318,21 +398,17 @@ void logDlssModesOnce(uint32_t outW, uint32_t outH, const DlssModeRange modes[kD
 // and that evaluation finds it and skips the create (or recreates on a
 // mismatch, as it always did). createMs is the create's own duration,
 // zero when nothing was made.
-bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
-                   uint32_t outW, uint32_t outH, const char** reason, double* createMs,
-                   bool hdr = false) {
+bool ensureFeature(ID3D11DeviceContext* ctx, int eye, const DlssFeatureKey& key,
+                   const char** reason, double* createMs, bool hdr = false) {
     if (createMs) *createMs = 0.0;
     if (!upscalerSlotHasFullFrame(eye)) {
         if (reason) *reason = "an upscaler slot out of range";
         return false;
     }
     EyeFeature& f = g_feature[eye];
-    if (!f.handle || f.w != w || f.h != h || f.outW != outW || f.outH != outH ||
-        f.presetGen != g_presetGen || f.hdr != hdr) {
-        if (f.handle) {
-            NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
-            f.handle = nullptr;
-        }
+    if (!f.handle || !(f.key == key)) {
+        releaseFeature(f);
+        const auto w = key.width, h = key.height, outW = key.outWidth, outH = key.outHeight;
         // Equal sizes are DLAA. A larger output is DLSS proper: the mode
         // is the one whose own render size, as the runtime names it for
         // this output, is nearest the input among the modes whose range
@@ -354,29 +430,10 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                                                    &maxH, &minW, &minH, &sharpness);
             optKnown = !NVSDK_NGX_FAILED(optErr);
         } else {
-            DlssModeRange modes[kDlssModeCount];
-            unsigned errCodes[kDlssModeCount] = {};
-            for (int k = 0; k < kDlssModeCount; ++k) {
-                unsigned oW2 = 0, oH2 = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
-                float sh = 0.0f;
-                // Never breaks on a failed query (the 2026-09-23 hardening):
-                // one bad query used to end the walk here and hide every
-                // mode below it on the ladder -- see docs/anti-aliasing.md.
-                optErr = NGX_DLSS_GET_OPTIMAL_SETTINGS(g_caps, outW, outH, kNgxLadder[k], &oW2,
-                                                       &oH2, &mxW, &mxH, &mnW, &mnH, &sh);
-                errCodes[k] = static_cast<unsigned>(optErr);
-                modes[k].ok = !NVSDK_NGX_FAILED(optErr);
-                if (modes[k].ok) {
-                    optKnown = true;
-                    modes[k].optW = oW2; modes[k].optH = oH2;
-                    modes[k].minW = mnW; modes[k].minH = mnH;
-                    modes[k].maxW = mxW; modes[k].maxH = mxH;
-                    modes[k].sharpness = sh;
-                }
-            }
-            // Logged once per output size, whatever the pick below does
-            // with it, so a refusal is always explained after the fact.
-            logDlssModesOnce(outW, outH, modes, errCodes);
+            const auto queryResult = queryModes(outW, outH, false);
+            const auto& modes = queryResult.modes;
+            for (const DlssModeRange& mode : modes) optKnown = optKnown || mode.ok;
+            optErr = static_cast<NVSDK_NGX_Result>(queryResult.errors[kDlssModeCount - 1]);
 
             DlssMode picked = DlssMode::Quality;
             bool fromRange = false;
@@ -410,6 +467,8 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
                          w, h, outW, outH, ranges);
                 g_reason = g_reasonBuf;
                 if (reason) *reason = g_reason;
+                f.retry.failed(key, GetTickCount64(), DlssFailure::Permanent);
+                Log::get().note("DLSS: feature refused: %s.", g_reason);
                 return false;
             }
         }
@@ -431,7 +490,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         // LDR colour (HDR on the HDR route: fixed exposure in flat, automatic in the VR world route; hdr_backend_flags.h);
         // motion vectors at the render size, unjittered (the pass computes them on the unjittered
         // grid); reversed-Z depth.
-        cp.InFeatureCreateFlags = static_cast<int>(flatDlssCreateFlags(hdr, runtimeFlatProfile()));
+        cp.InFeatureCreateFlags = static_cast<int>(key.createFlags);
         cp.InEnableOutputSubrects = false;
         applyPresetHints();
         // An event with a duration for the monitor's drop attribution: the
@@ -451,21 +510,18 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         perfMonitorNoteEvent(kEvNgx, ms);
         if (createMs) *createMs = ms;
         if (NVSDK_NGX_FAILED(cr) || !f.handle) {
-            f.handle = nullptr;
+            f.handle = nullptr; // A failed create did not transfer ownership.
             snprintf(g_reasonBuf, sizeof(g_reasonBuf),
-                     "the DLAA feature would not be created at %ux%u: %s (0x%08X)", w, h,
+                     "NGX refused creation at %ux%u -> %ux%u: %s (0x%08X)", w, h, outW, outH,
                      ngxResultName(cr), static_cast<unsigned>(cr));
             g_reason = g_reasonBuf;
             if (reason) *reason = g_reason;
+            f.retry.failed(key, GetTickCount64(), classifyFailure(cr));
+            Log::get().note("DLSS: %s.", g_reason);
             return false;
         }
-        f.w = w;
-        f.h = h;
-        f.outW = outW;
-        f.outH = outH;
-        f.presetGen = g_presetGen;
+        f.key = key;
         f.modeName = modeName;
-        f.hdr = hdr;
         if (hdr)
             Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input, exposure %s; the "
                             "history starts here.", upscalerSlotLabel(eye),
@@ -509,16 +565,22 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
     if (reason) *reason = g_reason;
     return false;
 #else
+    if (!dev) {
+        if (reason) *reason = "no device";
+        return false;
+    }
+    if (g_attemptedDevice && g_attemptedDevice != dev) shutdownDevice();
     if (!g_tried) {
+        g_lastModes = {};
         // Stamped wherever the first ask runs -- the loading-screen warm-up
         // (temporal_pass.cpp, warmTrainedOnce) or the first treat -- so the
         // log prices NGX's own initialisation apart from the feature creates.
         const int64_t t0 = qpcNow();
         g_tried = true;
         g_available = false;
-        if (!dev) {
-            g_reason = "no device";
-        } else {
+        g_attemptedDevice = dev;
+        dev->AddRef();
+        {
             // A project id NGX accepts is a GUID, hex only: the first try had
             // letters in it and was refused as an invalid parameter (the
             // harness, 2026-09-03).
@@ -555,10 +617,10 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
                            !g_params) {
                     g_reason = "NGX would not allocate its parameters";
                 } else {
-                    g_caps = caps;
                     g_available = true;
                     g_reason = "available";
                 }
+                g_caps = caps;
             }
         }
         const double ms = qpcFrequency() > 0
@@ -588,10 +650,7 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 #endif
 }
 
-// dlss_floor.h: the four ranges for an output, asked BEFORE that output is
-// (the door's served floor, native_temporal.cpp). The same query and ladder
-// ensureFeature walks, answered and logged the same way; nothing is chosen
-// here, and ensureFeature's own walk and selection are untouched.
+// The native door needs these ranges before choosing an output size.
 bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
                     DlssModeRange modes[kDlssModeCount], bool quiet) {
     for (int k = 0; k < kDlssModeCount; ++k) modes[k] = DlssModeRange{};
@@ -602,31 +661,21 @@ bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
     return false;
 #else
     if (!outW || !outH || !dlaaAvailable(dev, nullptr) || !g_caps) return false;
-    unsigned errCodes[kDlssModeCount] = {};
+    const auto result = queryModes(outW, outH, quiet);
     bool any = false;
     for (int k = 0; k < kDlssModeCount; ++k) {
-        unsigned oW = 0, oH = 0, mxW = 0, mxH = 0, mnW = 0, mnH = 0;
-        float sh = 0.0f;
-        const NVSDK_NGX_Result r = NGX_DLSS_GET_OPTIMAL_SETTINGS(
-            g_caps, outW, outH, kNgxLadder[k], &oW, &oH, &mxW, &mxH, &mnW, &mnH, &sh);
-        errCodes[k] = static_cast<unsigned>(r);
-        modes[k].ok = !NVSDK_NGX_FAILED(r);
-        if (!modes[k].ok) continue;
-        any = true;
-        modes[k].optW = oW; modes[k].optH = oH;
-        modes[k].minW = mnW; modes[k].minH = mnH;
-        modes[k].maxW = mxW; modes[k].maxH = mxH;
-        modes[k].sharpness = sh;
+        modes[k] = result.modes[k];
+        any = any || modes[k].ok;
     }
-    if (!quiet) logDlssModesOnce(outW, outH, modes, errCodes);
     return any;
 #endif
 }
 
-bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
+bool dlaaWarm(ID3D11DeviceContext* ctx, const DlssFeatureKey& size, bool* prepared,
               double* initMs, double createMs[2], const char** reason) {
+    if (prepared) *prepared = false;
 #ifndef EDVR_HAVE_NGX
-    (void)ctx; (void)w; (void)h;
+    (void)ctx; (void)size;
     if (initMs) *initMs = 0.0;
     if (createMs) createMs[0] = createMs[1] = 0.0;
     if (reason) *reason = "this build has no DLSS SDK in it";
@@ -634,7 +683,7 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
 #else
     if (initMs) *initMs = 0.0;
     if (createMs) createMs[0] = createMs[1] = 0.0;
-    if (!ctx || !w || !h) {
+    if (!ctx) {
         if (reason) *reason = "a missing input";
         return false;
     }
@@ -648,23 +697,43 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h,
                             static_cast<double>(qpcFrequency())
                       : 0.0;
     }
-    // NVIDIA's ceiling (dlss_floor.h): a size it names no usable range for has no 1:1 feature either -- the 2026-10-09 flight's
-    // 8268x3948 failed its create -- so the warm-up stands aside there, quietly. The first upscaled frame cuts its output to the
-    // ceiling and makes its own feature; the loading frames at this size stand aside too (temporal_pass.cpp).
-    bool features = true;   // the key cull dropped dlaaWarm's parameter of this name; main's ceiling check below still clears it
-    if (ok && features && dev) {
-        DlssModeRange modes[kDlssModeCount];
-        if (!dlssModeRanges(dev, w, h, modes) || !dlssRangesAnswered(modes)) features = false;
-    }
+    const bool unity = size.width == size.outWidth && size.height == size.outHeight;
+    DlssModeRange modes[kDlssModeCount];
+    // Leave ceiling/floor cuts to the native door; don't prepare a feature
+    // for a guessed cut or an out-of-range pair.
+    const bool served = ok && size.width && size.height && size.outWidth && size.outHeight &&
+        dlssModeRanges(dev, size.outWidth, size.outHeight, modes) &&
+        (unity ? dlssRangesAnswered(modes) : dlssRangesServe(modes, size.width, size.height));
     if (dev) dev->Release();
     if (!ok) return false;
-    if (!features) return true;
+    if (!served) return true;
+    const auto key = featureKey(size.width, size.height, size.outWidth, size.outHeight, false);
+    bool allPrepared = true;
     for (int eye = 0; eye < 2; ++eye) {
-        if (!ensureFeature(ctx, eye, w, h, w, h, reason, createMs ? &createMs[eye] : nullptr)) {
-            return false;
-        }
+        if (!ensureFeature(ctx, eye, key, reason, createMs ? &createMs[eye] : nullptr))
+            allPrepared = false;
     }
-    return true;
+    if (prepared) *prepared = allPrepared;
+    return allPrepared;
+#endif
+}
+
+bool dlaaRetryReady(int eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH,
+                    bool historyChanged, bool hdr) {
+#ifdef EDVR_HAVE_NGX
+    if (!upscalerSlotHasFullFrame(eye)) return false;
+    const auto& retry = g_feature[eye].retry;
+    return !retry.hasFailure() ||
+           retry.ready(featureKey(w, h, outW, outH, hdr), GetTickCount64(), historyChanged);
+#else
+    (void)eye; (void)w; (void)h; (void)outW; (void)outH; (void)historyChanged; (void)hdr;
+    return false;
+#endif
+}
+
+void dlaaClearFailures() {
+#ifdef EDVR_HAVE_NGX
+    for (EyeFeature& f : g_feature) f.retry.clear();
 #endif
 }
 
@@ -673,12 +742,12 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                   ID3D11Texture2D* output, ID3D11Texture2D* reactive,
                   uint32_t w, uint32_t h,
                   uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
-                  float frameMs, const char** reason, bool hdr) {
+                  float frameMs, const char** reason, bool hdr, bool historyChanged) {
 #ifndef EDVR_HAVE_NGX
     (void)ctx; (void)eye; (void)colour; (void)depth; (void)motion; (void)output;
     (void)reactive;
     (void)w; (void)h; (void)outW; (void)outH; (void)jx; (void)jy; (void)reset;
-    (void)frameMs; (void)hdr;
+    (void)frameMs; (void)hdr; (void)historyChanged;
     if (reason) *reason = "this build has no DLSS SDK in it";
     return false;
 #else
@@ -691,15 +760,24 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         if (reason) *reason = g_available ? "a missing input" : g_reason;
         return false;
     }
-    pollTimingRing(ctx);
-    if (!outW || !outH) {
-        outW = w;
-        outH = h;
+    const auto key = featureKey(w, h, outW, outH, hdr);
+    outW = key.outWidth;
+    outH = key.outHeight;
+    EyeFeature& f = g_feature[eye];
+    if (f.retry.hasFailure()) {
+        const auto now = GetTickCount64();
+        if (!f.retry.ready(key, now, historyChanged)) {
+            if (reason) *reason = "the previous NGX failure is in backoff";
+            return false;
+        }
+        f.retry.attempting(key, now);
     }
+    pollTimingRing(ctx);
     // The feature: found made (by the warm-up or a previous frame) or made
     // here, through the one block the warm-up shares (ensureFeature).
-    if (!ensureFeature(ctx, eye, w, h, outW, outH, reason, nullptr, hdr)) return false;
-    EyeFeature& f = g_feature[eye];
+    reset = reset || !f.handle || !(f.key == key);
+    if (!ensureFeature(ctx, eye, key, reason, nullptr, hdr)) return false;
+    if (reset) frameMs = 0.f;
 
     NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
     ep.Feature.pInColor = colour;
@@ -772,7 +850,13 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
                  ngxResultName(er), static_cast<unsigned>(er));
         g_reason = g_reasonBuf;
         if (reason) *reason = g_reason;
+        f.retry.failed(key, GetTickCount64(), classifyFailure(er));
+        releaseFeature(f);
         return false;
+    }
+    if (f.retry.hasFailure()) {
+        f.retry.clear();
+        g_reason = "available";
     }
     ++g_evaluations;
     nativeDlssEvaluation = {eye, f.modeName, w, h, outW, outH};
@@ -822,21 +906,7 @@ bool dlaaFullTotals(int eye, uint32_t* evaluations, double* avgMs, double* maxMs
 
 void dlaaShutdown() {
 #ifdef EDVR_HAVE_NGX
-    releaseFeatures();
-    if (g_exposureOne) { g_exposureOne->Release(); g_exposureOne = nullptr; }
-    for (QuerySlot& q : g_qring) releaseQuerySlot(q);
-    if (g_params) {
-        NVSDK_NGX_D3D11_DestroyParameters(g_params);
-        g_params = nullptr;
-    }
-    if (g_caps) {
-        NVSDK_NGX_D3D11_DestroyParameters(g_caps);
-        g_caps = nullptr;
-    }
-    if (g_device) {
-        NVSDK_NGX_D3D11_Shutdown1(g_device);
-        g_device = nullptr;
-    }
+    shutdownDevice();
 #endif
     if (g_evaluations > 0) {
         Log::get().note("dlaa: %u eye-frames evaluated this session (%u of them started "

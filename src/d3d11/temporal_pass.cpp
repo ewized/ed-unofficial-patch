@@ -35,11 +35,13 @@
 #include "device_hook.h"   // the auto mip bias's source, to check against a real frame
 #include "ui_surfaces.h"   // nativeTemporalRecommended: what Elite was told, for that check
 #include "../common/native_render_settings.h"   // the published per-eye render size, for the NGX warm-up
+#include "../openxr/game_render_size.h"
 #include "../common/supersample_math.h"   // supersampleRegionFromBounds: one region rule at the door
 #include "../common/temporal_math.h"
 #include "depth_probe.h"
 #include "luma_probe.h"
 #include "dlaa.h"
+#include "native_dlss_evidence.h"
 #include "fsr3_engine.h"
 #include "xess_engine.h"   // XeSS-SR: the VR eye pass's Intel engine (xessAvailable, xessEvaluate, xessSlotTotals)
 #include "object_probe.h"   // objectProbeArmLedger: the armed frame's draw ledger
@@ -3974,6 +3976,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         g_chooseSubmit.w = static_cast<uint16_t>(std::min<uint32_t>(w, 0xFFFFu));   // the region, as the "first trained frame" line names it: 2016x2016 per eye
         g_chooseSubmit.h = static_cast<uint16_t>(std::min<uint32_t>(h, 0xFFFFu));
         chooseCameraRows();
+        // Only the native door's history edge can probe a transient NGX
+        // refusal early. Menu motion and fallback itself can reset every frame.
+        const bool inputHistoryChanged = (flags & 1u) != 0;
         // A map is open (flags bit 8, native_temporal's treat()): its screens write no depth, so the only motion this pass has is the head's, and the history is
         // right only while the map camera is at rest. The signal is the map camera's own pose, published by the renderer hook (mapCameraChanges): head-free, and
         // identical to the last digit at rest (docs\galaxy-map-vr-2026-11-03.md, Fix 2). Any change since this eye's last look, and the look after one, resets the
@@ -4625,11 +4630,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // A live engine switch, seen on the render thread at the first treat
         // that carries the new engine (F7). The engine being LEFT is freed
         // here; nothing else ever did, so an A/B kept both allocated.
-        // NVIDIA's side is deliberately untouched: dlaa.cpp has no
-        // per-feature release, only dlaaShutdown (which would drop NGX
-        // whole), so leaving fsr keeps NGX's two features exactly as they
-        // were before this change.
+        // Leave compatible NVIDIA handles warm, but allow a new attempt after
+        // the user changes away from NVIDIA and then comes back to it.
         if (engineNow != g_engineRan) {
+            if (g_engineRan == edvr::TemporalEngine::Nvidia) dlaaClearFailures();
             if (g_engineRan == edvr::TemporalEngine::Amd) {
                 edvr::fsr3ReleaseFeatures();
                 Log::get().note(
@@ -4777,6 +4781,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         if ((flags & 2u) != 0 && fmtIndex == 0) {
             warmNoteFirstTreat();   // before NGX's first ask, below
             const char* why = "";
+            const uint32_t oW = (outW && outH) ? outW : w;
+            const uint32_t oH = (outW && outH) ? outH : h;
             const bool engineAvailable = amdEngine ? edvr::fsr3Available(dev, &why)
                                          : intelEngine ? edvr::xessAvailable(dev, &why)
                                                        : dlaaAvailable(dev, &why);
@@ -4807,7 +4813,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                 : "");
                     }
                 }
-            } else {
+            } else if (amdEngine || intelEngine || dlaaRetryReady(eye, w, h, oW, oH, inputHistoryChanged)) {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
                 const bool eyeRunTrace = eye == 0 && g_eyeRunLeft > 0 &&
                                          g_eyeRunTaken < kEyeRun && !amdEngine && !intelEngine;
@@ -4823,10 +4829,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
                     e.dlDecision->Release(); e.dlDecision = nullptr;
                 }
-                // The size to come back at: the frame's own, or the larger
-                // one asked for (DLSS proper).
-                const uint32_t oW = (outW && outH && (outW != w || outH != h)) ? outW : w;
-                const uint32_t oH = (outW && outH && (outW != w || outH != h)) ? outH : h;
                 bool made = mvCs != nullptr;
                 if (made && (!e.dlOut || !e.dlSubmit || e.dlW != w || e.dlH != h ||
                              e.dlOutW != oW || e.dlOutH != oH)) {
@@ -5140,7 +5142,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                         nearZ, farZ, fovY, &why)
                                     : dlaaEvaluate(ctx, eye, e.dlColour, e.dlDepth, e.dlMv, e.dlOut,
                                                   biasMask, w, h,
-                                                  oW, oH, jxNow, jyNow, resetHist, frameMs, &why))) {
+                                                  oW, oH, jxNow, jyNow, resetHist, frameMs, &why,
+                                                  false, inputHistoryChanged))) {
                         endRegion(qs, Region::Full, ctx);
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         usedDlaa = true;
@@ -5993,7 +5996,8 @@ void warmFailNote(double ms) {   // L-FAIL: one string, whichever gate or refusa
     Log::get().note(
         "temporal aa: %s warm-up did not complete after %.0f ms -- %s. The first submitted "
         "frame runs as before: a refusal by %s is remembered for the session and the '%s "
-        "was asked for, but' line repeats why, while a failed feature create is retried there.",
+        "was asked for, but' line repeats why. NVIDIA feature failures follow the same retry "
+        "policy as failures during play.",
         amdEngine ? "AMD" : "NVIDIA", ms, g_warmWhy, amdEngine ? "AMD" : "NVIDIA",
         amdEngine ? "fsr" : "dlaa");
 }
@@ -6012,10 +6016,8 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
         g_warmState = WarmState::Off;
         return;
     }
-    // The size the game will render both eyes at: the runtime's recommended
-    // per-eye size, which GetRecommendedRenderTargetSize answers as the max
-    // over both eyes (src/openxr/openvr_system.cpp). Published at Init by the
-    // openxr half; a mutex and an 80-byte copy per poll until it is.
+    // The native output, published at Init. Elite can render smaller; only
+    // a named DLSS quality gives us a verified ratio and multiplier below.
     EdvrNativeRenderSizing s{};                                                         // G5
     if (!edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1, sizeof(s), &s) ||
         s.valid != 1 || !s.activeWidth[0] || !s.activeHeight[0] || !s.activeWidth[1] ||
@@ -6083,6 +6085,14 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
     // refusing) is dlaaWarm's own reason.
     g_warmState = WarmState::Failed;
     const bool amdEngine = g_temporalEngine == edvr::TemporalEngine::Amd;
+    DlssFeatureKey warmSize{};
+    if (!amdEngine) {
+        uint32_t outputWidth = openxr::gameFacingDimension(w);
+        uint32_t outputHeight = openxr::gameFacingDimension(h);
+        nativeTemporalRecommended(&outputWidth, &outputHeight);
+        warmSize = dlssWarmSize(Config::get().nativeDlssQuality(), nativeDlssEvidence.launchMultiplier(),
+                                outputWidth, outputHeight);
+    }
     if (amdEngine) {
         Log::get().note(
             "temporal aa: warming AMD's FSR before the first submitted frame -- %ux%u in and "
@@ -6091,12 +6101,12 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
             w, h);
     } else {
         Log::get().note(
-            "temporal aa: warming NVIDIA before the first submitted frame -- %ux%u in and out (DLAA) "
-            "for both eyes on the render thread. If this is the log's last line the warm-up hung: "
-            "report this log.",
-            w, h);
+            "temporal aa: warming NVIDIA on the render thread before the first submitted frame; "
+            "planned feature size %ux%u -> %ux%u (zero means initialization only).",
+            warmSize.width, warmSize.height, warmSize.outWidth, warmSize.outHeight);
     }
     bool ok = false;
+    bool prepared = false;
     double initMs = 0.0;
     double createMs[2] = {0.0, 0.0};
     const char* why = "";
@@ -6126,7 +6136,7 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
             // "the context for eye N is remade" line.
             ok = edvr::fsr3Warm(ctx, w, h, w, h, &initMs, &why);
         } else {
-            ok = dlaaWarm(ctx, w, h, &initMs, createMs, &why);
+            ok = dlaaWarm(ctx, warmSize, &prepared, &initMs, createMs, &why);
         }
     });
     const double totalMs = qpcFrequency() > 0
@@ -6155,13 +6165,17 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
                 "contexts at the real key and says so ('the context for eye N is remade'), so "
                 "that frame still pays for a create.",
                 initMs, w, h, w, h);
-        } else {
+        } else if (prepared) {
             Log::get().note(
                 "temporal aa: NVIDIA warmed before the first submitted frame -- initialisation "
                 "%.0f ms, the feature for eye 0 %.0f ms and eye 1 %.0f ms at %ux%u -> %ux%u, "
-                "%.0f ms in all; the first submitted frame finds them made, so 'native timing "
-                "CPU: seq' should show temporal well under 150 ms.",
-                initMs, createMs[0], createMs[1], w, h, w, h, totalMs);
+                "%.0f ms in all. Matching eye dimensions reuse these features.",
+                initMs, createMs[0], createMs[1], warmSize.width, warmSize.height,
+                warmSize.outWidth, warmSize.outHeight, totalMs);
+        } else {
+            Log::get().note("temporal aa: NVIDIA initialized in %.0f ms; the startup size was unknown "
+                            "or not served as requested, so the first submitted frame creates the features.",
+                            initMs);
         }
     } else if (survived) {
         g_warmWhy = (why && *why) ? why : (amdEngine ? "fsr3Warm refused without a reason"
@@ -6172,19 +6186,15 @@ void warmTrainedOnce(ID3D11DeviceContext* ctx) {
         Log::get().note(
             "temporal aa: %s warm-up not attempted -- the pass's fault budget (%s) was "
             "already spent by something else this session. The first submitted frame runs as "
-            "before: a refusal by %s is remembered for the session and the '%s was asked "
-            "for, but' line repeats why, while a failed feature create is retried there.",
+            "before: a refusal by %s is reported in the '%s was asked for, but' line.",
             amdEngine ? "AMD" : "NVIDIA", g_budget.name(), amdEngine ? "AMD" : "NVIDIA",
             amdEngine ? "fsr" : "dlaa");
     } else {
         g_warmWhy = "the warm-up faulted; see the fault report";
         Log::get().note(
-            "temporal aa: %s warm-up faulted after %.0f ms and is not retried. The first "
-            "submitted frame runs as before: a refusal by %s is remembered for the session "
-            "and the '%s was asked for, but' line repeats why, while a failed feature create "
-            "is retried there. Please report this log.",
-            amdEngine ? "AMD" : "NVIDIA", totalMs, amdEngine ? "AMD" : "NVIDIA",
-            amdEngine ? "fsr" : "dlaa");
+            "temporal aa: %s warm-up faulted after %.0f ms and is not retried. "
+            "Please report this log.",
+            amdEngine ? "AMD" : "NVIDIA", totalMs);
     }
 }
 

@@ -17,6 +17,8 @@ inline thread_local NativeDlssEvaluation nativeDlssEvaluation;
 class NativeDlssEvidence {
     using Status = NativeDlssQualityStatus;
 public:
+    float launchMultiplier() const noexcept { return multiplier_.load(std::memory_order_relaxed); }
+
     void publish(DlssQuality selected, float multiplier, bool declined = false) noexcept {
         invalidate();
         multiplier_ = multiplier;
