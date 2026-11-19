@@ -449,6 +449,23 @@ void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allow
         else {++a.invalid;a.failure.store(NativeVrsFailure::GazeInvalid,std::memory_order_relaxed);}
     }catch(...){auto& s=state();refuse(s,NativeVrsFailure::DriverCall,kCallFault);fullRate(s);}
 }
+bool nativeVrsWitnessReady(ID3D11DeviceContext* context) noexcept {
+    auto& a=shared();
+    // This read-only probe must not invalidate the owner's state on a foreign thread.
+    if(!a.driverReady.load(std::memory_order_acquire)||!a.enabled.load(std::memory_order_acquire)||
+       !context||context!=a.owner.load(std::memory_order_acquire)||GetCurrentThreadId()!=a.thread.load(std::memory_order_acquire))return false;
+    const auto& s=state();
+    return !s.failed && s.sampleUsable && s.config==a.configVersion.load(std::memory_order_acquire) &&
+        s.gazeEpoch && s.gazeEpoch==nativeTemporalGazeEpoch() && receiptFresh(s);
+}
+bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection& projection) noexcept {
+    if(eye>=2||!nativeVrsWitnessReady(context))return false;
+    auto& s=state();
+    try {
+        syncInvalidation(s);
+        return !s.failed && prepareMap(s,eye,rtv,dsv,projection) && fullRate(s) && nativeVrsWitnessReady(context);
+    }catch(...){refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
+}
 bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection* projection,bool expandedMaterial) noexcept {
     try {
         auto& a=shared();

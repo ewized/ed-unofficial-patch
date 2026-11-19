@@ -302,7 +302,7 @@ void testIntroCurveControls(const std::string& text) {
          {{"const bool originalIssued=observedDraw(alteredClass", "const bool originalIssued = stripIssued || observedDraw(alteredClass"}}, "unarmed-text"},
         {"the strip's early return answers false", {{"if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }", "if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return false; }"}}, "unarmed-text"},
         {"the native issue wrapper drops the draw result",
-         {{"    return draw();\n}\nvoid nativeBeforeOriginal", "    draw(); return true;\n}\nvoid nativeBeforeOriginal"}}, "unarmed-text"},
+         {{"if(decision.eye>=2)nativeVrsFullRate(decision.context);\n    return draw();", "if(decision.eye>=2)nativeVrsFullRate(decision.context);\n    draw(); return true;"}}, "unarmed-text"},
         {"the candidate observer reports a withheld draw as issued",
          {{"objectProbeCandidateDrawIssued(self,issued);", "objectProbeCandidateDrawIssued(self,true);"}}, "unarmed-text"},
         // ---- candidate

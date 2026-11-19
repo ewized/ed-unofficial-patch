@@ -21,6 +21,8 @@
 #include <stdexcept>
 #include <string>
 #include "../../src/d3d11/native_gaze_readiness.h"
+#include "witness_gpu_cases.h"
+#include "../../third_party/dxbc_hash/DxilHash.cpp"
 
 #ifdef EDVR_NATIVE_VRS_TEST
 #error This fixture requires the production native VRS owner path
@@ -233,7 +235,17 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     for(size_t i=2;i<4;++i)distinctEyesAndMovement&=results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2;
     const bool reduced=full.stats.PSInvocations>0&&coarse.stats.PSInvocations>0&&coarse.stats.PSInvocations<full.stats.PSInvocations;
     const bool owner=accepted&&coarseStatus.coarseAcknowledged&&coarseStatus.magicAbsent&&coarseStatus.mapUpdates[0]>0&&!finalStatus.driverErrors&&!finalStatus.refused;
-    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints;
+    edvr::nativeVrsConfigure(true);
+    uint64_t witnessFrame=3;
+    auto witnessRate=[&](bool coarse,ID3D11RenderTargetView* c,ID3D11DepthStencilView* d){
+        if(!coarse){edvr::nativeVrsFullRate(context.Get());return edvr::nativeVrsStatus().fullRateAcknowledged;}
+        edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;
+        return edvr::nativeVrsBeforeWorld(context.Get(),0,c,d,&projection);
+    };
+    const bool witness=witness_gpu::run(device.Get(),context.Get(),compileFn,witnessRate,true);
+    edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),++witnessFrame);
+    std::printf("{\"split_sloped_overlap_coplanar_depth_stencil_slot_skin_exact\":%s}\n",witness?"true":"false");
+    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&witness;
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");

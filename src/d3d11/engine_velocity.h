@@ -51,6 +51,8 @@
 struct ID3D11Buffer;
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 struct ID3D11Resource;
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
@@ -307,6 +309,19 @@ bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceV
 // original shaders or the currently held exact motion/marker replacement;
 // binding generations/context must still name those original shaders.
 bool engineVelocityFlatSourceShaders(ID3D11DeviceContext*, uint64_t vs, uint64_t ps);
+struct EngineWitnessIssue {
+    ID3D11DeviceContext* ctx;
+    ID3D11RenderTargetView* color;
+    ID3D11DepthStencilView* depth;
+    unsigned eye;
+    uint64_t epoch,drawNumber;
+    bool reuse,querySafe;
+    void* user;
+    void (*draw)(void*,bool material);
+    bool (*rate)(void*,bool);
+};
+bool engineVelocitySplitMaterial(const EngineWitnessIssue&);
+void engineVelocityReportWitness();
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);

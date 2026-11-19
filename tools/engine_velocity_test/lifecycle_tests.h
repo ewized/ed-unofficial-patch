@@ -163,6 +163,7 @@ void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs, ID3
                            uint32_t n) { ctx->VSSetShader(vs, ci, n); }
 void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ClassInstance* const* ci,
                            uint32_t n) { ctx->PSSetShader(ps, ci, n); }
+void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx,ID3D11Resource* dst,ID3D11Resource* src){ctx->CopyResource(dst,src);}
 void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const float factor[4], uint32_t mask) {
     ctx->OMSetBlendState(state, factor, mask);
 }

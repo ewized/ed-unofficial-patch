@@ -74,6 +74,11 @@ struct NativeVrsProjection {
 bool nativeVrsBeforeWorld(ID3D11DeviceContext*,unsigned eye,
     ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection* =nullptr,
     bool expandedMaterial=false) noexcept;
+// Check the current eye and prepare its map before a full-rate motion issue.
+// A false result leaves the original, combined single-draw path in charge.
+bool nativeVrsWitnessReady(ID3D11DeviceContext*) noexcept;
+bool nativeVrsPrepareWitness(ID3D11DeviceContext*,unsigned eye,
+    ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection&) noexcept;
 // All UI, unknown passes and reissues must pass a full-rate boundary. Invalidate
 // on ExecuteCommandList/ClearState/foreign ownership; never trust a prior set.
 void nativeVrsFullRate(ID3D11DeviceContext*) noexcept;

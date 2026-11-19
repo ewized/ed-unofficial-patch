@@ -9,6 +9,7 @@
 #include "vrs_coverage.h"     // default-off, sampled original-world NVAPI evidence
 #include "native_vrs_draw_policy.h"
 #include "native_vrs_material_receipt.h"
+#include "flat_replay_query_tracker.h"
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
 #include "concourse_pane.h"   // TEMPORARY concourse panes (diag.concourse_pane_mode): one relaxed load per real draw while nothing is armed
@@ -16,6 +17,7 @@
 #include "vr_runtime.h"
 
 #include <windows.h>
+#include <mutex>
 
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -225,6 +227,8 @@ constexpr size_t kSlotDiscardResource       = 117;
 constexpr size_t kSlotDiscardView           = 118;
 constexpr size_t kSlotVSSetConstantBuffers1 = 119;
 constexpr size_t kSlotSwapDeviceContextState = 131;
+constexpr size_t kSlotClearView = 132;
+constexpr size_t kSlotDiscardView1 = 133;
 // The other way to bind render targets. Same effect on slot 0, and it is the
 // call an engine makes whenever a UAV is bound alongside -- so leaving it out
 // meant the binding could change without us seeing it.
@@ -548,6 +552,12 @@ struct State : DrawHot {
     PFN_UpdateSubresource1   realUpdateSubresource1 = nullptr;
     PFN_DiscardResource      realDiscardResource = nullptr;
     PFN_DiscardView          realDiscardView = nullptr;
+    void (STDMETHODCALLTYPE* realWitnessClearView)(ID3D11DeviceContext*,ID3D11View*,const FLOAT*,const D3D11_RECT*,UINT)=nullptr;
+    void (STDMETHODCALLTYPE* realWitnessDiscardView1)(ID3D11DeviceContext*,ID3D11View*,const D3D11_RECT*,UINT)=nullptr;
+    bool witnessBatchHooks=false;
+    FlatReplayQueryTracker witnessQueries;
+    std::mutex witnessQueryMutex;
+    std::atomic<uint64_t> witnessEpoch{1},witnessDraw{0};
     PFN_SwapDeviceContextState realSwapDeviceContextState = nullptr;
     // The bound target's underlying resource, cached per binding generation
     // for the FSS viewport paths -- resolved only while fssResActive(), so a
@@ -1053,15 +1063,42 @@ struct NativeWorldDecision {
     bool expandedMaterial=false;
     ID3D11VertexShader* vs=nullptr;
     ID3D11PixelShader* ps=nullptr;
+    bool splitWitness=false;
 };
+void witnessMutation(ID3D11DeviceContext* ctx) {
+    if(g_state && ctx==g_state->ownerCtx && nativeVrsLive())++g_state->witnessEpoch;
+}
+// CB/VB uploads cannot write the single-sample Texture2D depth resource.
+void witnessResourceMutation(ID3D11DeviceContext* ctx,ID3D11Resource* resource) {
+    if(!g_state || ctx!=g_state->ownerCtx || !nativeVrsLive())return;
+    D3D11_RESOURCE_DIMENSION type=D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    if(resource)resource->GetType(&type);
+    if(type==D3D11_RESOURCE_DIMENSION_TEXTURE2D || type==D3D11_RESOURCE_DIMENSION_UNKNOWN)++g_state->witnessEpoch;
+}
+void witnessDrawEntered(ID3D11DeviceContext* ctx) {
+    if(g_state && ctx==g_state->ownerCtx && nativeVrsLive())++g_state->witnessDraw;
+}
+void witnessQuery(ID3D11DeviceContext* ctx,ID3D11Asynchronous* async,bool begin) {
+    if(ctx!=g_state->ownerCtx)return;
+    auto kind=FlatReplayQueryTracker::Kind::Unknown;
+    ID3D11Query* query=nullptr;
+    if(async && SUCCEEDED(async->QueryInterface(IID_PPV_ARGS(&query)))){
+        D3D11_QUERY_DESC desc{};query->GetDesc(&desc);query->Release();
+        kind=desc.Query==D3D11_QUERY_TIMESTAMP_DISJOINT?FlatReplayQueryTracker::Kind::Timing:
+            (desc.Query==D3D11_QUERY_TIMESTAMP || desc.Query==D3D11_QUERY_EVENT)?FlatReplayQueryTracker::Kind::EndOnly:FlatReplayQueryTracker::Kind::Count;
+    }
+    std::lock_guard<std::mutex> lock(g_state->witnessQueryMutex);
+    if(begin)g_state->witnessQueries.begin(async,kind);else g_state->witnessQueries.end(async,kind);
+}
 thread_local const NativeWorldDecision* g_nativeWorldDecision=nullptr;
+thread_local bool g_witnessInternal=false;
 template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,Draw draw) {
     struct Scope {const NativeWorldDecision* saved;Scope(const NativeWorldDecision* next):saved(g_nativeWorldDecision){g_nativeWorldDecision=next;}~Scope(){g_nativeWorldDecision=saved;}} scope(&decision);
     if(decision.eye>=2)nativeVrsFullRate(decision.context);
     return draw();
 }
-void nativeBeforeOriginal(ID3D11DeviceContext* context) {
-    if(!nativeVrsLive() || context!=g_state->ownerCtx)return;
+bool nativeOriginalRate(ID3D11DeviceContext* context,bool certifiedSplit,bool prepareWitness=false) {
+    if(!nativeVrsLive() || context!=g_state->ownerCtx)return false;
     const auto* d=g_nativeWorldDecision;
     if(d&&d->context==context&&d->eye<2&&nativeVrsCoarseRequested()){
         struct ProjectionCache {NativeVrsProjection value{};bool valid=false;};
@@ -1079,6 +1116,10 @@ void nativeBeforeOriginal(ID3D11DeviceContext* context) {
                 p.value.sequence==sequence&&nativeTemporalFrameSequence()==sequence;
         }
         if(p.valid&&nativeTemporalFrameSequence()==sequence){
+            if(certifiedSplit && d->splitWitness){
+                if(prepareWitness)return nativeVrsPrepareWitness(context,d->eye,d->rtv,d->dsv,p.value);
+                return nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);
+            }
             ID3D11VertexShader* actualVs=nullptr;
             ID3D11PixelShader* actualPs=nullptr;
             context->VSGetShader(&actualVs,nullptr,nullptr);
@@ -1086,19 +1127,40 @@ void nativeBeforeOriginal(ID3D11DeviceContext* context) {
             const bool original=actualVs==d->vs && actualPs==d->ps;
             if(actualVs)actualVs->Release();
             if(actualPs)actualPs->Release();
-            if(original){nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);return;}
+            if(original&&!d->splitWitness)return nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);
         }
     }
     nativeVrsFullRate(context);
+    return false;
+}
+void nativeBeforeOriginal(ID3D11DeviceContext* context) {nativeOriginalRate(context,false);}
+template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,Draw draw) {
+    const auto* d=g_nativeWorldDecision;
+    if(!d || d->context!=ctx || !d->splitWitness || !nativeVrsWitnessReady(ctx) ||
+       !g_state->realPSSetShader || !g_state->realOMSetRenderTargets)return false;
+    struct Internal {bool old=g_witnessInternal;Internal(){g_witnessInternal=true;}~Internal(){g_witnessInternal=old;}} internal;
+    struct Issue {ID3D11DeviceContext* ctx;Draw& draw;} issue{ctx,draw};
+    bool safe;
+    {std::lock_guard<std::mutex> lock(g_state->witnessQueryMutex);safe=g_state->witnessQueries.safe();}
+    return engineVelocitySplitMaterial({ctx,d->rtv,d->dsv,d->eye,g_state->witnessEpoch.load(),g_state->witnessDraw.load(),
+        g_state->witnessBatchHooks,safe&&!vrsCoverageEnabled()&&!vrsWorkReferenceEnabled()&&!nativeVrsPsMeasureLive(),&issue,
+        [](void* user,bool material){static_cast<Issue*>(user)->draw(material);},
+        [](void* user,bool coarse){
+            auto* context=static_cast<Issue*>(user)->ctx;
+            if(nativeOriginalRate(context,true,!coarse))return true;
+            if(coarse)nativeVrsFullRate(context);
+            return false;
+        }});
 }
 void nativeBeforeReissue(ID3D11DeviceContext* context) {
+    witnessMutation(context);
     if(nativeVrsLive()&&g_state&&context==g_state->ownerCtx)nativeVrsFullRate(context);
 }
 #include "native_vrs_draw_scope.h"
 void nativePsMeasureLog(const char* line){Log::get().note("%s",line);}
 struct NativeMutationScope {
     ID3D11DeviceContext* context;bool live;
-    explicit NativeMutationScope(ID3D11DeviceContext* c):context(c),live(nativeVrsLive()){if(live)nativeVrsInvalidate(context);}
+    explicit NativeMutationScope(ID3D11DeviceContext* c):context(c),live(nativeVrsLive()){if(live){witnessMutation(c);nativeVrsInvalidate(context);}}
     ~NativeMutationScope(){if(live)nativeVrsInvalidate(context);}
 };
 bool g_vScreenInstallAttempted = false;
@@ -3185,6 +3247,7 @@ void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedOMSetRenderTargets(ID3D11DeviceContext* self, UINT n,
                                                 ID3D11RenderTargetView* const* rtvs,
                                                 ID3D11DepthStencilView* dsv) {
+    witnessMutation(self);
     if (!foreignContext(self)) flatIssueEpochBumpRt();
     if (g_flatComputeInternal) { g_state->realOMSetRenderTargets(self, n, rtvs, dsv); return; }
     ++g_state->thunkHits[kHitOmSet];
@@ -3233,6 +3296,7 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             UINT uavCount,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
+    witnessMutation(self);
     // 0xFFFFFFFF keeps the current targets. Anything else can replace the depth view.
     if (!foreignContext(self) && n != 0xFFFFFFFFu) flatIssueEpochBumpRt();
     if (g_flatComputeInternal) { g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); return; }
@@ -3397,25 +3461,36 @@ void STDMETHODCALLTYPE hookedVSSetConstantBuffers1(ID3D11DeviceContext* self, UI
 void STDMETHODCALLTYPE hookedCopySubresourceRegion1(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub,
                                                     UINT dstX, UINT dstY, UINT dstZ, ID3D11Resource* src, UINT srcSub,
                                                     const D3D11_BOX* box, UINT copyFlags) {
+    witnessResourceMutation(self,dst);
     if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
     g_state->realCopySubresourceRegion1(self, dst, dstSub, dstX, dstY, dstZ, src, srcSub, box, copyFlags);
 }
 void STDMETHODCALLTYPE hookedUpdateSubresource1(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub,
                                                 const D3D11_BOX* box, const void* data, UINT rowPitch, UINT depthPitch, UINT copyFlags) {
+    witnessResourceMutation(self,dst);
     if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
     g_state->realUpdateSubresource1(self, dst, dstSub, box, data, rowPitch, depthPitch, copyFlags);
 }
 void STDMETHODCALLTYPE hookedDiscardResource(ID3D11DeviceContext* self, ID3D11Resource* resource) {
+    witnessResourceMutation(self,resource);
     if (!foreignContext(self)) flatIssueEpochNoteResource(resource);
     g_state->realDiscardResource(self, resource);
 }
 void STDMETHODCALLTYPE hookedDiscardView(ID3D11DeviceContext* self, ID3D11View* view) {
+    witnessMutation(self);
     // The view's resource is not known without another query. A discard is rare; revoke.
     if (!foreignContext(self)) flatIssueEpochRevoke();
     g_state->realDiscardView(self, view);
 }
+void STDMETHODCALLTYPE witnessClearView(ID3D11DeviceContext* self,ID3D11View* view,const FLOAT* color,const D3D11_RECT* rects,UINT count){
+    witnessMutation(self);g_state->realWitnessClearView(self,view,color,rects,count);
+}
+void STDMETHODCALLTYPE witnessDiscardView1(ID3D11DeviceContext* self,ID3D11View* view,const D3D11_RECT* rects,UINT count){
+    witnessMutation(self);g_state->realWitnessDiscardView1(self,view,rects,count);
+}
 void STDMETHODCALLTYPE hookedSwapDeviceContextState(ID3D11DeviceContext* self, ID3DDeviceContextState* state,
                                                     ID3DDeviceContextState** previous) {
+    witnessMutation(self);
     if (!foreignContext(self)) flatIssueEpochRevoke();
     if (self == g_state->ownerCtx) uiLayerMapRunEnd(self);   // the state this swap puts away must hold the game's targets (ui_layer.h)
     g_state->realSwapDeviceContextState(self, state, previous);
@@ -3614,6 +3689,7 @@ __declspec(noinline) bool mapBufferDesc(ID3D11Resource* res, UINT* byteWidth,
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
                                     UINT sub, D3D11_MAP type, UINT flags,
                                     D3D11_MAPPED_SUBRESOURCE* mapped) {
+    if(type!=D3D11_MAP_READ)witnessResourceMutation(self,res);
     // Every Map can reuse an address whose earlier bounced mapping was
     // abandoned. Drop that record before the driver can recycle its pointer.
     // Skipped while nothing is bounced (flat_runtime.h): PreMap returns at that same test.
@@ -4442,7 +4518,8 @@ NativeWorldDecision nativeSceneMaterialDecision(ID3D11DeviceContext* context, bo
     candidate.shadersTracked = vs && vertex && ps && pixel;
     candidate.originalIssue = originalIssue;
     candidate.motionWitness = engineVelocityDrawSubstituted();
-    if (candidate.targetKind != 1 || !candidate.shadersTracked || candidate.motionWitness)
+    const bool split=candidate.motionWitness;
+    if (candidate.targetKind != 1 || !candidate.shadersTracked)
         return result;
     D3D11_RENDER_TARGET_VIEW_DESC colorDesc{};
     rtv->GetDesc(&colorDesc);
@@ -4451,9 +4528,9 @@ NativeWorldDecision nativeSceneMaterialDecision(ID3D11DeviceContext* context, bo
     if (!candidate.materialShader) return result;
     candidate.interfaceDraw = native_vrs::protectsInterfaceShader(vs, ps, mapui::systemOpen(),
         kind, count, instances, uiDepthSampledSurfaceSlot() >= 0);
-    if (!native_vrs::sceneMaterialCandidate(candidate, vs, ps))
+    if (!native_vrs::sceneMaterialCandidate(candidate, vs, ps, split))
         return result;
-    return {context, unsigned(candidate.eye), rtv, dsv, !vrs_coverage::knownWorldFamily(vs, ps), vertex, pixel};
+    return {context, unsigned(candidate.eye), rtv, dsv, !vrs_coverage::knownWorldFamily(vs, ps), vertex, pixel,split};
 }
 
 #include "native_vrs_uncounted_issue.h"
@@ -5118,6 +5195,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
 // session that is by definition the one being measured.
 void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
+    witnessResourceMutation(self,dst);
     if (g_flatComputeInternal) {
         if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
         g_state->realCopyResource(self, dst, src); return;
@@ -5150,6 +5228,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       ID3D11DepthStencilView* dsv, UINT flags,
                                       FLOAT depth, UINT8 stencil) {
+    witnessMutation(self);
     if (g_flatComputeInternal) { g_state->realClearDsv(self, dsv, flags, depth, stencil); return; }
     gpuFrameCommandIfLive(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteClear(self, nullptr, dsv);
@@ -5180,6 +5259,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
 // q= sequence is the finding.
 void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
                                    ID3D11Asynchronous* async) {
+    witnessQuery(self,async,true);
     if (g_flatComputeInternal) { g_state->realBegin(self, async); return; }
     if(runtimeFlatProfile())flatRuntimeReplayQueryBegin(self, async);
     gpuFrameCommandIfLive(self);
@@ -5192,6 +5272,7 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
 
 void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
+    witnessQuery(self,async,false);
     if (g_flatComputeInternal) { g_state->realEnd(self, async); return; }
     gpuFrameCommandIfLive(self);
     if (gpuFrameInternal()) {
@@ -5261,6 +5342,7 @@ static const ConcoursePaneCalls kConcoursePaneCalls = {&stationMaskSetBlend, &co
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
+    witnessDrawEntered(self);
     mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         nativeBeforeReissue(self);
@@ -5305,6 +5387,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
+    witnessDrawEntered(self);
     mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         nativeBeforeReissue(self);
@@ -5368,6 +5451,7 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, UINT dstX, UINT dstY,
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
+    witnessResourceMutation(self,dst);
     if (g_flatComputeInternal) {
         if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
         g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return;
@@ -5416,6 +5500,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                ID3D11Resource* dst, UINT dstSub,
                                                const D3D11_BOX* box, const void* data,
                                                UINT rowPitch, UINT depthPitch) {
+    witnessResourceMutation(self,dst);
     if (g_flatComputeInternal) {
         if (!foreignContext(self)) flatIssueEpochNoteResource(dst);
         g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return;
@@ -5471,6 +5556,7 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 ID3D11Resource* dst, UINT dstSub,
                                                 ID3D11Resource* src, UINT srcSub,
                                                 DXGI_FORMAT fmt) {
+    witnessResourceMutation(self,dst);
     if (g_flatComputeInternal) { g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt); return; }
     gpuFrameCommandIfLive(self);
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
@@ -5684,6 +5770,7 @@ private:
 };
 
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
+    witnessDrawEntered(self);
     mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'D', count, 1);
     if (runtimeFlatProfile()) {
@@ -5755,11 +5842,17 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             ConcoursePaneScope pane(self, count, start, 0, 'D', kConcoursePaneCalls);   // TEMPORARY (concourse_pane.h): the outside's non-indexed draws (beams, flares, the scatter) are withheld here; no mirror, the glass is indexed
             if (!pane.withheld()) {
+                if(!nativeSplitOriginal(self,[&](bool material){
+                    const int64_t r0=material && clock.on?qpcNow():0;
+                    g_state->realDraw(self,count,start);
+                    if(material && clock.on)clock.realCall(r0);
+                })){
                 nativeBeforeOriginal(self);
                 NativePsDrawScope ps(self,'D',count,1,start);
                 const int64_t r0 = clock.on ? qpcNow() : 0;
                 g_state->realDraw(self,count,start);
                 if (clock.on) clock.realCall(r0);
+                }
             }
         }
         srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
@@ -5771,6 +5864,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
+    witnessDrawEntered(self);
     mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
     if (runtimeFlatProfile()) {
@@ -5800,6 +5894,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
+    witnessDrawEntered(self);
     mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'I', count, 1);
     if (runtimeFlatProfile()) {
@@ -5873,12 +5968,18 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             ConcoursePaneScope pane(self, count, startIndex, baseVertex, 'I', kConcoursePaneCalls);   // TEMPORARY (concourse_pane.h)
             if (!pane.withheld()) {
+                if(!nativeSplitOriginal(self,[&](bool material){
+                    const int64_t r0=material && clock.on?qpcNow():0;
+                    g_state->realDrawIndexed(self,count,startIndex,baseVertex);
+                    if(material && clock.on)clock.realCall(r0);
+                })){
                 nativeBeforeOriginal(self);
                 {
                 NativePsDrawScope ps(self,'I',count,1,startIndex,baseVertex);
                 const int64_t r0 = clock.on ? qpcNow() : 0;
                 g_state->realDrawIndexed(self,count,startIndex,baseVertex);
                 if (clock.on) clock.realCall(r0);
+                }
                 }
                 while (pane.nextMirrorPass()) {nativeBeforeReissue(self);g_state->realDrawIndexed(self, count, startIndex, baseVertex);}
             }
@@ -5894,6 +5995,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
+    witnessDrawEntered(self);
     mapRunBeforeDraw(self);
     // The FSS reveal fix (fss_reveal.h; VR profile only, one bool when the scanner is not on show): at the first reveal composite of a frame the frame's first downsample of the ring layer is
     // replayed from the finished layer. First in the thunk and through the game's own un-hooked entry points, so nothing that tracks state sees the replay.
@@ -5987,11 +6089,17 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
             ConcoursePaneScope pane(self, perInstance, startVertex, 0, 'N', kConcoursePaneCalls);   // TEMPORARY (concourse_pane.h): the outside's non-indexed draws (beams, flares, the scatter) are withheld here; no mirror, the glass is indexed
             if (!pane.withheld()) {
+                if(!nativeSplitOriginal(self,[&](bool material){
+                    const int64_t r0=material && clock.on?qpcNow():0;
+                    g_state->realDrawInstanced(self,perInstance,drawn,startVertex,startInstance);
+                    if(material && clock.on)clock.realCall(r0);
+                })){
                 nativeBeforeOriginal(self);
                 NativePsDrawScope ps(self,'N',perInstance,drawn,startVertex,0,startInstance);
                 const int64_t r0 = clock.on ? qpcNow() : 0;
                 g_state->realDrawInstanced(self,perInstance,drawn,startVertex,startInstance);
                 if (clock.on) clock.realCall(r0);
+                }
             }
         }
         srvTurretHudCountIssue(self);   // issue 140: the game's own issue; a family's first scope says its state (one relaxed load otherwise)
@@ -6006,6 +6114,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
+    witnessDrawEntered(self);
     mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'X', perInstance, instances);
     if (runtimeFlatProfile()) {
@@ -6095,6 +6204,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             GpuCensusAlteredScope timed(self, altered);
             ConcoursePaneScope pane(self, perInstance, startIndex, baseVertex, 'X', kConcoursePaneCalls);   // TEMPORARY (concourse_pane.h)
             if (!pane.withheld()) {
+                if(!nativeSplitOriginal(self,[&](bool material){
+                    const int64_t r0=material && clock.on?qpcNow():0;
+                    g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);
+                    if(material && clock.on)clock.realCall(r0);
+                })){
                 nativeBeforeOriginal(self);
                 // The query contains only this first API issue. Pane mirrors,
                 // velocity/UI reissues and the legacy observer stay outside.
@@ -6109,6 +6223,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                     const int64_t r0 = clock.on ? qpcNow() : 0;
                     g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);
                     if (clock.on) clock.realCall(r0);
+                }
                 }
                 }
                 while (pane.nextMirrorPass()) {
@@ -6669,6 +6784,7 @@ void readCensusSkip(Config& cfg, State* s) {
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* ctx, uint32_t n,
                                 ID3D11RenderTargetView* const* rtvs,
                                 ID3D11DepthStencilView* dsv) {
+    if(!g_witnessInternal)witnessMutation(ctx);
     if (!g_state || !g_state->realOMSetRenderTargets || !ctx) return;
     flatIssueEpochBumpRt();
     g_state->realOMSetRenderTargets(ctx, n, rtvs, dsv);
@@ -6709,6 +6825,7 @@ void vScreenOMSetDepthStencilStateRaw(ID3D11DeviceContext* ctx, ID3D11DepthStenc
 void vScreenUpdateSubresourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dstResource,
                                  uint32_t dstSubresource, const D3D11_BOX* dstBox,
                                  const void* srcData, uint32_t srcRowPitch, uint32_t srcDepthPitch) {
+    witnessResourceMutation(ctx,dstResource);
     if (!g_state || !g_state->realUpdateSubresource || !ctx) return;
     flatIssueEpochNoteResource(dstResource);
     g_state->realUpdateSubresource(ctx, dstResource, dstSubresource, dstBox, srcData, srcRowPitch,
@@ -6740,6 +6857,7 @@ void vScreenClearRenderTargetViewRaw(ID3D11DeviceContext* ctx, ID3D11RenderTarge
 }
 
 void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src) {
+    if(!g_witnessInternal)witnessResourceMutation(ctx,dst);
     if (!ctx || !dst || !src) return;
     flatIssueEpochNoteResource(dst);
     if (g_state && g_state->realCopyResource) {
@@ -6750,6 +6868,7 @@ void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D1
 }
 
 void vScreenCopySubresourceRegionRaw(ID3D11DeviceContext* ctx, ID3D11Resource* dst, uint32_t dstX, ID3D11Resource* src, const D3D11_BOX* box) {
+    witnessResourceMutation(ctx,dst);
     if (!ctx || !dst || !src) return;
     flatIssueEpochNoteResource(dst);
     if (g_state && g_state->realCopySubresourceRegion) {
@@ -6996,6 +7115,7 @@ void vScreenReclaimTick() {
     if (!s->hook.lastPassRan()) return;   // unpatrolled is not "held"
     ++s->hookFrames;
     if (s->hook.lastPassDisplaced() == 0) ++s->hookFramesHeld;
+    else {std::lock_guard<std::mutex> lock(s->witnessQueryMutex);s->witnessQueries.uncertain=true;}
     if (s->hook.lastPassConceded() > s->hookConceded) {
         s->hookConceded = static_cast<uint32_t>(s->hook.lastPassConceded());
     }
@@ -7060,6 +7180,7 @@ void introCurveNoteRetired() {
 }  // namespace
 
 void vScreenNativeFrameBoundary(uint64_t frameOrdinal) {
+    if(g_state)witnessMutation(g_state->ownerCtx);
     if(!nativeVrsLive()||!g_state||!g_state->ownerCtx)return;
     nativeVrsTick(g_state->ownerCtx,frameOrdinal,!runtimeFlatProfile());
 }
@@ -7071,6 +7192,7 @@ void vScreenFrameBoundary() {
                 double(n.sharpRadius),double(n.transitionRadius),double(n.sharpRadius*200.f),double(n.transitionRadius*200.f));
             Log::get().noteReserved("native world VRS: configured=%u driver_ready=%u refused=%u magic_absent=%u vendor_known=%u full_rate_ack=%u coarse_ack=%u failure=%u driver_status=%d ticks=%llu provider_polls=%llu valid_pairs=%llu invalid_pairs=%llu stale=%llu world_calls=%llu world_accepted=%llu full_rate_calls=%llu invalidations=%llu updates=%llu,%llu map_bytes=%llu rate_sets=%llu resource_sets=%llu driver_errors=%llu context_refused=%llu frame_refused=%llu target_refused=%llu world_ps_reduction_verified=0 gpu_benefit_verified=0 sensor_timestamp_unavailable=1 projection_mapping_verified=0 physical_calibration_verified=0 coordinates_logged=0",
                 n.configured?1u:0u,n.driverReady?1u:0u,n.refused?1u:0u,n.magicAbsent?1u:0u,n.vendorStateKnown?1u:0u,n.fullRateAcknowledged?1u:0u,n.coarseAcknowledged?1u:0u,unsigned(n.failure),n.lastDriverStatus,n.ticks,n.providerPolls,n.validPairs,n.invalidPairs,n.staleRefusals,n.worldCalls,n.worldAccepted,n.fullRateCalls,n.invalidations,n.mapUpdates[0],n.mapUpdates[1],n.mapBytes,n.rateSets,n.resourceSets,n.driverErrors,n.contextRefusals,n.frameRefusals,n.targetRefusals);
+            engineVelocityReportWitness();
             Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu",
                 n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1]);}
     }
@@ -8080,9 +8202,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                    reinterpret_cast<void**>(&s.realCopyResource));
     s.hook.replace(kSlotClearDepthStencilView, &hookedClearDsv,
                    reinterpret_cast<void**>(&s.realClearDsv));
-    s.hook.replace(kSlotBegin, &hookedBegin,
+    const bool witnessBeginHook=s.hook.replace(kSlotBegin, &hookedBegin,
                    reinterpret_cast<void**>(&s.realBegin));
-    s.hook.replace(kSlotEnd, &hookedEnd,
+    const bool witnessEndHook=s.hook.replace(kSlotEnd, &hookedEnd,
                    reinterpret_cast<void**>(&s.realEnd));
     s.hook.replace(kSlotDrawIndexedInstancedIndirect,
                    &hookedDrawIndexedInstancedIndirect,
@@ -8135,6 +8257,17 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                                     reinterpret_cast<void**>(&s.realSwapDeviceContextState));
     const bool issueHooks = depthHook && gsHook && hsHook && dsHook && predicateHook && cb1Hook &&
         copy1Hook && update1Hook && discardResourceHook && discardViewHook && swapHook;
+    ID3D11DeviceContext1* context1=nullptr;
+    const bool sameContext1=SUCCEEDED(ctx->QueryInterface(IID_PPV_ARGS(&context1))) && context1==ctx;
+    if(context1)context1->Release();
+    const bool clearViewHook=sameContext1 && issueSlot(kSlotClearView,&witnessClearView,reinterpret_cast<void**>(&s.realWitnessClearView));
+    const bool discard1Hook=sameContext1 && issueSlot(kSlotDiscardView1,&witnessDiscardView1,reinterpret_cast<void**>(&s.realWitnessDiscardView1));
+    s.witnessBatchHooks=issueHooks && clearViewHook && discard1Hook && executeHookInstalled && s.realClearState &&
+        s.realClearDsv && s.realCopyResource && s.realCopySubresourceRegion && s.realResolveSubresource &&
+        s.realUpdateSubresource && s.realMap && s.realOMSetRenderTargets && s.realOMSetRtvAndUav &&
+        s.realDraw && s.realDrawIndexed && s.realDrawInstanced && s.realDrawIndexedInstanced && s.realDrawAuto &&
+        s.realDrawIndexedInstancedIndirect && s.realDrawInstancedIndirect;
+    if(!witnessBeginHook || !witnessEndHook || !s.realBegin || !s.realEnd)s.witnessQueries.uncertain=true;
     if (!issueHooks) flatIssueEpochFreeze();
     Log::get().note("flat geometry issue reuse hooks: prefix=%zu depth=%u gs=%u hs=%u ds=%u predicate=%u vs-cb1=%u copy1=%u update1=%u discard-resource=%u discard-view=%u swap=%u frozen=%u",
                     s.hook.executablePrefix(), depthHook ? 1u : 0u, gsHook ? 1u : 0u, hsHook ? 1u : 0u, dsHook ? 1u : 0u,

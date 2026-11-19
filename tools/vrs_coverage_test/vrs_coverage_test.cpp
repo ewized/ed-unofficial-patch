@@ -1,6 +1,7 @@
 #include "../../src/d3d11/vrs_coverage_policy.h"
 #include "../../src/d3d11/native_vrs_draw_policy.h"
 #include "../../src/d3d11/native_vrs_material.h"
+#include "../../src/d3d11/flat_replay_query_tracker.h"
 #include "callback_dependency_tests.h"
 #include "work_reference_tests.h"
 #include <cstdio>
@@ -22,6 +23,7 @@ unsigned classifications=0,scopes=0,preparations=0;
 int nativeSceneMaterialDecision(ID3D11DeviceContext*,bool,bool,char,unsigned,unsigned){++classifications;return 0;}
 template<class Draw> bool nativeWorldIssue(int,Draw draw){++scopes;return draw();}
 void nativeBeforeOriginal(ID3D11DeviceContext*){++preparations;}
+template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext*,Draw){return false;}
 #include "../../src/d3d11/native_vrs_uncounted_issue.h"
 void test(){
     ID3D11DeviceContext owner{},deferred{};state.ownerCtx=&owner;
@@ -38,6 +40,15 @@ int main(int argc,char** argv){
  callbackDependencyTests(check);
  workReferenceTests(check);
  uncounted::test();
+ edvr::FlatReplayQueryTracker queries;
+ using QueryKind=edvr::FlatReplayQueryTracker::Kind;
+ int disjoint=0,occlusion=0;
+ queries.begin(&disjoint,QueryKind::Timing);
+ check(queries.safe(),"timestamp-disjoint timing includes the split work");
+ queries.begin(&occlusion,QueryKind::Count);
+ check(!queries.safe(),"count-bearing queries forbid a second geometry issue");
+ queries.end(&occlusion,QueryKind::Count);queries.end(&disjoint,QueryKind::Timing);
+ check(queries.safe(),"observed ends return the owner to split eligibility");
  PipelineQueryProgress pipeline;
  check(!pipeline.pending()&&!pipeline.pollable()&&!pipeline.end(),"idle pipeline cannot End or poll");
  check(pipeline.begin()&&pipeline.pending()&&!pipeline.pollable()&&!pipeline.begin(),"one Begin creates one pending query");
@@ -119,6 +130,10 @@ int main(int argc,char** argv){
        "census 054801 F1 rows 124,126,128: shared scene DSV and full-eye target do not certify resolve, deferred sun or indexed light volumes");
  auto unknown=leftMaterial;unknown.materialShader=false;
  auto witness=leftMaterial;witness.motionWitness=true;
+ check(sceneMaterialCandidate(witness,kWorldVs,kWorldPs,true)&&
+       !sceneMaterialCandidate(witness,0x889A5279E68F0672ull,0x2F924695596C8195ull,true)&&
+       !sceneMaterialCandidate(witness,0x889A5279E68F0672ull,0xEBA95E15B0A66102ull,true),
+       "a split admits eligible material while self-marks and emissive terminal panels retain their protection");
  check(!eligible(kWorldVs,kWorldPs,unknown)&&!eligible(kWorldVs,kWorldPs,witness)&&
        !eligible(0x889A5279E68F0672ull,0x2F924695596C8195ull,leftMaterial)&&
        !eligible(0x889A5279E68F0672ull,0xEBA95E15B0A66102ull,leftMaterial),

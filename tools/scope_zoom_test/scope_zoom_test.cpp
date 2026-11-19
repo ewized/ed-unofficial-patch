@@ -191,16 +191,42 @@ static bool wiredMark(const std::string& layer, const std::string& vscreen) {
            has(layer, "g_draw.weapons = uiLayerFamilyUsesWeaponsLayer(family);") && has(layer, "} markFrame{e, sequence};") && has(layer, "markFrame.composited = result != nullptr;") &&
            has(layer, "e.wPubMatched = plan.sourcePass;") && has(layer, "scopeZoomNoteMarkComposite(!composited || e.wPubSeq != sequence ? scopezoom::kMarkCompositeNone");
 }
+// Find the end of a guarded block in the source, including nested braces such
+// as array initializers. Comments and quoted log messages cannot close it.
+static size_t blockEnd(const std::string& text, size_t open) {
+    unsigned depth = 0;
+    for (size_t i = open; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (text.compare(i, 2, "//") == 0 || text.compare(i, 2, "/*") == 0) {
+            const bool line = text[i + 1] == '/';
+            i = line ? text.find('\n', i + 2) : text.find("*/", i + 2);
+            if (i == std::string::npos) break;
+            if (!line) ++i;
+        } else if (ch == '"' || ch == '\'') {
+            for (++i; i < text.size() && text[i] != ch; ++i) if (text[i] == '\\') ++i;
+        } else if (ch == '{') ++depth;
+        else if (ch == '}' && --depth == 0) return i;
+    }
+    return std::string::npos;
+}
 // F202: the lens with Anti-aliasing off. The right eye's door is told the game's own picture is resolved when no temporal mode runs (the predicate, g_temporal), the left (B3) door is not; the
 // temporal client's mode-off branch tells the scope lens's depth step before it returns, with the picture, the region and the near plane; the step clears the slot first, fills the right
 // eye's from the depth probe's scene depth while a press is open, and gives it the infinite-far near depth.
+static constexpr char kOffDepthCall[] = "edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]);";
+static constexpr char kUntreatedBranch[] = "if(!s->currentSettings.on||s->standDown||flipU||flipV){";
 static bool wiredOffAa(const std::string& layer, const std::string& nt, const std::string& tp, const std::string& door) {
-    const size_t off = nt.find("if(!s->currentSettings.on){"), call = nt.find("edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,"), early = nt.find("if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated");
+    const size_t treat = nt.find("HRESULT WINAPI treat(void* p,");
+    const size_t off = nt.find("if(!s->currentSettings.on){", treat), early = nt.find(kUntreatedBranch, treat);
+    const size_t offEnd = blockEnd(nt, nt.find('{', off)), earlyEnd = blockEnd(nt, nt.find('{', early));
+    if (!(off < offEnd && offEnd < early && early < earlyEnd && earlyEnd != std::string::npos)) return false;
+    const std::string offBody = nt.substr(off, offEnd - off), earlyBody = nt.substr(early, earlyEnd - early);
+    if (!has(offBody, kOffDepthCall) ||
+        !before(earlyBody, "edvrEyeCaptureUntreated(source,int(eye),b);", "s->treated[eye]=true;") ||
+        !before(earlyBody, "s->treated[eye]=true;", "return S_FALSE;") || earlyBody.find("return") != earlyBody.find("return S_FALSE;")) return false;
     const size_t fn = tp.find("void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {");
     if (fn == std::string::npos) return false;
     const std::string body = tp.substr(fn, 5200);
-    return has(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);") && has(layer, "leftArgs.resolved = e.doorFromPass;") && off != std::string::npos && call != std::string::npos &&
-           early != std::string::npos && off < call && call < early && has(nt, "(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]") && has(nt, "s->nearLast[eye]=s->nearZ[eye];") &&
+    return has(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);") && has(layer, "leftArgs.resolved = e.doorFromPass;") && has(nt, "s->nearLast[eye]=s->nearZ[eye];") &&
            before(body, "scopeZoomDepthClear(eye);", "releaseEye(g_eye[eye]);") && before(body, "releaseEye(g_eye[eye]);", "if (eye != 1 || !source || !region) return;") &&
            before(body, "if (eye != 1 || !source || !region) return;", "if (!scopeZoomWanted()) {") && has(body, "releaseDepth(g_eye[1]);") && before(body, "releaseDepth(g_eye[1]);", "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)") &&
            before(body, "depthProbeSceneDepth(sd.Width, sd.Height, eye, &dtex)", "scopeZoomDepthSet(eye, e.depthSrv, dd.Width, dd.Height, lensNear, covers);") &&
@@ -265,6 +291,8 @@ static void wiringTests() {
         check(!wiredOffAa(replaced(layer, "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, g_temporal);", "lensArgs.resolved = scopezoom::lensPictureResolved(e.doorFromPass, false);"), nt, temporal, door), "control: a door that takes the game's own picture whatever the mode (it would break the DLSS path's refusal of a picture the pass did not make) is not the wiring");
         check(!wiredOffAa(replaced(layer, "leftArgs.resolved = e.doorFromPass;", "leftArgs.resolved = true;"), nt, temporal, door), "control: B3's left door taking the game's own picture is not what F202 builds");
         check(!wiredOffAa(layer, replaced(nt, "edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,", "edvr::temporalPassNoteEyeTanX(int(eye),source,region,"), temporal, door), "control: a mode-off branch that never tells the depth step is not the wiring");
+        check(!wiredOffAa(layer, replaced(replaced(nt, kOffDepthCall, ""), kUntreatedBranch, std::string(kOffDepthCall) + kUntreatedBranch), temporal, door), "control: a depth note outside the AA-off guard does not count");
+        check(!wiredOffAa(layer, replaced(nt, "edvrEyeCaptureUntreated(source,int(eye),b);", "return S_FALSE;edvrEyeCaptureUntreated(source,int(eye),b);"), temporal, door), "control: an untreated return before capture does not count");
         check(!wiredOffAa(layer, replaced(nt, "s->nearLast[eye]=s->nearZ[eye];", ""), temporal, door), "control: a near plane not kept across frames is not the wiring");
         check(!wiredOffAa(layer, nt, replaced(temporal, "    scopeZoomDepthClear(eye);\n    // RC5 review", "    // RC5 review"), door), "control: a step that does not clear the slot first (a view from an earlier frame could stay) is not the wiring");
         check(!wiredOffAa(layer, nt, replaced(temporal, "const float lensNear = scopezoom::lensNearDepthInfiniteFar(nearZ);", "const float lensNear = 0.04f;"), door), "control: a near depth that is not the infinite-far reading of the runtime's near plane is not the wiring");

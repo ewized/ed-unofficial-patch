@@ -949,10 +949,17 @@ original scene shaders can use the current eye's map after their creation
 bytes and actual bindings are checked. Captured opaque canopy, station and
 terrain shaders qualify without motion outputs. The gate also requires a
 settled eye depth target, matching viewport and valid gaze/frame ownership.
-HUD/menu draws, private reissues, screen resolves, lighting passes, cutouts,
-unproven state and active MRT6/7 motion witnesses remain full rate. Complete
-cockpit coverage still needs a separate pass that preserves exact motion
-and depth data while the material shader runs at a coarse rate.
+Qualified opaque shaders that carry MRT6/7 motion data use a separate,
+minimal full-rate witness pass against a private depth/stencil surface.
+Their material pass then runs at the requested rate without overwriting
+the fine motion data. Adjacent compatible draws can reuse the depth copy;
+intervening writers invalidate it. A late rate refusal restores the original
+combined draw. Windows and GPU validation of this split remains pending.
+
+HUD/menu draws, screen resolves, lighting passes, cutouts, explicit shader
+depth or sample-mask outputs, UAV side effects and unproven state remain
+full rate. The split also refuses counting queries, predication, stream
+output and unsupported geometry stages; timing queries remain supported.
 
 The map uses 1x1 in the sharp centre, 2x2 in the middle ring and 4x4 outside.
 The [NVIDIA D3D11 shading-rate API](https://docs.nvidia.com/nvapi/nvapi_8h_source.html)

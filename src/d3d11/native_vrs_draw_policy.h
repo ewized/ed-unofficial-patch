@@ -45,10 +45,10 @@ struct SceneMaterialDraw {
     uint32_t colorFormat = 0;
 };
 
-inline bool sceneMaterialCandidate(const SceneMaterialDraw& draw, uint64_t vs, uint64_t ps) noexcept {
+inline bool sceneMaterialCandidate(const SceneMaterialDraw& draw, uint64_t vs, uint64_t ps, bool split=false) noexcept {
     return draw.originalIssue && draw.eye >= 0 && draw.eye < 2 && draw.targetKind == 1 &&
            (draw.colorFormat == 24 || draw.colorFormat == 26) && // Odyssey's 10:10:10:2 G-buffer or 11:11:10 HDR view
-           draw.shadersTracked && draw.materialShader && !draw.interfaceDraw && !draw.motionWitness &&
+           draw.shadersTracked && draw.materialShader && !draw.interfaceDraw && (!draw.motionWitness || split) &&
            !engine_velocity_family::selfMarkingPs(ps) && !flatProjectionB1Unread(vs, ps) &&
            vs != kFlatDeferredHdrVs && !sceneLightingPixelShader(ps) &&
            !(vs == 0x889A5279E68F0672ull && ps == 0xEBA95E15B0A66102ull); // world_screen_coverage.h: emissive terminal UI

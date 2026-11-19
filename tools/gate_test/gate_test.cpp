@@ -1771,8 +1771,9 @@ int drawPathSourceChecks(const std::string& root) {
         };
         const auto valid = [&](const std::string& body, const ClockCase& c) {
             if (body.empty() || countOf(body, start) != c.timers || countOf(body, finish) != c.timers ||
-                countOf(body, c.raw) != c.calls || countOf(body, prep) != 1 ||
-                body.find("if(!pane.withheld()){" + prep) == std::string::npos ||
+                countOf(body, c.raw) != c.calls+1 || countOf(body, prep) != 1 ||
+                body.find("if(!pane.withheld()){if(!nativeSplitOriginal(self,[&](boolmaterial){constint64_tr0=material&&clock.on?qpcNow():0;"+
+                    std::string(c.raw)+"if(material&&clock.on)clock.realCall(r0);})){"+prep) == std::string::npos ||
                 body.find(prep) >= body.find(start) || countOf(body, start + c.raw + finish) != c.timers) return false;
             if (c.kind == 'X' && body.find("VrsWorkReferenceScopereference(self,") >= body.find(start)) return false;
             const size_t mirror = body.find("while(pane.nextMirrorPass())");
