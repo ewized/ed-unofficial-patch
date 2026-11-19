@@ -2716,7 +2716,12 @@ void clearLocked() {
 
 using namespace engine_velocity_detail;
 
-static native_vrs::WitnessCounts g_witnessCounts;
+static native_vrs::WitnessDepthCopyCensus g_witnessDepthCopyCensus;
+static native_vrs::WitnessCounts g_witnessCounts=[] {
+    native_vrs::WitnessCounts counts;
+    counts.depthCensus=&g_witnessDepthCopyCensus;
+    return counts;
+}();
 std::atomic<bool> g_engineWitnessCohortPending{false};
 thread_local bool g_engineWitnessCohortReplaying=false;
 namespace {
@@ -2761,6 +2766,12 @@ bool engineVelocityWitnessWriteUnrelated(ID3D11Resource* dst,uint64_t epoch,uint
     }
     if(live)++g_witnessWriteOther;else ++g_witnessWriteCold;
     return live;
+}
+void engineVelocityWitnessDepthCensusConfigure(bool on) noexcept {
+    g_witnessDepthCopyCensus.request(on);
+}
+bool engineVelocityWitnessDepthCensusReportReady() noexcept {
+    return g_witnessDepthCopyCensus.reportReady();
 }
 void engineVelocityWitnessTimingConfigure(bool on) noexcept {
     g_witnessTiming.requested.store(on,std::memory_order_relaxed);
@@ -2897,7 +2908,8 @@ static bool queueWitness(const EngineWitnessIssue& issue,ID3D11RenderTargetView*
         const bool timing=g_witnessTiming.active(issue.ctx) && g_witnessTiming.mode==native_vrs::WitnessTiming::Mode::Collect;
         const bool sampled=timing && g_witnessTiming.admissionSample();
         const auto begin=sampled?native_vrs::WitnessTiming::ticks():0;
-        const bool captured=p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer);
+        const bool captured=p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer,
+            g_witnessCounts.captureDepthDescriptor());
         if(sampled){++g_witnessTiming.captureSamples;g_witnessTiming.captureTicks+=native_vrs::WitnessTiming::ticks()-begin;}
         if(!captured || (guard.view && !p.permitsGuard(guard,kEngineVelocityOverlaySnapshotSlot))){
             ++batch.stateRefused;batch.state.reset();return false;
@@ -2974,7 +2986,7 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
     auto* vertex=g_bound.patchedVs?g_bound.patchedVs:g_bound.sourceVs;
     if(queueWitness(issue,eye.slotsRtv.Get(),skin,vertex,found->second.Get())){prior.queued=true;return true;}
     if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
-    const auto depthAccess=native_vrs::WitnessDepthAccess::bound(ctx,issue.depth);
+    const auto depthAccess=native_vrs::WitnessDepthAccess::bound(ctx,issue.depth,g_witnessCounts.captureDepthDescriptor());
     const bool observe=vrsCohortActive(ctx);
     std::optional<native_vrs::WitnessObservation> obs;
     if(g_witnessTiming.active(ctx))
@@ -2993,6 +3005,23 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
             g_bound.derivedBlend.Get(),g_bound.guardSrv3.Get()!=nullptr,skin!=nullptr,g_witnessCounts.copies!=copies});
     }
     return issued;
+}
+void engineVelocityReportWitnessDepthCensus(){
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto& depth=g_witnessDepthCopyCensus;
+    if(depth.reportReady()){
+        unsigned listed=0;
+        for(unsigned i=0;i<depth.rowCount;++i)listed+=depth.rows[i].copies;
+        Log::get().noteReserved("native VRS depth copy census: status=%s sampled=%u cap=%u rows=%u explicit_listed=%u default_null=%u unknown=%u overflow=%u",
+            depth.complete()?"complete":"partial",depth.sampled,depth.copyLimit,depth.rowCount,listed,depth.defaultNull,depth.unknown,depth.overflow);
+        for(unsigned i=0;i<depth.rowCount;++i){
+            const auto& row=depth.rows[i];const auto& d=row.key;
+            Log::get().noteReserved("native VRS depth copy descriptor: row=%u copies=%u depth_enable=%u depth_write_mask=%u depth_func=%u stencil_enable=%u stencil_read_mask=%u stencil_write_mask=%u front_func_fail_zfail_pass=%u,%u,%u,%u back_func_fail_zfail_pass=%u,%u,%u,%u stencil_ref=%u",
+                i+1,row.copies,d.depthEnable,d.depthWriteMask,d.depthFunc,d.stencilEnable,d.stencilReadMask,d.stencilWriteMask,
+                d.front[0],d.front[1],d.front[2],d.front[3],d.back[0],d.back[1],d.back[2],d.back[3],d.stencilRef);
+        }
+        depth.markReported();
+    }
 }
 void engineVelocityReportWitness(){
     std::lock_guard<std::recursive_mutex> lock(g_mutex);

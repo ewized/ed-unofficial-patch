@@ -2,8 +2,10 @@
 #include <d3d11_1.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include "native_vrs_witness_sampling.h"
+#include "native_vrs_depth_copy_census.h"
 
 namespace edvr::native_vrs {
 template<class T> using WitnessPtr=Microsoft::WRL::ComPtr<T>;
@@ -50,11 +52,20 @@ struct WitnessDepthAccess {
     static constexpr unsigned unknown=0,defaultState=9,depthDisabled=10,comparisonCount=11;
     unsigned comparison=unknown;
     bool stencilMayWrite=true; // conservative if descriptor unavailable
+    std::optional<WitnessDepthStencilTuple> censusKey;
+    bool censusNull = false;
     WitnessDepthAccess()=default;
-    WitnessDepthAccess(ID3D11DepthStencilView* depth,ID3D11DepthStencilState* state) {
+    WitnessDepthAccess(ID3D11DepthStencilView* depth,ID3D11DepthStencilState* state,UINT stencilRef=0,bool census=false) {
         if(!depth)return;
-        if(!state){comparison=defaultState;stencilMayWrite=false;return;}
+        if(!state){comparison=defaultState;stencilMayWrite=false;censusNull=census;return;}
         D3D11_DEPTH_STENCIL_DESC ds{};state->GetDesc(&ds);
+        if(census){
+            auto face=[](const D3D11_DEPTH_STENCILOP_DESC& d)->std::array<uint32_t,4>{
+                return {uint32_t(d.StencilFunc),uint32_t(d.StencilFailOp),uint32_t(d.StencilDepthFailOp),uint32_t(d.StencilPassOp)};
+            };
+            censusKey=WitnessDepthStencilTuple{uint32_t(ds.DepthEnable),uint32_t(ds.DepthWriteMask),uint32_t(ds.DepthFunc),
+                uint32_t(ds.StencilEnable),ds.StencilReadMask,ds.StencilWriteMask,face(ds.FrontFace),face(ds.BackFace),stencilRef};
+        }
         const auto func=static_cast<unsigned>(ds.DepthFunc);
         comparison=!ds.DepthEnable?depthDisabled:(func>=1 && func<=8?func:unknown);
         auto writes=[](const D3D11_DEPTH_STENCILOP_DESC& face){
@@ -71,10 +82,11 @@ struct WitnessDepthAccess {
             ds.StencilWriteMask!=0,stencilMayWrite,false,stencil))original=depth;
         else if(depthWrites && vd.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT && !stencilMayWrite)equalWritable=depth;
     }
-    static WitnessDepthAccess bound(ID3D11DeviceContext* ctx,ID3D11DepthStencilView* depth) {
+    static WitnessDepthAccess bound(ID3D11DeviceContext* ctx,ID3D11DepthStencilView* depth,bool census=false) {
         WitnessPtr<ID3D11DepthStencilState> state;
-        if(ctx)ctx->OMGetDepthStencilState(&state,nullptr);
-        return {depth,state.Get()};
+        UINT stencilRef=0;
+        if(ctx)ctx->OMGetDepthStencilState(&state,census?&stencilRef:nullptr);
+        return {depth,state.Get(),stencilRef,census && ctx};
     }
 };
 enum class WitnessPhase : unsigned { Prepare, Copy, Fine, CoarseBind, Material, Count };
@@ -89,6 +101,8 @@ struct WitnessCounts {
     uint64_t paired=0,copies=0,reused=0,stateRefused=0,shaderRefused=0,queryRefused=0,rateRefused=0;
     uint64_t readOnlyOriginalRuns=0,readOnlyOriginalDraws=0,equalEligible=0,equalFine=0,equalPaired=0;
     uint64_t copyCauses[WitnessDepthAccess::comparisonCount][2]{};
+    WitnessDepthCopyCensus* depthCensus=nullptr;
+    bool captureDepthDescriptor() const noexcept { return depthCensus && depthCensus->captureDescriptor(); }
 };
 
 // Replay ordered fine witnesses against the selected original or private DSV before committing
@@ -163,6 +177,7 @@ bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* c
         api.targets(0,nullptr,nullptr);
         WitnessPtr<ID3D11Resource> source;depth->GetResource(&source);
         api.copy(mirror.texture.Get(),source.Get());++counts.copies;
+        if(counts.depthCensus)counts.depthCensus->record(access.censusKey?&*access.censusKey:nullptr,access.censusNull);
         const bool stencil=mirror.format==DXGI_FORMAT_D24_UNORM_S8_UINT || mirror.format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
         ++counts.copyCauses[access.comparison][stencil && access.stencilMayWrite];
     }
@@ -202,7 +217,7 @@ bool splitWitness(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* colo
     ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,ID3D11VertexShader* vertex,
     ID3D11PixelShader* combined,ID3D11PixelShader* fine,ID3D11PixelShader* material,ID3D11BlendState* blend,
     WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,Draw draw,Coarse coarse,WitnessObserver* observer=nullptr,const WitnessDepthAccess* knownAccess=nullptr) {
-    const auto access=knownAccess?*knownAccess:WitnessDepthAccess::bound(ctx,depth);
+    const auto access=knownAccess?*knownAccess:WitnessDepthAccess::bound(ctx,depth,counts.captureDepthDescriptor());
     return splitWitnessRun(api,ctx,color,depth,slots,skin,vertex,combined,fine,material,blend,access,mirror,epoch,drawNumber,
         reuseAllowed,counts,1,[&](unsigned,bool m){draw(m);},[&](unsigned){return coarse();},observer);
 }

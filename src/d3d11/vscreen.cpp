@@ -7439,6 +7439,8 @@ static void vScreenRefreshConfigBody(bool forced) {
     nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     vrsCohortConfigure(cfg.getBool("log.vrs_cohort_probe",false));
     engineVelocityWitnessTimingConfigure(cfg.getBool("log.vrs_witness_timing",false));
+    engineVelocityWitnessDepthCensusConfigure(cfg.getBool("log.vrs_depth_copy_census",false) &&
+        nativeVrsCoarseRequested() && !runtimeFlatProfile());
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));
@@ -7644,9 +7646,15 @@ void vScreenNativeFrameBoundary(uint64_t frameOrdinal) {
 }
 void vScreenFrameBoundary() {
     if(!vScreenDrainWitnessCohort())return;
-    if(g_state&&g_state->ownerCtx&&nativeVrsLive()) {
+    const bool regularVrsReport=g_state && g_state->ownerCtx && nativeVrsLive();
+    const bool depthCensusReport=g_state && g_state->ownerCtx && engineVelocityWitnessDepthCensusReportReady() &&
+        g_state->witnessOwnerThread==GetCurrentThreadId();
+    if(regularVrsReport||depthCensusReport) {
         static uint64_t nextNativeReport=0;const auto now=GetTickCount64();
-        if(now>=nextNativeReport){nextNativeReport=now+5000;const auto n=nativeVrsStatus();
+        const bool reportDue=now>=nextNativeReport;
+        if(reportDue)nextNativeReport=now+5000;
+        if(reportDue && depthCensusReport)engineVelocityReportWitnessDepthCensus();
+        if(reportDue && regularVrsReport){const auto n=nativeVrsStatus();
             static bool gazeAcquisitionReported=false;
             if(n.gazeProviderQueried&&!gazeAcquisitionReported){
                 gazeAcquisitionReported=true;
@@ -8581,6 +8589,8 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode, bool nativeImmedia
     nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     vrsCohortConfigure(cfg.getBool("log.vrs_cohort_probe",false));
     engineVelocityWitnessTimingConfigure(cfg.getBool("log.vrs_witness_timing",false));
+    engineVelocityWitnessDepthCensusConfigure(cfg.getBool("log.vrs_depth_copy_census",false) &&
+        nativeVrsCoarseRequested() && !runtimeFlatProfile());
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));
@@ -8937,6 +8947,7 @@ namespace edvr {
 
 void shutdownVScreenFixes() {
     engineVelocityWitnessTimingConfigure(false); // metadata only; teardown may run under the loader lock
+    engineVelocityWitnessDepthCensusConfigure(false);
     // An off-thread teardown cannot drain the immediate context. Lifecycle
     // admission must guarantee the owning render thread drains before teardown.
     if(!vScreenDrainWitnessCohort())return;

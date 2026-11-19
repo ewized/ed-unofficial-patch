@@ -99,7 +99,7 @@ struct WitnessPipeline {
     // this physical pipeline untouched until its synchronous replay.
     bool capture(ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* dsv,
         ID3D11RenderTargetView* marker,ID3D11RenderTargetView* skin,ID3D11VertexShader* vs,ID3D11PixelShader* ps,
-        ID3D11PixelShader* finePs,ID3D11PixelShader* materialPs,ID3D11BlendState* blendState,WitnessMappedBuffer mapped=nullptr){
+        ID3D11PixelShader* finePs,ID3D11PixelShader* materialPs,ID3D11BlendState* blendState,WitnessMappedBuffer mapped=nullptr,bool census=false){
         if(!ctx||!color||!dsv||!marker||!vs||!ps||!finePs||!materialPs||!blendState)return false;
         context=ctx;WitnessPtr<ID3D11DeviceContext1> ranged;
         if(FAILED(context.As(&ranged)) || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
@@ -118,7 +118,7 @@ struct WitnessPipeline {
         ctx->OMGetRenderTargets(8,rt.slots,&depth);
         ctx->OMGetBlendState(&blend,factors,&sampleMask);ctx->OMGetDepthStencilState(&depthState,&stencil);
         if(depth.Get()!=dsv||rt.slots[0]!=color||rt.slots[6]!=marker||rt.slots[7]!=skin||blend.Get()!=blendState)return false;
-        depthAccess=WitnessDepthAccess(depth.Get(),depthState.Get());
+        depthAccess=WitnessDepthAccess(depth.Get(),depthState.Get(),stencil,census);
         for(auto* v:rt.slots)if(!witnessLocalView(v,mapped))return false;
         if(!witnessLocalView(depth.Get(),mapped))return false;
         ctx->IAGetInputLayout(&layout);ctx->IAGetPrimitiveTopology(&topology);

@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/native_vrs_witness_sampling.h"
+#include "../../src/d3d11/native_vrs_depth_copy_census.h"
 
 inline void witnessSamplingCases(void (*check)(bool,const char*)){
     using namespace edvr::native_vrs;
@@ -38,4 +39,54 @@ inline void witnessSamplingCases(void (*check)(bool,const char*)){
     check(witnessDepthOnlyReads(true,false,false,true,true,true,false,false),"depth-only formats have no stencil plane");
     check(!witnessDepthOnlyReads(true,true,false,false,false,false,false,false),"writable depth counts even with no stencil");
     check(witnessDepthOnlyReads(true,true,true,true,true,true,true,true),"read-only depth and stencil view flags independently prevent writes");
+
+    const WitnessDepthStencilTuple base{1,1,7,1,0xff,0x3, {8,1,2,3},{7,1,3,2},1};
+    WitnessDepthCopyCensus census;
+    census.record(&base,false);
+    check(!census.captureDescriptor() && !census.sampled,"depth copy census starts off");
+    census.request(true);
+    census.request(false);
+    census.record(&base,false);
+    check(!census.reportReady() && !census.sampled,"disarming before any copy leaves no sample");
+    census.request(true);
+    census.record(&base,false);
+    census.record(&base,false);
+    const std::array<uint32_t WitnessDepthStencilTuple::*,7> scalars={
+        &WitnessDepthStencilTuple::depthEnable,&WitnessDepthStencilTuple::depthWriteMask,
+        &WitnessDepthStencilTuple::depthFunc,&WitnessDepthStencilTuple::stencilEnable,
+        &WitnessDepthStencilTuple::stencilReadMask,&WitnessDepthStencilTuple::stencilWriteMask,
+        &WitnessDepthStencilTuple::stencilRef};
+    for(auto field:scalars){
+        auto k=base;
+        k.*field ^= (field==&WitnessDepthStencilTuple::stencilRef ? 256u : 1u);
+        census.record(&k,false);
+    }
+    for(unsigned op=0;op<4;++op){
+        auto k=base;k.front[op]^=1;census.record(&k,false);
+        k=base;k.back[op]^=1;census.record(&k,false);
+    }
+    check(census.rowCount==16 && census.rows[0].copies==2,"every depth/stencil field, including high reference bits, distinguishes a tuple");
+    census.record(nullptr,true);
+    census.record(nullptr,false);
+    for(unsigned i=0;i<20;++i){auto k=base;k.stencilRef+=512+i;census.record(&k,false);}
+    census.record(&base,false); // A known tuple remains countable at table capacity.
+    for(unsigned n=census.sampled;n<census.copyLimit;++n)census.record(&base,false);
+    census.record(nullptr,false);
+    unsigned listed=0;
+    for(unsigned i=0;i<census.rowCount;++i)listed+=census.rows[i].copies;
+    check(census.sampled==8192 && census.rowCount==32 && census.defaultNull==1 && census.unknown==1 && census.overflow==4 &&
+          listed+census.defaultNull+census.unknown+census.overflow==census.sampled,"copy cap and table overflow reconcile without dropping a counted copy");
+    check(census.reportReady() && census.complete() && !census.captureDescriptor(),"full census is ready once and metadata collection stops");
+    census.markReported();
+    census.request(false);
+    census.request(true);
+    check(!census.reportReady() && !census.captureDescriptor(),"a reported process cannot reopen its census");
+
+    WitnessDepthCopyCensus partial;
+    partial.request(true);
+    partial.record(&base,false);
+    partial.request(false);
+    partial.request(true); // The owner has yet to see the Off request.
+    partial.record(&base,false);
+    check(partial.sampled==1 && partial.reportReady() && !partial.complete(),"Off seals a partial window even if rearmed before its report");
 }

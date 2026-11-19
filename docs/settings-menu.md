@@ -5,8 +5,8 @@
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
 - **VRS performance investigation:** `aba9d747` completed 30-second OFF/ON/OFF windows at 10.320 / 13.100 / 10.391 ms GPU. The unrelated-write cache route preserved no writes in this scene, so it has no demonstrated game benefit here. The guarded writable-EQUAL route passed WARP and RTX pixel checks on `619031af`; its game performance remains unmeasured after a startup connection failure.
-- **DLSS failure retries:** a bounded per-contract cache prevents alternating failing sizes, or a successful different size, from clearing an NGX refusal. Portable checks pass; native validation remains pending.
-- **Stationary stereo regression:** a clean launch was steady with temporal AA off and with DLSS alone. Enabling VRS brought back a horizontal world-image jump that persisted after Off. SteamVR logged overlapping initialization one second after enabling VRS. The candidate removes the gaze provider's background-client fallback and borrows the existing client. Portable checks pass; native and stationary-image verification remain pending.
+- **DLSS failure retries:** a bounded per-contract cache prevents alternating failing sizes, or a successful different size, from clearing an NGX refusal. On `bc5476b4`, 224 native checks and four selected mutation cases passed. Full readiness remains pending.
+- **Stationary stereo regression:** `bc5476b4` removed overlapping SteamVR initialization and passed the live bilateral gaze probe, but manual feedback still reports the camera jumping. A bounded F213 scene-eye trace will compare selected scene matrices and binding identities. The cause remains unresolved.
 - **FG recovery:** `aba9d747` recovered from an actual missed handoff with VRS On. Both bounded captures retained all rows and verified 286 generated frames against their exact native endpoints and existing timing budget. Remaining repeats, physical headset behavior and full Reflex SDK qualification remain open.
 - **F8 opening view:** `249e7c9a` displayed DLSS quality, experimental frame generation, NVIDIA low latency, VRS and its sharp region together in the native VR Performance page. Physical headset validation remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
@@ -1385,11 +1385,36 @@ rate. No interface is cached across polls. The published Valve client-core
 ABI supplies a compatibility route; borrowing an OpenXR-owned core is not an
 application API guarantee.
 
-The actual adapter passes 224 portable checks, including retained bilateral
-NDC/projections and refusal cases. The original adapter fails the no-second-
-initialization regression. Native provider execution and stationary stereo
-across repeated toggles remain required. The affected session was stopped
-cleanly and the original settings restored before building another candidate.
+The actual adapter passes 224 portable and 224 native checks, including
+retained bilateral NDC/projections and refusal cases. The original adapter
+fails the no-second-initialization regression. On `bc5476b4`, a standalone
+probe obtained two valid bilateral samples from one OpenXR instance with
+zero sessions, kept the instance healthy and destroyed it successfully.
+Its SteamVR client log contained no overlapping-initialization warning.
+
+The patched game also supplied valid paired gaze after VRS activation and
+logged no overlapping initialization, but manual feedback still reported
+the camera jumping. The all-off and VRS-on answers arrived together after
+activation, so their exact observation times are unknown. This establishes
+a lifecycle correction, not a camera fix. The session was stopped cleanly
+and the original settings restored.
+
+The next F213 capture adds selected per-eye clip matrices, origins, solved
+eye positions and observed render-target/depth/constant-buffer identities.
+It retains eye-assignment provenance separately from submitted-target hints.
+The window covers 32 consecutive Present IDs, at most 30 KiB of extra
+records, with missing or omitted publications explicit. It uses CPU shadows
+and existing binding records, without a GPU readback. A label or hint alone
+does not establish the eye submitted to the headset.
+
+The temporary `log.vrs_depth_copy_census` diagnostic defaults to Off. When
+armed with VRS, it groups up to 8,192 actual private depth copies into 32
+exact depth/stencil descriptor rows. Default, unknown and overflow counts
+reconcile the sample; disabling VRS or the diagnostic seals a partial
+capture. Allow the next five-second owner report before stopping the game.
+This observes descriptor prevalence without changing rendering or adding
+D3D calls. Sampling adds CPU metadata work and must finish before a timing
+comparison.
 
 ### Simulator validation (2026-11-19)
 

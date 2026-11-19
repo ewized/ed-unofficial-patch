@@ -58,9 +58,9 @@ struct Prefix {
 };
 static_assert(sizeof(Prefix) == 16, "the record prefix is 16 bytes");
 
-enum RecId : ty::u16 { kRecAlign = 1, kRecP1 = 2, kRecPin = 3, kRecIk = 4, kRecMark = 5, kRecRtEye = 6, kRecRtRecentre = 7, kRecTypes = 7 };
+enum RecId : ty::u16 { kRecAlign = 1, kRecP1 = 2, kRecPin = 3, kRecIk = 4, kRecMark = 5, kRecRtEye = 6, kRecRtRecentre = 7, kRecSceneEye = 8, kRecTypes = 8 };
 inline const char* recName(unsigned id) {
-    static const char* const n[kRecTypes + 1] = {"?", "align", "p1", "pin", "ik", "mark", "rt_eye", "rt_recentre"};
+    static const char* const n[kRecTypes + 1] = {"?", "align", "p1", "pin", "ik", "mark", "rt_eye", "rt_recentre", "scene_eye"};
     return id <= kRecTypes ? n[id] : "?";
 }
 
@@ -106,8 +106,15 @@ ONF_ENUM(Hold, "none", "f69h", "f192")
 // applyPositionRecentre's outcome
 ONF_ENUM(RecentreReason, "applied", "not_on_foot", "stored_seat_due", "rot_calibrate", "head_untracked", "replace_refused")
 
+ONF_ENUM(SceneEyeEvent, "published", "replaced", "frame_end", "skipped_boundary", "capture_stopped")
+ONF_ENUM(SceneEyeSide, "left", "right", "unknown")
+ONF_ENUM(SceneRowSource, "scene_mesh", "depth_prepass", "terrain", "unknown")
+ONF_ENUM(SceneShadow, "none", "engine", "on_foot")
+ONF_ENUM(SceneEyeAssignment, "scene_depth", "layer_target", "ui_depth_target", "submitted_target", "cached_target", "target_order", "unknown")
+
 inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPinRefuseEnum, &kSettleWhyEnum, &kStanceEnum, &kSupportEnum, &kEyeSourceEnum,
-                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum, &kPinStateEnum, &kF214StateEnum, &kF215StateEnum};
+                                         &kF193SourceEnum, &kIkExitEnum, &kIkRefuseEnum, &kPoleSrcEnum, &kHoldEnum, &kRecentreReasonEnum, &kPinStateEnum, &kF214StateEnum, &kF215StateEnum,
+                                         &kSceneEyeEventEnum, &kSceneEyeSideEnum, &kSceneRowSourceEnum, &kSceneShadowEnum, &kSceneEyeAssignmentEnum};
 
 // ---- the records ----------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Order inside a list: 8-byte fields, then 4-byte, then 2-byte, then 1-byte, so a struct has no padding but its tail.
@@ -183,6 +190,16 @@ inline const EnumDesc* const kEnums[] = {&kVneckReasonEnum, &kSrcKindEnum, &kPin
     S(u32, serial)                                                                                                                                           \
     S(u8, ok) E(RecentreReason, reason) S(u8, retry)
 
+// scene_eye: the exact CPU-shadow rows selected at a scene draw. D3D pointers
+// identify objects only within this capture. A frame_end counts attempted
+// publications per eye; zero means missing. Compare counts with received rows.
+#define ONF_LIST_SCENE_EYE(S, A, E) \
+    S(u64, native_sequence) S(u64, publish_qpc) S(u64, dsv) S(u64, rtv) S(u64, color_resource) S(u64, cb1) A(f64, world_eye, 3) \
+    A(f32, clip, 16) A(f32, origin, 4) S(u32, present_frame) S(u32, window_first) S(u32, first_constant) \
+    E(SceneEyeEvent, event) E(SceneEyeSide, eye) E(SceneEyeSide, depth_eye) E(SceneEyeSide, submitted_eye_hint) \
+    E(SceneRowSource, source) E(SceneShadow, shadow) E(SceneEyeAssignment, assignment) S(u8, solved) S(u8, ordinal) \
+    S(u8, left_count) S(u8, right_count) S(u8, omitted_eye_mask)
+
 #define ONF_DECL_S(t, n) ty::t n;
 #define ONF_DECL_A(t, n, c) ty::t n[c];
 #define ONF_DECL_E(en, n) ty::u8 n;
@@ -198,6 +215,7 @@ ONF_DEFINE_REC(IkRec, ONF_LIST_IK)
 ONF_DEFINE_REC(MarkRec, ONF_LIST_MARK)
 ONF_DEFINE_REC(RtEyeRec, ONF_LIST_RT_EYE)
 ONF_DEFINE_REC(RtRecentreRec, ONF_LIST_RT_RECENTRE)
+ONF_DEFINE_REC(SceneEyeRec, ONF_LIST_SCENE_EYE)
 
 template <class R> struct Traits;
 #define ONF_TRAITS(R, ID)                                                                                    \
@@ -214,6 +232,7 @@ ONF_TRAITS(IkRec, kRecIk)
 ONF_TRAITS(MarkRec, kRecMark)
 ONF_TRAITS(RtEyeRec, kRecRtEye)
 ONF_TRAITS(RtRecentreRec, kRecRtRecentre)
+ONF_TRAITS(SceneEyeRec, kRecSceneEye)
 
 // ---- the schema tables ----------------------------------------------------------------------------------------------------------------------------------------------------
 struct FieldDesc {
@@ -249,6 +268,10 @@ inline const FieldDesc kRtEyeFields[] = {ONF_LIST_RT_EYE(ONF_FD_S, ONF_FD_A, ONF
 inline const FieldDesc kRtRecentreFields[] = {ONF_LIST_RT_RECENTRE(ONF_FD_S, ONF_FD_A, ONF_FD_E)};
 #undef ONF_CUR
 
+#define ONF_CUR SceneEyeRec
+inline const FieldDesc kSceneEyeFields[] = {ONF_LIST_SCENE_EYE(ONF_FD_S, ONF_FD_A, ONF_FD_E)};
+#undef ONF_CUR
+
 struct RecordDesc {
     const char* name;
     ty::u16 id;
@@ -260,10 +283,10 @@ struct RecordDesc {
 inline const RecordDesc kRecords[kRecTypes] = {
     ONF_RD("align", AlignRec, kAlignFields),   ONF_RD("p1", P1Rec, kP1Fields),         ONF_RD("pin", PinRec, kPinFields),
     ONF_RD("ik", IkRec, kIkFields),            ONF_RD("mark", MarkRec, kMarkFields),   ONF_RD("rt_eye", RtEyeRec, kRtEyeFields),
-    ONF_RD("rt_recentre", RtRecentreRec, kRtRecentreFields)};
+    ONF_RD("rt_recentre", RtRecentreRec, kRtRecentreFields), ONF_RD("scene_eye", SceneEyeRec, kSceneEyeFields)};
 
 // The largest record, and the ring's slot size for it.
-constexpr size_t kMaxRecordBytes = std::max({sizeof(AlignRec), sizeof(P1Rec), sizeof(PinRec), sizeof(IkRec), sizeof(MarkRec), sizeof(RtEyeRec), sizeof(RtRecentreRec)});
+constexpr size_t kMaxRecordBytes = std::max({sizeof(AlignRec), sizeof(P1Rec), sizeof(PinRec), sizeof(IkRec), sizeof(MarkRec), sizeof(RtEyeRec), sizeof(RtRecentreRec), sizeof(SceneEyeRec)});
 constexpr size_t kSlotBytes = (kMaxRecordBytes + 63u) & ~size_t(63);
 
 inline const RecordDesc* recordDesc(unsigned id) { return id >= 1 && id <= kRecTypes ? &kRecords[id - 1] : nullptr; }

@@ -139,6 +139,8 @@
 #include "native_on_foot_f125ui.h"
 #include "native_on_foot_logpin.h"
 #include "native_on_foot_logwin.h"   // F125: the on-foot log's windows (the detail key's cached value, the summary window, the per-second fold)
+#include "../common/onfoot_scene_eye_window.h"
+#include "vr_camera_census.h"       // current native frame sequence, lock-free
 #include "onfoot_recorder.h"         // F213: the on-foot flight recorder (the records written at the stages' sites)
 #include "native_on_foot_ads_log.h"
 #include "native_on_foot_ads_incident.h"
@@ -12402,16 +12404,48 @@ bool eyeJitterRead(int e, bool* ok, uint32_t* frame, uint64_t* tseq, float* jx, 
     }
     return false;
 }
-void eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4]) noexcept {
-    if (e < 0 || e > 1) return;
+onfootrec::SceneEyeWindow g_sceneEyeWindow;
+void finishSceneEyeBefore(uint32_t nextFrame, bool partial = false) noexcept {
+    // Close the preceding frame while its recorder is still active. If a push
+    // was dropped, the received row count differs from this attempted count.
+    g_sceneEyeWindow.closeBefore(nextFrame, [partial](onfootrec::SceneEyeWindow::End end) {
+        onfootrec::SceneEyeRec r;
+        onfootrec::initRecord(r);
+        r.event = partial ? 4u : (end.skippedBoundary ? 3u : 2u);
+        r.window_first = end.first;
+        r.present_frame = end.frame;
+        r.eye = r.depth_eye = r.submitted_eye_hint = 2u;
+        r.source = 3u;
+        r.assignment = 6u;
+        r.left_count = static_cast<uint8_t>(end.left);
+        r.right_count = static_cast<uint8_t>(end.right);
+        r.omitted_eye_mask = static_cast<uint8_t>(end.omitted);
+        onfootrec::push(r);
+    });
+}
+struct SceneEyeStamp {
+    onfootrec::SceneEyeWindow::Receipt receipt;
+    uint64_t qpc = 0, nativeSequence = 0;
+};
+SceneEyeStamp eyeRowsPublish(int e, uint32_t frame, const float rows[16], const float o[4]) noexcept {
+    if (e < 0 || e > 1) return {};
+    SceneEyeStamp stamp;
+    stamp.receipt = g_sceneEyeWindow.reserve(frame, static_cast<unsigned>(e));
+    const uint64_t before = stamp.receipt.ordinal ? nativeTemporalFrameSequence() : 0;
     EyeRowsPub& q = g_eyeRowsPub[e];
     q.seq.fetch_add(1, std::memory_order_acq_rel);
     q.frame = frame;
-    q.qpc = f30Qpc();
+    const uint64_t publishedAt = f30Qpc();
+    q.qpc = publishedAt;
     std::memcpy(q.rows, rows, sizeof(q.rows));
     std::memcpy(q.o, o, sizeof(q.o));
     q.seq.fetch_add(1, std::memory_order_release);
+    if (stamp.receipt.ordinal) {
+        stamp.qpc = publishedAt;
+        if (before == nativeTemporalFrameSequence()) stamp.nativeSequence = before;
+    }
     if (g_scopeZoomKey.load(std::memory_order_relaxed) && (e == 1 || g_scopeZoomFullKey.load(std::memory_order_relaxed))) eyeJitterPublish(e, frame);   // A1: the jitter this eye's rows were drawn with (B3: both eyes')
+    return stamp;
 }
 bool eyeRowsRead(int e, uint32_t* frame, float rows[16], float o[4], uint64_t* qpc) noexcept {
     if (e < 0 || e > 1) return false;
@@ -30657,9 +30691,55 @@ void rowsCheck(ID3D11DeviceContext* ctx, int e, uint32_t frame, uint64_t vs, uin
     g_rowsSec.maxDiff = std::max(g_rowsSec.maxDiff, d.max());
     if (f130::disagree(d.max())) rowsMarkMesh(id, e, frame, d, g_rowsFrom[e]);
 }
+// The source's draw owns the input snapshot. Acquire no D3D references here.
+// A depth label, target-order label and submitted-texture match are separate
+// observations. An unbound RTV is normal during a depth-only prepass.
+uint8_t sceneEyeSide(int e) noexcept {
+    return e == 0 || e == 1 ? static_cast<uint8_t>(e) : 2u;
+}
+uint8_t sceneEyeAssignment(char source) noexcept {
+    switch (source) {
+        case 'D': return 0; // F113 assigned by the depth view
+        case 'L': return 1;
+        case 'T': return 2;
+        case 'S': return 3;
+        case 'C': return 4;
+        case 'O': return 5;
+        default: return 6;
+    }
+}
+void recordSceneEye(const SceneEyeStamp& stamp, const WorldView& view, uint8_t source, int shadow,
+                    const void* cb1, UINT first, int depthEye, const void* rtv, const void* color,
+                    char assignedBy, bool replaced) noexcept {
+    if (!stamp.receipt.ordinal) return;
+    onfootrec::SceneEyeRec r;
+    onfootrec::initRecord(r);
+    r.native_sequence = stamp.nativeSequence;
+    r.publish_qpc = stamp.qpc;
+    r.present_frame = view.frame;
+    r.window_first = stamp.receipt.windowFirst;
+    r.ordinal = static_cast<uint8_t>(stamp.receipt.ordinal);
+    r.event = replaced ? 1u : 0u;
+    r.eye = sceneEyeSide(view.eye);
+    r.depth_eye = sceneEyeSide(depthEye);
+    r.submitted_eye_hint = sceneEyeSide(color ? uiLayerEyeOfSubmitted(color) : -1);
+    r.source = source;
+    r.shadow = static_cast<uint8_t>(shadow);
+    r.assignment = sceneEyeAssignment(assignedBy);
+    r.dsv = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Dsv0));
+    r.rtv = reinterpret_cast<uintptr_t>(rtv);
+    r.color_resource = reinterpret_cast<uintptr_t>(color);
+    r.cb1 = reinterpret_cast<uintptr_t>(cb1);
+    r.first_constant = first;
+    std::memcpy(r.clip, view.rows, sizeof(r.clip));
+    std::memcpy(r.origin, view.o, sizeof(r.origin));
+    const double origin[3] = {view.o[0], view.o[1], view.o[2]};
+    r.solved = nofoot::eyeFromRows(view.rows, origin, r.world_eye);
+    onfootrec::push(r);
+}
 // A source's rows for an eye and frame: into the frame's world views, the CPU's copy, the frame thread's seqlock, the eye's scene target sizes. replace: the eye had
 // a scene mesh's rows this frame (F130), which these replace exactly as if the source had published first.
-void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow[6][4], ID3D11Buffer* cb1, bool replace) {
+void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow[6][4], ID3D11Buffer* cb1, UINT first, int shadowSource, bool replace) {
     WorldView v;
     v.frame = frame;
     v.eye = e;
@@ -30671,16 +30751,22 @@ void rowsSourcePublish(int e, uint32_t frame, uint8_t source, const float shadow
     std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
     std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
     g_cpuWorld[e].cb1 = cb1;   // identity only (the b1 Unmap stamp)
-    eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
+    const auto stamp = eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);
     b3ShadowNote(e, frame, cb1);
     // the eye's scene target for the depth probe's pick: the bound colour target when it is eye-sized (a depth-only pass keeps the last)
-    if (void* view = bindingGet(BindSlot::Rtv0)) {
+    void* view = bindingGet(BindSlot::Rtv0);
+    const void* color = nullptr;
+    if (view) {
         ResourceInfo ri;
-        if (bindingResolveProbe(view, &ri) && ri.isTexture2D && vScreenIsEyeSized(ri.a, ri.b)) {
-            g_f85SceneW[e] = ri.a;
-            g_f85SceneH[e] = ri.b;
+        if (bindingResolveProbe(view, &ri) && ri.isTexture2D) {
+            color = ri.resource;
+            if (vScreenIsEyeSized(ri.a, ri.b)) {
+                g_f85SceneW[e] = ri.a;
+                g_f85SceneH[e] = ri.b;
+            }
         }
     }
+    if (stamp.receipt.ordinal) recordSceneEye(stamp, v, source, shadowSource, cb1, first, e, view, color, 'D', replace);
     g_worldOk[e] = frame;
     g_rowsFrom[e] = source;
 }
@@ -30711,8 +30797,8 @@ void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
     UINT f1 = 0;
     vsConstants(ctx, 1, &cb1, &f1);
     float shadow[6][4] = {};
-    const bool ok = cb1SceneRows(cb1, f1, shadow) != nofoot::f152::kOriginNone;
-    if (!ok) {
+    const int shadowSource = cb1SceneRows(cb1, f1, shadow);
+    if (shadowSource == nofoot::f152::kOriginNone) {
         if (cb1) cb1->Release();
         ++g_rowsSec.noRows;
         return;
@@ -30730,12 +30816,12 @@ void rowSourceDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint8_t source) {
         if (f130::disagree(d.max())) {
             rowsMarkMesh(g_rowsMesh[e].id, e, frame, d, source);
             ++g_rowsSec.replaced;
-            rowsSourcePublish(e, frame, source, shadow, cb1, true);
+            rowsSourcePublish(e, frame, source, shadow, cb1, f1, shadowSource, true);
         }
         cb1->Release();
         return;
     }
-    rowsSourcePublish(e, frame, source, shadow, cb1, false);
+    rowsSourcePublish(e, frame, source, shadow, cb1, f1, shadowSource, false);
     cb1->Release();
     // the check is scheduled at most once a second per eye (it keeps the tee's slow path open for the rest of that frame, whether a mesh comes or not)
     rowsScheduleCheck(e, frame);
@@ -30817,7 +30903,8 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     }
     ++rn.draws;
     const uint64_t ps = bindingShaderHash(BindSlot::Ps);
-    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, eyeOfDraw(frame) >= 0);
+    const int depthEye = eyeOfDraw(frame);
+    const int sceneWhy = drawtag::sceneRefWhy(vs, ps, depthEye >= 0);
     // F100: a census frame still sends every world draw here (the F87f capture below sees the same draws as before); only the census's own note, its
     // constant-buffer read and its compare, is the probe key's.
     if (census && nativeOnFootMarkerMeasure()) rowCensusNote(ctx, e, vs, ps, sceneWhy == drawtag::kSceneOk);
@@ -30854,7 +30941,8 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
     }
     float shadow[6][4] = {};
     bool ok = false;
-    if (cb1SceneRows(cb1, f1, shadow) != nofoot::f152::kOriginNone) {
+    const int shadowSource = cb1SceneRows(cb1, f1, shadow);
+    if (shadowSource != nofoot::f152::kOriginNone) {
         WorldView v;
         v.frame = frame;
         v.eye = e;
@@ -30866,7 +30954,9 @@ void worldDraw(ID3D11DeviceContext* ctx, uint32_t frame, uint64_t vs, bool censu
         std::memcpy(g_cpuWorld[e].rows, v.rows, sizeof(v.rows));
         std::memcpy(g_cpuWorld[e].o, v.o, sizeof(v.o));
         g_cpuWorld[e].cb1 = cb1;   // F64: identity only (the b1 Unmap stamp)
-        eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
+        const auto stamp = eyeRowsPublish(e, frame, g_cpuWorld[e].rows, g_cpuWorld[e].o);   // F66e: for the frame thread's ADS sight check
+        if (stamp.receipt.ordinal)
+            recordSceneEye(stamp, v, nofoot::f113::kFromMeshes, shadowSource, cb1, f1, depthEye, view, t->res, t->src, false);
         b3ShadowNote(e, frame, cb1);
         ++g_win.worldShadow;
         ok = true;
@@ -38434,6 +38524,9 @@ static std::string recorderKeysJson() {
 }
 
 void nativeOnFootFrameBoundary(uint32_t frameNo) {
+    // A rising recorder gate takes effect at the next full frame boundary.
+    finishSceneEyeBefore(frameNo);
+    g_sceneEyeWindow.open(frameNo, onfootrec::active());
     g_f44Frame.store(frameNo, std::memory_order_relaxed);   // F44: the marker probe's frame (the tag's frame bits, the captures' frame)
     g_nativeOnFootTeeFrameNow.store(frameNo, std::memory_order_relaxed);   // F100: the tee's prefilter compares its fast frame against this
     s0::flatTick(GetTickCount64());   // S0: scope zoom, measure only (flat profile only; before the Armed gate, which flat never passes)
@@ -38629,6 +38722,10 @@ void nativeOnFootFrameBoundary(uint32_t frameNo) {
         if (recWant && cfgGeneration != recKeysGeneration) {
             recKeysGeneration = cfgGeneration;
             recKeys = recorderKeysJson();
+        }
+        if (!recWant && onfootrec::active()) {
+            finishSceneEyeBefore(frameNo + 1, true);
+            g_sceneEyeWindow.open(frameNo, false);
         }
         onfootrec::frame(recWant, now, recKeys, recKeysGeneration);
     }

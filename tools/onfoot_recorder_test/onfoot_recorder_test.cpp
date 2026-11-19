@@ -6,6 +6,7 @@
 // the record with sequence n has the value base = 100 * id + 7 * i + e, stored as: u8 base % 200 (an enum field: base % the enum's value count); u16 base; u32 and u64 base + 1000000 * n;
 // f32 and f64 base + 0.25 + n. Mark records carry number = 1 + n. A checker in another language reads the file by the header's schema and compares against that rule.
 #include "../../src/common/onfoot_recorder_core.h"
+#include "../../src/common/onfoot_scene_eye_window.h"
 
 #include <chrono>
 #include <cstdio>
@@ -265,6 +266,35 @@ const FieldDesc* findField(const RecordDesc& d, const char* name) {
 #define SCH_COUNT_A(t, n, c) ++counted;
 #define SCH_COUNT_E(en, n) ++counted;
 
+void testSceneEyeWindow() {
+    SceneEyeWindow window;
+    std::vector<SceneEyeWindow::End> ends;
+    auto close = [&](uint32_t frame) { window.closeBefore(frame, [&](SceneEyeWindow::End e) { ends.push_back(e); }); };
+    window.open(98, false);
+    check(!window.reserve(98, 0).ordinal, "detail off admits no draw");
+    window.open(100, true);
+    const auto left = window.reserve(100, 0);
+    check(left.windowFirst == 100 && left.ordinal == 1 && window.reserve(100, 0).ordinal == 2,
+          "a replacement retains its own ordinal under the same frame");
+    check(!window.reserve(100, 0).ordinal && !window.reserve(101, 1).ordinal, "excess rows and wrong frames consume no next-frame slot");
+    close(103);
+    check(ends.size() == 3 && ends[0].left == 2 && !ends[0].right && ends[0].omitted == 1 &&
+          ends[1].skippedBoundary && ends[1].frame == 101 && ends[2].skippedBoundary && ends[2].frame == 102,
+          "the footer separates a missing right eye, saturation, and skipped Present boundaries");
+    window.open(103, true);
+    check(!window.reserve(100, 1).ordinal && window.reserve(103, 1).ordinal == 1, "an old callback cannot corrupt current eye counts");
+    close(132);
+    window.open(132, true);
+    check(ends.size() == 32 && !window.reserve(132, 0).ordinal, "32 consecutive frame IDs close the window despite missing evidence");
+    window.open(133, false);
+    window.open(UINT32_MAX, true);
+    check(window.reserve(UINT32_MAX, 1).ordinal == 1, "a new detail activation rearms the window");
+    close(0);
+    window.open(0, true);
+    const auto wrapped = window.reserve(0, 0);
+    check(wrapped.ordinal == 1 && wrapped.windowFirst == UINT32_MAX, "a Present-counter wrap preserves the anchor");
+}
+
 void testSchema() {
     SCH_RUN(AlignRec, ONF_LIST_ALIGN, kRecAlign)
     SCH_RUN(P1Rec, ONF_LIST_P1, kRecP1)
@@ -273,6 +303,7 @@ void testSchema() {
     SCH_RUN(MarkRec, ONF_LIST_MARK, kRecMark)
     SCH_RUN(RtEyeRec, ONF_LIST_RT_EYE, kRecRtEye)
     SCH_RUN(RtRecentreRec, ONF_LIST_RT_RECENTRE, kRecRtRecentre)
+    SCH_RUN(SceneEyeRec, ONF_LIST_SCENE_EYE, kRecSceneEye)
     // The tables are well formed in themselves: in order, inside the record, no overlap, aligned, a multiple of 8, enums named and known.
     for (unsigned id = 1; id <= kRecTypes; ++id) {
         const RecordDesc* d = recordDesc(id);
@@ -691,7 +722,7 @@ void testFixture(const std::filesystem::path& dir) {
     CHECKF(wrongValues == 0, "every fixture field reads back as written (%u wrong)", wrongValues);
     bool all = true;
     for (unsigned id = 1; id <= kRecTypes; ++id) all = all && seen[id] == 3;
-    check(all, "three records of each of the seven types read back");
+    check(all, "three records of each of every type read back");
 }
 
 }  // namespace
@@ -705,6 +736,7 @@ int main(int argc, char** argv) {
     }
     (void)selfTest;
     if (fixture.empty()) fixture = std::filesystem::temp_directory_path() / "edvr_onfoot_recorder_fixture";
+    testSceneEyeWindow();
     testSchema();
     testHeader();
     testRing();

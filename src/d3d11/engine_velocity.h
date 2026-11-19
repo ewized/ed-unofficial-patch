@@ -343,6 +343,10 @@ void engineVelocityFlushWitnessCohort(ID3D11DeviceContext*);
 bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext*) noexcept;
 bool engineVelocityWitnessWriteUnrelated(ID3D11Resource* dst,uint64_t mirrorEpoch,uint64_t draw) noexcept;
 void engineVelocityReportWitness();
+// The render owner retains and reports one optional depth-copy census.
+void engineVelocityReportWitnessDepthCensus();
+void engineVelocityWitnessDepthCensusConfigure(bool on) noexcept;
+bool engineVelocityWitnessDepthCensusReportReady() noexcept;
 // Private borrowed timestamp commands pass the context hooks without becoming
 // application query events or advancing the witness mutation generations.
 inline thread_local bool engineWitnessTimingQueryInternal=false;
