@@ -2,6 +2,7 @@
 #include "../../src/d3d11/native_vrs_draw_policy.h"
 #include "../../src/d3d11/native_vrs_material.h"
 #include "../../src/d3d11/flat_replay_query_tracker.h"
+#include "../native_vrs_test/witness_pixel_reference.h"
 #include "callback_dependency_tests.h"
 #include "work_reference_tests.h"
 #include <cstdio>
@@ -40,6 +41,12 @@ int main(int argc,char** argv){
  callbackDependencyTests(check);
  workReferenceTests(check);
  uncounted::test();
+ const float frontSkin[]={-.75f,.5f,1.f,1.f},otherSkin[]={-.75f,.5f,2.f,1.f},tieSkin[]={-.75f,.5f,4.f,1.f};
+ using witness_gpu::fixtureSkinOwner;
+ check(fixtureSkinOwner(3.f,frontSkin,-.75f,.5f)&&fixtureSkinOwner(5.f,otherSkin,-.75f,.5f)&&
+       fixtureSkinOwner(9.f,tieSkin,-.75f,.5f),"per-pixel skin labels include both initially visible owners and the coplanar replacement");
+ check(!fixtureSkinOwner(9.f,otherSkin,-.75f,.5f)&&!fixtureSkinOwner(7.f,otherSkin,-.75f,.5f)&&
+       !fixtureSkinOwner(3.f,frontSkin,.75f,.5f),"a skin sample from another owner, hidden owner or opposite screen half fails");
  edvr::FlatReplayQueryTracker queries;
  using QueryKind=edvr::FlatReplayQueryTracker::Kind;
  int disjoint=0,occlusion=0;
