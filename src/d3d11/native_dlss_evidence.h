@@ -30,10 +30,10 @@ public:
                  uint32_t doorWidth, uint32_t doorHeight, const NativeDlssEvaluation& result, bool attempted = true) noexcept {
         if (eye >= 2 || selected == DlssQuality::Custom) return false;
         const float multiplier = multiplier_.load(std::memory_order_relaxed);
-        const auto near = [](uint32_t first, uint32_t second) { return first > second ? first - second <= 1 : second - first <= 1; };
+        const auto withinOnePixel = [](uint32_t first, uint32_t second) { return first > second ? first - second <= 1 : second - first <= 1; };
         const auto matchesInput = [&](uint32_t input, uint32_t door) {
             const auto ask = dlssGameDimension(door, selected, multiplier);
-            return ask && near(input, static_cast<uint32_t>(float(ask) * multiplier));
+            return ask && withinOnePixel(input, static_cast<uint32_t>(float(ask) * multiplier));
         };
         Status next = Status::Stale;
         if (matchesInput(width, doorWidth) && matchesInput(height, doorHeight)) {
@@ -41,7 +41,7 @@ public:
             else if (result.eye != static_cast<int>(eye)) next = Status::Unavailable;
             else if (result.width == width && result.height == height &&
                      (selected == DlssQuality::Dlaa ? result.outputWidth == width && result.outputHeight == height :
-                      near(result.outputWidth, doorWidth) && near(result.outputHeight, doorHeight))) {
+                      withinOnePixel(result.outputWidth, doorWidth) && withinOnePixel(result.outputHeight, doorHeight))) {
                 next = std::string_view(result.feature) == dlssQualityName(selected) ? Status::Applied : Status::Unavailable;
             }
         }
