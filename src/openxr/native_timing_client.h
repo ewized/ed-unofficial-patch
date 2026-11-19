@@ -3,6 +3,8 @@
 #include "../common/native_timing.h"
 #include "../common/native_present_trace.h"
 #include "../common/native_presentation.h"
+#include "../common/native_reflex_submit.h"
+#include <atomic>
 #include <mutex>
 
 namespace edvr::openxr {
@@ -12,7 +14,7 @@ namespace edvr::openxr {
 // graphics dispatch (the host calls these methods from inside that dispatch).
 class NativeTimingClient final {
  public:
-  HRESULT acquire(HMODULE provider, ID3D11Device* device, uint64_t generation) {
+  HRESULT acquire(HMODULE provider, ID3D11Device* device, uint64_t generation, uint64_t compositorGeneration = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (table_.context) return E_PENDING;
     if (!provider || !device || !generation) return E_INVALIDARG;
@@ -35,8 +37,11 @@ class NativeTimingClient final {
     const auto trace = GetProcAddress(provider, "edvrReadNativePresentTrace");
     presentTrace_ = owned(provider, trace) ?
         reinterpret_cast<decltype(&edvrReadNativePresentTrace)>(trace) : nullptr;
+    const auto submit = GetProcAddress(provider, "edvrNoteNativeReflexSubmit");
+    submitTrace_.store(owned(provider, submit) ? reinterpret_cast<SubmitTrace>(submit) : nullptr, std::memory_order_release);
     provider_ = provider;
     generation_ = generation;
+    compositorGeneration_ = compositorGeneration;
     const auto presentation=GetProcAddress(provider,"edvrPublishNativePresentation");
     presentationPublish_=owned(provider,presentation)?reinterpret_cast<PublishPresentation>(presentation):nullptr;
     return S_OK;
@@ -102,6 +107,16 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context&&presentationPublish_?presentationPublish_(table_.context,&value):S_FALSE;
   }
+  // Close and an in-flight game callback share the module lease. A provider
+  // without this optional export incurs just the atomic check.
+  void observeGameSubmit(EdvrNativeReflexSubmit receipt) noexcept {
+    if (!submitTrace_.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (auto note = submitTrace_.load(std::memory_order_relaxed)) {
+      receipt.runtimeGeneration = receipt.compositorGeneration == compositorGeneration_ ? generation_ : 0;
+      note(&receipt);
+    }
+  }
   bool gpuEnabled() {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context && table_.gpuEnabled(table_.context) == 1;
@@ -118,11 +133,14 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!table_.context) return S_FALSE;
     const auto result = table_.close(table_.context);
+    submitTrace_.store(nullptr, std::memory_order_release);
     table_ = {}; presentTrace_ = nullptr;presentationPublish_=nullptr; provider_ = nullptr; generation_ = 0;
     return result;
   }
 
  private:
+  using SubmitTrace = void (WINAPI *)(const EdvrNativeReflexSubmit*);
+  std::atomic<SubmitTrace> submitTrace_{nullptr};
   using PublishPresentation=HRESULT(WINAPI*)(void*,const EdvrNativePresentation*);
   PublishPresentation presentationPublish_=nullptr;
   template<class T> static bool owned(HMODULE provider, T address) {
@@ -136,6 +154,6 @@ class NativeTimingClient final {
   EdvrNativeTimingTable table_{};
   decltype(&edvrReadNativePresentTrace) presentTrace_ = nullptr;
   HMODULE provider_ = nullptr;
-  uint64_t generation_ = 0;
+  uint64_t generation_ = 0, compositorGeneration_ = 0;
 };
 } // namespace edvr::openxr

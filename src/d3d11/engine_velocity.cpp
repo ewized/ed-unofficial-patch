@@ -1,6 +1,7 @@
 #include "flat_origin_capture.h"
 #include "flat_forward_light.h"
 #include "engine_velocity.h"
+#include "native_vrs_cohort_probe.h"
 #include "native_vrs_witness.h"
 #include "native_vrs_material.h"
 #include "temporal_shader_bytecode.h"
@@ -978,6 +979,7 @@ bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
     ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &boundSrv);
     engineVelocityNoteStateCalls(1);
     if (boundSrv.Get() == e.overlayBaseSrv.Get()) return false;
+    vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionRead);
     ctx->CopyResource(e.overlayBase.Get(), e.slots.Get());
     engineVelocityNoteStateCalls(1);
     ++g_draw.overlayCopies;
@@ -1282,7 +1284,9 @@ FlatMarkerPlane* flatMarkerPlane(ID3D11DeviceContext* ctx, ID3D11Texture2D* dept
         plane->depth=depth;
     }
     if(plane->frame!=frame) {
-        const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(plane->rtv.Get(),empty);
+        const float empty[4]={-1,0,0,0};
+        vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
+        ctx->ClearRenderTargetView(plane->rtv.Get(),empty);
         plane->frame=frame;
     }
     return plane;
@@ -1940,7 +1944,10 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
             // The flat plane was cleared on its first use this frame. A
             // pre-world foreign marker must survive the source's first draw.
-            if(!runtimeFlatProfile())ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            if(!runtimeFlatProfile()){
+                vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
+                ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            }
             engineVelocityNoteStateCalls(1);
             // F2: target 7 starts the eye-frame at zero: valid 0 everywhere, so a pixel no skinned draw wrote is "no history". The on-foot source's
             // (3808x2142 in the F14 flight, 65 MB) is cleared at its first skinned draw instead (below): most frames on foot draw no character.
@@ -1949,6 +1956,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
                 {
                     // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
                     GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);
+                    vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
                     ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
                 }
                 engineVelocityNoteStateCalls(1);
@@ -2177,6 +2185,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             {
                 // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
                 GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);
+                vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
                 ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
             }
             engineVelocityNoteStateCalls(1);
@@ -2725,10 +2734,21 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
         bool full(){return issue.rate(issue.user,false);}
     } api{issue};
     auto& eye=g_eyes[issue.eye];
-    return native_vrs::splitWitness(api,ctx,issue.color,issue.depth,eye.slotsRtv.Get(),eye.skinBound?eye.skinRtv.Get():nullptr,
-        g_bound.patchedVs?g_bound.patchedVs:g_bound.sourceVs,g_bound.patchedPs,found->second.Get(),g_bound.originalPs,
+    auto* skin=eye.skinBound?eye.skinRtv.Get():nullptr;
+    auto* vertex=g_bound.patchedVs?g_bound.patchedVs:g_bound.sourceVs;
+    const bool observe=vrsCohortActive(ctx);
+    const auto paired=observe?g_witnessCounts.paired:0,copies=observe?g_witnessCounts.copies:0;
+    const bool issued=native_vrs::splitWitness(api,ctx,issue.color,issue.depth,eye.slotsRtv.Get(),skin,
+        vertex,g_bound.patchedPs,found->second.Get(),g_bound.originalPs,
         g_bound.derivedBlend.Get(),eye.witnessMirror,issue.epoch,issue.drawNumber,issue.reuse,g_witnessCounts,
         [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);});
+    // A late refusal also issues material, through the combined shader.
+    // Only the completed fine/coarse pair can contribute to a candidate run.
+    if(observe && g_witnessCounts.paired!=paired){
+        vrsCohortNotePair(ctx,{issue.eye,issue.color,issue.depth,eye.slotsRtv.Get(),skin,vertex,found->second.Get(),
+            g_bound.derivedBlend.Get(),g_bound.guardSrv3.Get()!=nullptr,skin!=nullptr,g_witnessCounts.copies!=copies});
+    }
+    return issued;
 }
 void engineVelocityReportWitness(){
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -3576,7 +3596,7 @@ bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* o
 }
 }  // namespace engine_velocity_detail
 
-bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
+bool engineVelocityViews(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
     if (!out) return false;
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
@@ -3584,6 +3604,8 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
                                        {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                                         g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);
+    // Compose may acquire the same eye's skin view immediately after its slot view.
+    if(given)vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionRead);
     return given;
 }
 

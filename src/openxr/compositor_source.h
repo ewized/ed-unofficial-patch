@@ -1,6 +1,7 @@
 #pragma once
 #include "../openvr/compat/openvr_v0_9_20.h"
 #include <cstdint>
+#include "../common/native_reflex_submit.h"
 
 namespace edvr::openxr {
 // Short copied transaction. No XR handles or caller buffers escape a source
@@ -27,6 +28,9 @@ class CompositorSource {
   virtual bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin)=0;
   virtual vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye,const vr::Texture_t*,
       const vr::VRTextureBounds_t*,vr::EVRSubmitFlags)=0;
+  // Called on the original game thread once Submit returns, before the caller
+  // can recycle its texture. A source without the optional recorder skips it.
+  virtual void observeGameSubmit(EdvrNativeReflexSubmit) noexcept {}
   // The source reports false if full historical semantics are unavailable.
   virtual bool clearSubmitted(uint64_t generation)=0;
   virtual bool handoff(uint64_t generation)=0;

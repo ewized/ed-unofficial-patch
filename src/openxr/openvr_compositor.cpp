@@ -4,6 +4,7 @@
 #include "../common/frame_flag.h"
 
 #include <windows.h>
+#include <intrin.h>
 #include <cstring>
 #include <cmath>
 #include <mutex>
@@ -138,11 +139,20 @@ vr::EVRCompositorError OpenVRCompositor::GetLastPoseForTrackedDeviceIndex(
 vr::EVRCompositorError OpenVRCompositor::Submit(vr::EVREye eye, const vr::Texture_t* texture,
     const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags) {
   NativeCpuTraceSpan trace(EdvrCpuSubmit);
-  if (eye != vr::Eye_Left && eye != vr::Eye_Right) return trace.finish(vr::VRCompositorError_IndexOutOfRange);
-  if (!source_) return trace.finish(kInvalid);
-  const CompositorRead read = source_->compositorRead();
-  if (!read.connected || read.generation == 0) return trace.finish(kInvalid);
-  return trace.finish(source_->submitEye(read.generation, eye, texture, bounds, flags));
+  const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+  if (!source_) return trace.finish(eye != vr::Eye_Left && eye != vr::Eye_Right ? vr::VRCompositorError_IndexOutOfRange : kInvalid);
+  CompositorRead read{};
+  vr::EVRCompositorError result = kInvalid;
+  if (eye != vr::Eye_Left && eye != vr::Eye_Right) result = vr::VRCompositorError_IndexOutOfRange;
+  else {
+    read = source_->compositorRead();
+    if (read.connected && read.generation) result = source_->submitEye(read.generation, eye, texture, bounds, flags);
+  }
+  // Rejected callers may have supplied an invalid texture pointer. Preserve
+  // their error and origin without inspecting their buffers again.
+  source_->observeGameSubmit({sizeof(EdvrNativeReflexSubmit), EDVR_NATIVE_REFLEX_SUBMIT_VERSION_1,
+      0, read.generation, read.sequence, caller, reinterpret_cast<uintptr_t>(texture), uint32_t(eye), uint32_t(result)});
+  return trace.finish(result);
 }
 
 void OpenVRCompositor::ClearLastSubmittedFrame() {

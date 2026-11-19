@@ -13,6 +13,7 @@
 #include "journal_watch.h"
 #include "native_on_foot.h"
 #include "native_reflex_nvapi.h"
+#include "native_reflex_engine_hook.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -600,6 +601,8 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // makes the pair visible to the compositor.
     state->held = false;
     state->sequenceFloor = input->sequence;
+    edvr::native_reflex::traceSample({edvr::native_reflex::TraceEvent::NativePose,
+        reinterpret_cast<uintptr_t>(state->device), 0, input->sequence, input->valid});
     state->invalidated = false;
     state->began = true;
     state->latched = false;
@@ -687,6 +690,7 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    edvr::native_reflex::traceNativeSession.store(0, std::memory_order_release);
     edvr::native_reflex::closeMode(state->reflex, state->device, state->generation);
     if (state->reflex.observing())
         g_reflexConfigStamp.fetch_and(~kReflexObservationPending, std::memory_order_release);
@@ -862,6 +866,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     state.device = request->gameDevice;
     state.deviceIdentity = identity;
     state.generation = request->generation;
+    edvr::native_reflex::traceNativeSession.store(state.generation, std::memory_order_release);
     state.active = true;
     g_current = &state;
     // NativeRuntimeHost acquires this table through the game-producer

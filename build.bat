@@ -469,6 +469,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrPublishNativePresentation ^
     --extra-export edvrAcquireDesktopWindow ^
     --extra-export edvrReadNativePresentTrace ^
+    --extra-export edvrNoteNativeReflexSubmit ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
@@ -687,6 +688,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
     "src\d3d11\native_sharpen.cpp" "src\d3d11\native_vrs_highlight.cpp" ^
     "src\d3d11\native_frame.cpp" ^
+    "src\d3d11\native_reflex_engine_hook.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^

@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** in the stationary on-foot tutorial, median application GPU time was about 9.8 ms off and 55.8 ms with the paired motion and material draws on in `4778c602`. Suppressing pairs while keeping ordinary material VRS active yielded 10.9 ms. An RTX 5090 reproduced a loss of coarse material shading when a subsequent experiment switched only the rate-map view. The individual GPU costs of the paired draws remain unresolved.
+- **VRS performance investigation:** in the stationary on-foot tutorial, median application GPU time was about 9.8 ms off and 55.8 ms with the paired motion and material draws on in `4778c602`. Suppressing pairs while keeping ordinary material VRS active yielded 10.9 ms. The RTX 5090 fixture verified restored coarse material shading and exact motion in `668de48a`. Game timing for that correction remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1036,8 +1036,19 @@ guarded overlay both shaded an outer 8×8 patch at full rate. Their depth,
 stencil, motion and skin data passed the exact comparisons. In
 `64223926`, reissuing the identical rate table restored the 4×4 footprint
 for the coplanar draw alone. The guarded material still shaded each pixel.
-Neither experiment proceeded to game timing. The correction restores
+Neither experiment proceeded to game timing. Commit `668de48a` restored
 the retained eye map and the two viewport palettes from `4778c602`.
+On the RTX 5090, all six material checkpoints then passed. The overlap,
+coplanar, post-reset and guarded draws produced exact 4×4 footprints.
+The combined baseline and forced fallback showed per-pixel gradients.
+Motion markers, skin, depth and stencil matched the full-rate reference.
+The fixture also verified two same-eye palette transitions and full-rate
+restoration after switching VRS off. These are offscreen rendering checks.
+
+The temporary `log.vrs_cohort_probe` records adjacent accepted pairs and
+breaks observed at draw, resource, and state boundaries. It keeps rendering
+unchanged and adds no GPU queries. Untracked pipeline and resource routes
+mean the histograms show opportunities, without certifying safe replay.
 
 ### Simulator validation (2026-11-19)
 

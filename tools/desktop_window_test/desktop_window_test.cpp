@@ -1237,12 +1237,14 @@ static void vsyncWiring(const std::string& root) {
         const size_t mine = at(t, "if (self != g_state->swapChain) {\n        return g_state->realPresent(self, syncInterval, flags);");
         const size_t decide = at(t, "const UINT presentSync = desktopVsyncPresented(flatProfileNow, syncInterval);");
         // The XeSS-FG bridge (xess_fg.h) takes a bridged swap chain's Present with the same decided interval.
-        const size_t call = at(t, "const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)\n"
+        const size_t route = at(t, "const bool viaProxy = xessFgOwns(self);");
+        const size_t call = at(t, "const HRESULT hr = viaProxy ? xessFgPresent(self, presentSync, flags)\n"
                                   "                                        : g_state->realPresent(self, presentSync, flags);");
-        return mine != std::string::npos && decide != std::string::npos && call != std::string::npos && mine < decide && decide < call &&
+        return mine != std::string::npos && decide != std::string::npos && call != std::string::npos && mine < decide && decide < route && route < call &&
                count(t, "g_state->realPresent(self, syncInterval, flags)") == 1 && at(t, "GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};") != std::string::npos;
     };
     check(!hook.empty() && wired(hook), "vsync wiring: another swapchain's Present is forwarded as asked; Elite's is presented with the decided interval; the trace keeps Elite's value");
+    check(!wired(replaced(hook, "viaProxy = xessFgOwns(self);", "viaProxy = true;")), "vsync control: forcing the proxy route trips the pin");
     check(!wired(replaced(hook, "g_state->realPresent(self, presentSync, flags);", "g_state->realPresent(self, syncInterval, flags);")), "vsync control: a real Present given Elite's value trips the pin");
     check(!wired(replaced(hook, "GetCurrentThreadId(), syncInterval, flags,", "GetCurrentThreadId(), presentSync, flags,")), "vsync control: a trace that records the presented value trips the pin");
 }

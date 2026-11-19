@@ -1961,6 +1961,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto admission=clearOverlapHandoff();
     return submitEyeAdmitted(generation,eye,texture,bounds,flags,admission);
   }
+  void observeGameSubmit(EdvrNativeReflexSubmit receipt) noexcept override {
+    timing.observeGameSubmit(receipt);
+  }
   // Carry the caller's admission through the synchronous owner rendezvous.
   // A later admission may invalidate it before this owner job publishes its
   // pair; that must not resurrect stale asynchronous handoff eligibility.
@@ -4801,7 +4804,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       nativeTracePuts("native_features,provider_acquired=1,physical_pose_before_render=1,stereo_transition_replay=1");
       acquired=E_FAIL;
-      const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);});
+      const bool timingAdmission=graphicsCalls.invoke([&]{acquired=timing.acquire(options.graphicsProvider,externalDevice,runtimeGeneration,compositorGeneration);});
       if(!timingAdmission) acquired=E_FAIL;
       if(acquired!=S_OK) nativeTracePrintf("native_timing,unavailable=%08lx\n",(unsigned long)acquired);
       else {

@@ -361,3 +361,5 @@ exact-source replay following one failed admission, 8,192 draws went from
 8,192 extra `GetData` calls and 7,938 dropped completion records to zero in
 both categories. The older pending sample and the next valid measured
 frame were preserved. This replay measures the enable-transition defect.
+
+The [build-specific frame ownership trace](../build-334925.md#passive-frame-ownership-trace) records the connection between game work and submitted eyes for Reflex investigation.

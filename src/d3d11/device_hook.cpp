@@ -6,6 +6,7 @@
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
 #include "native_reflex.h"
+#include "native_reflex_engine_hook.h"
 #include "native_vrs_material_receipt.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
@@ -1950,9 +1951,12 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         Log::get().note("%s", line);
     }
     if (flatProfileNow && !(flags & DXGI_PRESENT_TEST)) concoursePaneBakePresent(self);   // TEMPORARY (the concourse bake): keeps the back buffer, or puts the kept image back. One load otherwise
+    const bool viaProxy = xessFgOwns(self);
+    const auto frameTracePresent = native_reflex::traceEnabled() ?
+        native_reflex::tracePresentBegin(self, _ReturnAddress(), flags, viaProxy) : 0;
     const int64_t presentT0 = qpcNow();
     // A bridged swap chain (xess_fg.h) lives on a hidden window and is never presented: its frame goes to the XeSS-FG proxy.
-    const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)
+    const HRESULT hr = viaProxy ? xessFgPresent(self, presentSync, flags)
                                         : g_state->realPresent(self, presentSync, flags);
     const int64_t presentT1 = qpcNow();
     // The stall sampler's heartbeat (stall_watch.h): the render thread has just presented. A relaxed store and a
@@ -1986,6 +1990,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (dev) dev->GetImmediateContext(&timingContext);
     const bool ownerPresent = timingContext && SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST) &&
                               renderBoundaryValidateOwner(dev, timingContext);
+    if (frameTracePresent) native_reflex::tracePresentEnd(self, frameTracePresent, hr, ownerPresent);
     if (timingContext) {
         auto gpuPollMode = GpuFramePollMode::Unchanged;
         if (ownerPresent) {
@@ -2070,6 +2075,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     // The boundary just committed any reload or VR-to-flat profile switch.
     // Reflex updates the game D3D11 device only when its requested mode changes.
     if (ownerPresent) native_reflex::updateOnGamePresent(dev);
+    if (ownerPresent) native_reflex::updateFrameTrace();
     const int64_t boundaryT1 = qpcNow();
     // Whatever the boundary did after its last tick (all of it, when
     // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.

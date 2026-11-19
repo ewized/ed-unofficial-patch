@@ -20,6 +20,7 @@
 #include "scope_zoom_b3.h"             // B3: the reset edge's rule (b3ResetEdge)
 #include "../common/config.h"
 #include "native_dlss_evidence.h"
+#include "native_reflex_engine_hook.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
 #include "../common/temporal_mode.h"
@@ -535,6 +536,8 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   s->width[eye]=w;s->height[eye]=h;s->pendingSettings=readConfig();
   // fix.ui_quality's eye check (ui_layer.h): what the game submitted for
   // this eye, the one authority on which eye is which.
+  edvr::native_reflex::traceSample({edvr::native_reflex::TraceEvent::EyeInput,
+      reinterpret_cast<uintptr_t>(s->device), reinterpret_cast<uintptr_t>(source), seq, eye});
   edvr::uiLayerNoteSubmitted(seq,eye,source);
   edvr::uiLayerNoteSubmittedSized(eye,source,d.Width,d.Height);   // F198: the submitted textures with their sizes, the marker fix's eye source 'S' with Anti-aliasing off
   if (eye==0) {

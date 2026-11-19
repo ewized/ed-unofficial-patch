@@ -9,6 +9,7 @@
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
 #include "../../src/d3d11/native_reflex_nvapi.h"
+#include "reflex_trace_checks.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -198,6 +199,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     };
 
+    reflex_trace_checks::run(check);
     {
         using edvr::native_reflex::Mode;
         using edvr::native_reflex::ModeHistory;
