@@ -1,6 +1,7 @@
 // Exercise the built proxy's committed barrier thunks on the selected native
 // adapter. The generation export only observes the normal dispatch path.
 #pragma once
+#include "../openxr_native_test/present_device.h"
 #include <d3d11_4.h>
 #include <dxgi1_5.h>
 #include <wrl/client.h>
@@ -8,6 +9,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+// The proxy must own the public method before a call can exercise its drain.
+inline bool smokeSwapChainSlotHookedBy(IDXGISwapChain* swapchain,unsigned slot,HMODULE mod) {
+    void** vtable = *reinterpret_cast<void***>(swapchain);
+    HMODULE owner = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(vtable[slot]), &owner))
+        return false;
+    return owner == mod;
+}
 
 inline bool smokeWitnessBarriers(HMODULE proxy,const char* adapterLuid) {
     using Microsoft::WRL::ComPtr;
@@ -18,25 +29,41 @@ inline bool smokeWitnessBarriers(HMODULE proxy,const char* adapterLuid) {
     const LUID luid{low,static_cast<LONG>(high)};
     const auto dxgi=LoadLibraryExW(L"dxgi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
     const auto factoryFn=dxgi?reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(dxgi,"CreateDXGIFactory1")):nullptr;
-    const auto create=reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(proxy,"D3D11CreateDevice"));
     using Observe=unsigned (*)(ID3D11DeviceContext*,uint64_t*,uint64_t*);
     const auto observe=reinterpret_cast<Observe>(GetProcAddress(proxy,"edvr_selftest_witness_generations"));
     ComPtr<IDXGIFactory4> factory;
     ComPtr<IDXGIAdapter1> adapter;
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> ctx;
-    if(!observe || !create || !factoryFn || FAILED(factoryFn(IID_PPV_ARGS(&factory))) ||
+    edvr::openxr::PresentDevice presenting;
+    if(!observe || !factoryFn || FAILED(factoryFn(IID_PPV_ARGS(&factory))) ||
        FAILED(factory->EnumAdapterByLuid(luid,IID_PPV_ARGS(&adapter))) ||
-       FAILED(create(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&ctx)))return false;
+       FAILED(presenting.initialize(proxy,D3D_DRIVER_TYPE_UNKNOWN,64,64,adapter.Get())))return false;
+    ComPtr<ID3D11Device> device(presenting.device());
+    ComPtr<ID3D11DeviceContext> ctx(presenting.context());
     uint64_t inputs=0,pipeline=0;
-    auto check=[&](const char* name,bool input,unsigned flags=1u){
+    enum : unsigned { barriers=1, revoked=2, native=4, lifecycle=8, qualified=16 };
+    constexpr unsigned ready=barriers|native|lifecycle|qualified;
+    auto statusIs=[&](const char* name,unsigned expected){
+        const auto actual=observe(ctx.Get(),&inputs,&pipeline);
+        printf("  %s  %s flags=%u expected=%u\n",actual==expected?"ok  ":"FAIL",name,actual,expected);
+        return actual==expected;
+    };
+    auto check=[&](const char* name,bool input){
         const auto before=input?inputs:pipeline;
         const auto status=observe(ctx.Get(),&inputs,&pipeline);
-        const bool pass=status==flags && (input?inputs:pipeline)>before;
+        const bool pass=status==ready && (input?inputs:pipeline)>before;
         printf("  %s  %s input=%llu pipeline=%llu flags=%u\n",pass?"ok  ":"FAIL",name,inputs,pipeline,status);
         return pass;
     };
-    if(observe(ctx.Get(),&inputs,&pipeline)!=1u)return false;
+    if(!statusIs("native swap chain qualified",ready))return false;
+    // A non-TEST Present and a real resize take the owner lifecycle drain with
+    // an empty cohort. Check that forwarding completed and retained admission.
+    auto* chain=presenting.swapchain();
+    DXGI_SWAP_CHAIN_DESC resized{};
+    if(!smokeSwapChainSlotHookedBy(chain,8,proxy) || !smokeSwapChainSlotHookedBy(chain,13,proxy))return false;
+    if(FAILED(chain->ResizeBuffers(0,80,72,DXGI_FORMAT_UNKNOWN,0)) ||
+       FAILED(chain->GetDesc(&resized)) || resized.BufferDesc.Width!=80 || resized.BufferDesc.Height!=72 ||
+       !statusIs("owner ResizeBuffers",ready) || FAILED(presenting.present()) ||
+       !statusIs("owner Present",ready))return false;
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     if(!check("IA topology",false))return false;
     ID3D11SamplerState* empty=nullptr;
@@ -73,7 +100,7 @@ inline bool smokeWitnessBarriers(HMODULE proxy,const char* adapterLuid) {
     if(FAILED(ctx.As(&control)) && FAILED(device.As(&control)))return false;
     if(control->GetMultithreadProtected())return false;
     control->SetMultithreadProtected(FALSE);
-    if(observe(ctx.Get(),&inputs,&pipeline)!=3u)return false;
+    if(!statusIs("controller revoked admission",barriers|revoked|native|lifecycle))return false;
     printf("{\"native_proxy_witness_barriers\":true,\"adapter_luid\":\"%08x:%08x\"}\n",high,low);
     return true;
 }

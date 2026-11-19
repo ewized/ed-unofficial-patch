@@ -32,7 +32,8 @@ class PresentDevice final {
   }
   // `width` x `height` is the swap chain's back buffer, which is the output size the proxy's flat runtime reads (64 x 64 for every rig but
   // the flat SDK bench's supersampled cases, which present at their real display size).
-  HRESULT initialize(HMODULE proxy,D3D_DRIVER_TYPE driver,UINT width=64,UINT height=64) {
+  // A caller selecting a specific adapter passes UNKNOWN as the driver type.
+  HRESULT initialize(HMODULE proxy,D3D_DRIVER_TYPE driver,UINT width=64,UINT height=64,IDXGIAdapter* adapter=nullptr) {
     if(window_||!proxy||!width||!height)return E_INVALIDARG;
     const auto create=reinterpret_cast<decltype(&D3D11CreateDeviceAndSwapChain)>(
       GetProcAddress(proxy,"D3D11CreateDeviceAndSwapChain"));
@@ -55,11 +56,11 @@ class PresentDevice final {
     desc.BufferCount=2;desc.OutputWindow=window_;desc.Windowed=TRUE;
     desc.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
     const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-    HRESULT r=create(nullptr,driver,nullptr,0,levels,2,D3D11_SDK_VERSION,&desc,
+    HRESULT r=create(adapter,driver,nullptr,0,levels,2,D3D11_SDK_VERSION,&desc,
       &swapchain_,&device_,nullptr,&context_);
     if(r==E_INVALIDARG) {
       swapchain_.Reset();context_.Reset();device_.Reset();
-      r=create(nullptr,driver,nullptr,0,levels+1,1,D3D11_SDK_VERSION,&desc,
+      r=create(adapter,driver,nullptr,0,levels+1,1,D3D11_SDK_VERSION,&desc,
         &swapchain_,&device_,nullptr,&context_);
     }
     return r;

@@ -1151,7 +1151,14 @@ template<bool Inputs> bool witnessBarrier(ID3D11DeviceContext* ctx) {
 // DXGI offer detaches even an ordinary bound render target, and its content
 // may be discarded. Queue the DXGI event only after preceding GPU work too.
 bool witnessDxgiBarrier(IDXGIDevice2* self) {
-    return g_state && g_state->witnessOffers.object==self && witnessBarrier<true>(g_state->ownerCtx);
+    if(!g_state || g_state->witnessOffers.object!=self)return false;
+    if(GetCurrentThreadId()!=g_state->witnessOwnerThread){
+        // A DXGI caller cannot use the immediate context's serialized
+        // handoff. Revoke first so an empty observation cannot race an append.
+        vScreenSetWitnessCohortLifecycleCoverage(g_state->ownerCtx,false);
+        return nativeWitnessDrain();
+    }
+    return witnessBarrier<true>(g_state->ownerCtx);
 }
 bool installWitnessOffers(State& state,ID3D11Device* device) {
     auto& offers=state.witnessOffers;
@@ -8879,10 +8886,12 @@ extern "C" unsigned int edvr_selftest_scene_draws(unsigned int w, unsigned int h
 // its production generation even before a game frame has supplied eye data.
 extern "C" unsigned edvr_selftest_witness_generations(ID3D11DeviceContext* ctx,uint64_t* inputs,uint64_t* pipeline) {
     const auto q=edvr::vScreenWitnessContext(ctx);
-    if(!q.barriersInstalled || !q.ownerThread || !inputs || !pipeline)return 0;
+    if(!q.ownerThread || !inputs || !pipeline)return 0;
     *inputs=edvr::g_state->witnessInputs.load(std::memory_order_relaxed);
     *pipeline=edvr::g_state->witnessPipeline.load(std::memory_order_relaxed);
-    return q.revoked?3u:1u;
+    // Report installation, revocation, native identity, lifecycle and complete admission independently.
+    return (q.barriersInstalled?1u:0u) | (q.revoked?2u:0u) | (q.nativeImplementation?4u:0u) |
+        (q.lifecycleCovered?8u:0u) | (edvr::vScreenWitnessCohortQualified(ctx)?16u:0u);
 }
 
 extern "C" unsigned int edvr_selftest_hooks() {

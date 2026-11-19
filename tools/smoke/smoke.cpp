@@ -234,17 +234,6 @@ bool stageFixesOffProxy(const char* proxy, char* staged, size_t stagedSize) {
     return true;
 }
 
-// Whether IDXGISwapChain::Present (vtable slot 8) now lives in the module `mod`: the proxy's Present hook is on. The Present
-// checks below prove nothing about the hook without it.
-bool presentIsHookedBy(IDXGISwapChain* swapchain, HMODULE mod) {
-    void** vtable = *reinterpret_cast<void***>(swapchain);
-    HMODULE owner = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCSTR>(vtable[8]), &owner))
-        return false;
-    return owner == mod;
-}
-
 // Whether one of this process's own arguments already is `sw`.
 bool hasSwitch(int argc, char** argv, const char* sw) {
     for (int i = 1; i < argc; ++i) if (strcmp(argv[i], sw) == 0) return true;
@@ -449,7 +438,7 @@ int main(int argc, char** argv) {
                 printf("  FAIL  swap chain through the proxy: hr=0x%08X\n", static_cast<unsigned>(made));
                 pass = false;
             } else {
-                const bool hooked = presentIsHookedBy(presenting.swapchain(), mod);
+                const bool hooked = smokeSwapChainSlotHookedBy(presenting.swapchain(),8,mod);
                 printf("  %s  the proxy's Present hook is on the swap chain with the fixes off\n", hooked ? "ok  " : "FAIL");
                 pass &= hooked;
                 bool presented = true;

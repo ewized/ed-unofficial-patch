@@ -580,13 +580,13 @@ void run(){
   check(treat(fresh,5,1,source.Get())==S_FALSE&&offAaDepthNotes==depth0+1&&closeFloat(offAaDepthNear,.025f),"F202: a frame the game made no matrix query in hands the depth step the last near plane, so the lens is not left without one");
   const auto owner=edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),5);
   check(owner&&fresh.vrsFailures&&fresh.vrsFailures(fresh.context,5)==0,"V2 owner enrolls exact immediate context and sequence");
-  bool foreign=false,foreignStale=false;uint64_t foreignEnrollment=0;
-  std::thread other([&]{
+  bool foreignFailureAccepted=false,foreignStaleFailureAccepted=false;uint64_t foreignEnrollment=0;
+  std::thread failureNotifier([&]{
     foreignEnrollment=edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),5);
-    foreignStale=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner,4);
-    foreign=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),1,owner,5);
-  });other.join();
-  check(!foreignEnrollment&&!foreignStale&&foreign,
+    foreignStaleFailureAccepted=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner,4);
+    foreignFailureAccepted=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),1,owner,5);
+  });failureNotifier.join();
+  check(!foreignEnrollment&&!foreignStaleFailureAccepted&&foreignFailureAccepted,
     "foreign notification can mark the exact enrolled source but cannot enroll or mark an older one");
   check(!edvr::nativeTemporalInvalidateVrsEye(nullptr,0,owner,5)&&
         !edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner+1,5)&&
@@ -607,12 +607,12 @@ void run(){
   edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Quality,1.f);ngxEvaluated=true;
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);
   check(!edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),1),"V1 pairing never authorizes batch replay");
-  const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes;
+  const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes,depthBeforeDlss=offAaDepthNotes;
   check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");
   check(edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,"one NGX eye cannot confirm a stereo quality preset");
   check(eyeTanNotes==tan1&&offsetOnlyNotes==offs1,"F198: with the mode on, treat's AA-off branch publishes nothing (the pass's own notes are what they were)");
   check(submittedSizedNotes==sized1+1,"F198: the submitted size is noted with the mode on too");
-  check(offAaDepthNotes==depth0+1,"F202: with a mode on the AA-off depth step is never called (the pass makes the depth view itself): the AA-on path is what it was");
+  check(offAaDepthNotes==depthBeforeDlss,"F202: with a mode on the AA-off depth step is never called (the pass makes the depth view itself): the AA-on path is what it was");
   c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
   check(dlss.invalidate(dlss.context)==S_OK,"invalidate the incomplete left-only frame as the host does");
   f=frame(13,2);begin(dlss,f);

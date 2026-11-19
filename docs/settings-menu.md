@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** the stationary on-foot tutorial still regresses in `a5d4cae4`: median application GPU time was 10.186 ms off and 55.595 ms on. The preceding RTX fixture proved correct coarse material pixels and fine motion. Bounded batching of both passes is under implementation; its new hardware checks and game timing remain pending.
+- **VRS performance investigation:** the stationary on-foot tutorial still regresses in `a5d4cae4`: median application GPU time was 10.186 ms off and 55.595 ms on. Batching both passes passed the RTX fixture in `50f8cb8b`, including exact motion and material pixels. Production context qualification and game timing remain pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1059,7 +1059,7 @@ window had invalid or missing samples. The cohort probe separately recorded
 1,714,828 paired draws over 300 frames; 1,377,861 were in observed runs of
 at least 33 draws. This is a batching opportunity, not a performance result.
 
-The next implementation queues at most 64 compatible direct draws. It
+The batching implementation queues at most 64 compatible direct draws. It
 keeps their original inputs alive, runs fine motion witnesses in order,
 then runs materials in order against the original depth/stencil surface.
 Resource writes, state changes and frame consumers drain pending originals
@@ -1071,6 +1071,19 @@ D2D plug-in is outside that ownership contract. Shared, GDI, tiled and
 On12 resources remain ineligible. These are resource and ordering guards;
 material coverage still has no shader allowlist. Hardware validation and
 matched game timing are required before claiming a speed improvement.
+
+Native context qualification checks the runtime methods, since Windows can
+keep its own dispatch table in heap memory outside the D3D11 module. A
+borrowed context pointer does not authorize GPU replay from a DXGI callback
+on another thread. Such a callback revokes new batching before checking for
+pending work; only the render owner drains it through that boundary.
+
+At `50f8cb8b`, the RTX 5090 fixture passed all six material checkpoints for
+both grouped and synchronous rendering. It verified ordered motion, skin,
+depth and stencil, refusal recovery, two material continuations without
+vendor setters, and a serialized worker handoff that issued all originals
+without transferring the NVAPI owner. These offscreen results do not prove
+that production admitted cohorts or that game frame time improved.
 
 ### Simulator validation (2026-11-19)
 

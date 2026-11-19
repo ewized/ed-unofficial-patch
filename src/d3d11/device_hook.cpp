@@ -570,15 +570,19 @@ constexpr uint32_t kMissedDumpNotes = 3;
 State* g_state = nullptr;
 
 bool drainSwapChainWitness(IDXGISwapChain* chain) noexcept {
-    return !g_state || chain != g_state->swapChain || !g_state->witnessContext ||
-           nativeWitnessDrain(g_state->witnessContext);
+    if (!g_state || chain != g_state->swapChain || !g_state->witnessContext) return true;
+    // DXGI does not own a serialized D3D call. Stop new admissions before a
+    // foreign thread checks for pending work, and never pass it the context.
+    if (!vScreenWitnessContext(g_state->witnessContext).ownerThread)
+        vScreenSetWitnessCohortLifecycleCoverage(g_state->witnessContext, false);
+    return nativeWitnessDrain();
 }
 
 bool beforeSwapChainReplacement() noexcept {
     if (!g_state->swapChain || !g_state->witnessContext) return true;
     // Factory calls need not run on the immediate-context thread. Without
     // that serialized context boundary, a foreign caller may only observe.
-    return nativeWitnessDrain();
+    return drainSwapChainWitness(g_state->swapChain);
 }
 
 HRESULT STDMETHODCALLTYPE hookedWitnessPresent1(IDXGISwapChain1* self, UINT syncInterval, UINT flags,
@@ -3108,6 +3112,8 @@ void hookDevice(ID3D11Device* device) {
             ctxMode = contextHookModeFor(ctx);
             // A forceable hook mode is not evidence of native ownership.
             // Capture this before exposure or vScreen publishes a new vptr.
+            // D3D11 can put the table on the heap; the sampled methods must
+            // still all come from the verified System32 implementation.
             const auto mode = Config::get().getString("advanced.context_hook_mode", "auto");
             if (runtimeScopeIncludesVr() && ctxMode == HookMode::LiveCopy && _stricmp(mode.c_str(), "auto") == 0) {
                 const auto system = chooseSystemD3D11(static_cast<HMODULE>(systemD3D11Module()));
@@ -3115,7 +3121,6 @@ void hookDevice(ID3D11Device* device) {
                 constexpr size_t kWitnessNativeSlots = 96;
                 nativeImmediateImplementation = system.verified &&
                     guarded("device/witness-context-identity", [&] { table = *reinterpret_cast<void***>(ctx); }) &&
-                    vtableInsideModule(table, system.module) &&
                     vtableEntriesInModule(table, kWitnessNativeSlots, system.module) == kWitnessNativeSlots;
                 if (nativeImmediateImplementation) s.witnessContext = ctx;
             }
