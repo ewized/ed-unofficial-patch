@@ -35,15 +35,15 @@ template<class Check> void runFgRuntimeOpportunityCases(Check check) {
   check(!skipped.acceptPhase(poseTime+4*runtimePeriod,poseTime,period,2,1),
     "FG rejects four opportunities during two double-period waits");
 
-  constexpr int64_t small=1000;
+  constexpr int64_t testPeriod=1000;
   Bootstrap drift;drift.sync(epoch);
-  for(uint64_t i=1;i<=4;++i)drift.noteSlot(i,poseTime+int64_t(i-1)*1400,small,small);
-  check(!drift.phaseFits(poseTime+4200,poseTime,small,2,1),"FG a chain cannot accumulate timing drift into an extra opportunity");
-  drift.noteSlot(5,poseTime+5700,small,small);
-  check(!drift.phaseFits(poseTime+5700,poseTime+1400,small,2,1),"FG exact half-interval ambiguity retains strict wall age");
+  for(uint64_t i=1;i<=4;++i)drift.noteSlot(i,poseTime+int64_t(i-1)*1400,testPeriod,testPeriod);
+  check(!drift.phaseFits(poseTime+4200,poseTime,testPeriod,2,1),"FG a chain cannot accumulate timing drift into an extra opportunity");
+  drift.noteSlot(5,poseTime+5700,testPeriod,testPeriod);
+  check(!drift.phaseFits(poseTime+5700,poseTime+1400,testPeriod,2,1),"FG exact half-interval ambiguity retains strict wall age");
   Bootstrap later;later.sync(epoch);
-  for(uint64_t i=1;i<=8;++i)later.noteSlot(i,poseTime+int64_t(i-1)*1001,small,small);
-  check(later.phaseFits(poseTime+7007,poseTime,small,4,3)&&!later.phaseFits(poseTime+7007,poseTime,small,4,2),
+  for(uint64_t i=1;i<=8;++i)later.noteSlot(i,poseTime+int64_t(i-1)*1001,testPeriod,testPeriod);
+  check(later.phaseFits(poseTime+7007,poseTime,testPeriod,4,3)&&!later.phaseFits(poseTime+7007,poseTime,testPeriod,4,2),
     "FG bounded history retains the last legal 4x phase and enforces each phase's horizon");
 
   const Epoch cuts[]{{2,2,3,4},{1,5,3,4},{1,2,6,4},{1,2,3,7}};
