@@ -161,6 +161,7 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
         }
     }
     return counts.readOnlyOriginalRuns==4 && counts.readOnlyOriginalDraws==4 && counts.copies==5 &&
-           counts.reused==3 && counts.paired==11 && counts.rateRefused==1;
+           counts.reused==3 && counts.paired==11 && counts.rateRefused==1 &&
+           counts.copyCauses[WitnessDepthAccess::defaultState][0]==4 && counts.copyCauses[D3D11_COMPARISON_ALWAYS][1]==1;
 }
 } // namespace witness_gpu

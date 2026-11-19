@@ -320,6 +320,7 @@ struct EngineWitnessBatchInput {
     decltype(&nativeVrsSetCohortRate) rate=nullptr;
     bool (*invalidateFrame)(ID3D11DeviceContext*,unsigned eye,uint64_t outputGeneration,uint64_t frame) noexcept=nullptr;
     bool (*mappedBuffer)(ID3D11Resource*) noexcept=nullptr; // consulted only during first capture
+    bool (*qualifiedOwner)(ID3D11DeviceContext*) noexcept=nullptr; // rechecked under the published cohort lock
 };
 struct EngineWitnessIssue {
     ID3D11DeviceContext* ctx;

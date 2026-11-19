@@ -4,7 +4,8 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** `249e7c9a` completed 30-second OFF/ON/OFF windows at 10.768 / 13.182 / 10.320 ms GPU. The read-only original-depth route ran in production, but VRS still regresses. The combined VRS/2x-FG capture delivered no generated frames; diagnosis remains open. See the dated measurements below.
+- **VRS performance investigation:** `aba9d747` completed 30-second OFF/ON/OFF windows at 10.320 / 13.100 / 10.391 ms GPU. The unrelated-write cache route preserved no writes in this scene, so it has no demonstrated game benefit here. A guarded writable-EQUAL depth route is implemented for GPU validation. VRS still regresses; see the dated measurements below.
+- **FG recovery:** `aba9d747` recovered from an actual missed handoff with VRS On. Both bounded captures retained all rows and verified 286 generated frames against their exact native endpoints and existing timing budget. Remaining repeats, physical headset behavior and full Reflex SDK qualification remain open.
 - **F8 opening view:** `249e7c9a` displayed DLSS quality, experimental frame generation, NVIDIA low latency, VRS and its sharp region together in the native VR Performance page. Physical headset validation remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
@@ -1184,7 +1185,7 @@ adjacent completed OFF windows measured 10.251 and 10.371 ms. This remains
 a regression, and the historical difference from the earlier 18.768 ms
 result does not isolate the contribution of guarded batching.
 
-The next bounded optimization uses the already-bound scene DSV for fine
+The `249e7c9a` optimization uses the already-bound scene DSV for fine
 witnesses only when both depth and stencil are provably unwritable. It
 avoids private DSV switches and, where needed, unbind/copy commands. Depth
 writes, including an `EQUAL` comparison with writes enabled, retain the
@@ -1252,6 +1253,30 @@ cold mirrors, intervening draws and full barriers retain invalidation.
 Write counters describe those decisions; an unrelated write is not itself
 a measured saved copy. Native pixel and game timing checks remain pending.
 
+The `aba9d747` completed comparison measured 10.320 / 13.100 / 10.391 ms
+GPU and 6.297 / 10.006 / 6.500 ms CPU for Off / On / Off. All three windows
+sampled 30 seconds and drained for two seconds without invalid or missing
+results. The unrelated-write preservation counter stayed zero: those writes
+had no current mirror receipt. This rules out that route as a remedy for
+the observed on-foot regression, despite its successful differential fixture.
+
+A separate optimization uses the original writable D32S8 view for fixed
+`EQUAL` depth comparisons with nonwriting stencil. It retains the original
+state and issues the fine and material sequences in order. Accepted writes
+preserve the comparison class; they can still change signed-zero bits.
+The private mirror is therefore invalidated. This route is limited to
+qualified, published cohorts whose mutex and consumer barriers exclude
+readers throughout replay and restoration. Synchronous or unqualified
+draws keep their mirror. Other formats and depth comparisons retain their
+existing paths. See the [D3D11.3 depth rules, sections 17.10–17.13](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm).
+The GPU fixture compares constant/raw-exceptional seeds and a clipped
+perspective draw's exact depth across both eyes, the three shading rates,
+and late refusal. Native pixel and live opportunity checks remain pending.
+Private-copy counters also report comparison state and possible stencil
+writes, using descriptors already captured.
+Portable checks cover 110,592 state/format/ownership cases, 16,384 ordered
+raw-depth and owner traces, and 88 copy-histogram conservation cases.
+
 The same build's startup FG capture retained 506 rows without overflow.
 It presented 56 generated frames before recording 86 `cold_trial_spent`
 decisions. A failed held source exhausted the trial; a later complete,
@@ -1262,7 +1287,23 @@ presented native endpoints, arriving on the immediately following owner
 tick with a valid runtime timeline. The failed source cannot fund another
 attempt. Each new attempt retains the existing one-poll limit and timing
 budget; an empty next poll immediately returns to native cadence. Portable
-replay checks pass; native and live validation remain pending.
+replay checks pass; the following live check verifies recovery. Full
+readiness validation remains pending.
+
+On `aba9d747`, source 44331 spent a hold at tick 156 and returned to its
+native frame immediately when poll 157 was empty. Its later batch could
+not fund recovery. The newer exact batch 44334→44335 arrived at tick 166,
+one tick after native 44335. Its valid proof funded source 44336 at tick
+167; tick 168 submitted the generated phase and tick 169 its exact native
+endpoint, despite a newer staged source. The startup capture presented
+167 generated frames and a later capture presented another 119. All 286
+used the correct previous endpoint, fit the existing two- or three-opportunity
+budget, and were followed by their native endpoint on the next tick. All
+66 charged trials resolved on their single next poll; one empty poll used
+immediate native fallback. A four-opportunity result was refused. Both
+captures had continuous owner ticks and no overflow. These observations
+verify recovery and continued delivery with VRS in this session, not
+45-native-plus-45-generated cadence or physical display latency.
 
 ### Simulator validation (2026-11-19)
 

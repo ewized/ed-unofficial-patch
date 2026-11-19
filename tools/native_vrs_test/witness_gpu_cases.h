@@ -4,6 +4,7 @@
 #include "../../src/d3d11/dxbc_engine_velocity.h"
 #include "witness_pixel_reference.h"
 #include "witness_original_depth_cases.h"
+#include "witness_equal_depth_cases.h"
 #include <d3dcompiler.h>
 #include <vector>
 #include <cstdio>
@@ -11,7 +12,6 @@
 
 namespace witness_gpu {
 using Microsoft::WRL::ComPtr;
-enum class RateStep {BeginPass,PrepareWitness,Material,ContinueMaterial,ExpireMaterial,ArmHandoff,AfterHandoff,StrongFull};
 inline bool failure(int line){
     std::fprintf(stderr,"witness_gpu_cases.h line %d failed\n",line);return false;
 }
@@ -55,6 +55,13 @@ V vs(uint vertex:SV_VertexID){
  if(triIndex==1 || triIndex==5 || triIndex==7)xy=float2(-xy.x,-xy.y);
  V o;o.pos=float4(xy,0.375+xy.x*0.0625+xy.y*0.125+(triIndex==2?0.25:triIndex>=4?0.125:0),1);
  o.slot=triIndex>=6?7:triIndex>=4?6:triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
+}
+V equalVs(uint vertex:SV_VertexID){
+ uint face=vertex/3,corner=vertex%3;float2 xy=corner==0?float2(-1,-1):corner==1?float2(-1,3):float2(3,-1);
+ bool sloped=face>=3;face=face%3;
+ float z=sloped?(0.375+xy.x*0.046875+xy.y*0.09375+(face==1?0.125:0)):(face==1?0.0:0.5);
+ float w=sloped?(corner==0?1.0:corner==1?2.0:4.0):1.0;
+ V o;o.pos=float4(xy*w,z*w,w);o.slot=face+1;o.uv=xy;o.skin=float4(xy,face+1,1);return o;
 }
 cbuffer Material : register(b0) {float bias;};
 float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCOORD):SV_TARGET {
@@ -530,10 +537,16 @@ Witness referencePs(V i){
             ctx->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);ctx->VSSetShader(vs.Get(),nullptr,0);
             ctx->RSSetViewports(1,&viewport);ctx->RSSetState(raster.Get());ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
             const bool exact=originalDepthCases(dev,ctx,target,vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get());
-            ctx->ClearState();
             std::printf("{\"readonly_original_dsv_transitions_and_pixels_exact\":%s}\n",exact?"true":"false");
             std::printf("{\"mirror_unrelated_write_reused_alias_and_unknown_recopied_exact\":%s}\n",exact?"true":"false");
             if(!exact)return failure(__LINE__);
+            ComPtr<ID3DBlob> equalCode;ComPtr<ID3D11VertexShader> equalVertex;
+            if(!make("equalVs","vs_5_0",equalCode) ||
+               FAILED(dev->CreateVertexShader(equalCode->GetBufferPointer(),equalCode->GetBufferSize(),nullptr,&equalVertex)))return failure(__LINE__);
+            const bool equal=equalDepthCases(dev,ctx,target,equalVertex.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get(),rate,hardware);
+            ctx->ClearState();
+            std::printf("{\"equal_writable_original_d32s8_two_eyes_and_fallback_exact\":%s}\n",equal?"true":"false");
+            if(!equal)return failure(__LINE__);
         }
         return true;
     }

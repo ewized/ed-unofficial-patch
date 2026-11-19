@@ -2840,13 +2840,14 @@ void engineVelocityFlushWitnessCohort(ID3D11DeviceContext* ctx){
     } api{ctx,rate};
     const unsigned length=batch.draws.size();
     const auto paired=g_witnessCounts.paired;
+    const bool equal=s.depthAccess.equalWritable && input.qualifiedOwner && input.qualifiedOwner(ctx);
     std::optional<native_vrs::WitnessObservation> obs;
     if(g_witnessTiming.active(ctx))
         obs.emplace(g_witnessTiming,native_vrs::witnessRoute(true,false,length),length,
-            !s.depthAccess.original && native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.mirrorEpoch,batch.firstDraw,true));
+            !s.depthAccess.original && !equal && native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.mirrorEpoch,batch.firstDraw,true));
     native_vrs::replayWitnessCohort(batch.draws,s,eye.witnessMirror,batch.mirrorEpoch,batch.firstDraw,g_witnessCounts,api,
         [&](const native_vrs::WitnessDraw& d,bool material){input.replay(ctx,d,material);},
-        [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong,obs?&*obs:nullptr);
+        [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong,obs?&*obs:nullptr,equal);
     if(obs)obs->finish(g_witnessCounts.paired-paired);
     if(batch.draws.key().guard.view){
         ++batch.guardedBatches;batch.guardedMulti+=length>1;batch.guardedMaterials+=length;batch.guardedPaired+=g_witnessCounts.paired-paired;
@@ -2996,8 +2997,13 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
 void engineVelocityReportWitness(){
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const auto& n=g_witnessCounts;
-    Log::get().note("native VRS motion: paired=%llu depth_copies=%llu depth_reuse=%llu readonly_original_runs=%llu readonly_original_draws=%llu state_refused=%llu shader_refused=%llu query_refused=%llu rate_refused=%llu",
-        n.paired,n.copies,n.reused,n.readOnlyOriginalRuns,n.readOnlyOriginalDraws,n.stateRefused,n.shaderRefused,n.queryRefused,n.rateRefused);
+    Log::get().note("native VRS motion: paired=%llu depth_copies=%llu depth_reuse=%llu readonly_original_runs=%llu readonly_original_draws=%llu equal_writable_eligible_draws=%llu equal_writable_fine_draws=%llu equal_writable_paired_draws=%llu state_refused=%llu shader_refused=%llu query_refused=%llu rate_refused=%llu",
+        n.paired,n.copies,n.reused,n.readOnlyOriginalRuns,n.readOnlyOriginalDraws,n.equalEligible,n.equalFine,n.equalPaired,n.stateRefused,n.shaderRefused,n.queryRefused,n.rateRefused);
+    for(unsigned writes=0;writes<2;++writes){
+        const auto& c=n.copyCauses;
+        Log::get().note("native VRS depth copy causes: stencil_may_write=%u unknown=%llu never=%llu less=%llu equal=%llu less_equal=%llu greater=%llu not_equal=%llu greater_equal=%llu always=%llu default_less=%llu depth_disabled=%llu",
+            writes,c[0][writes],c[1][writes],c[2][writes],c[3][writes],c[4][writes],c[5][writes],c[6][writes],c[7][writes],c[8][writes],c[9][writes],c[10][writes]);
+    }
     Log::get().note("native VRS mirror writes: unrelated_preserved=%llu matching_invalidated=%llu unknown_invalidated=%llu no_current_mirror=%llu",
         g_witnessWriteOther.load(),g_witnessWriteMatch.load(),g_witnessWriteUnknown.load(),g_witnessWriteCold.load());
     const auto& b=g_witnessCohort;

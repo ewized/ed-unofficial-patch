@@ -1357,6 +1357,7 @@ __declspec(noinline) bool nativeSplitCohort(const EngineWitnessIssue& original,c
         batch.outputGeneration=nativeTemporalVrsOutputGeneration(ctx,batch.projection.sequence);
         batch.certified=batch.outputGeneration!=0;batch.expandedMaterial=d->expandedMaterial;
         if(g_state->witnessMaps.needsCheck())batch.mappedBuffer=&witnessMappedBuffer;
+        batch.qualifiedOwner=&vScreenWitnessCohortQualified;
         batch.replay=&replayWitnessDraw;batch.rate=&nativeVrsSetCohortRate;batch.invalidateFrame=&nativeTemporalInvalidateVrsEye;
         if(batch.certified)g_state->witnessOffered.fetch_add(1,std::memory_order_relaxed);else g_state->witnessOutputRefused.fetch_add(1,std::memory_order_relaxed);
     }else g_state->witnessProjectionRefused.fetch_add(1,std::memory_order_relaxed);

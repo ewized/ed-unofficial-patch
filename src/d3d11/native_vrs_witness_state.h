@@ -153,12 +153,12 @@ bool replayPrearmedOriginals(WitnessCohort& queue,ID3D11DeviceContext* ctx,bool 
 
 template<class Api,class Issue,class Coarse,class Strong>
 bool replayWitnessCohort(const WitnessCohort& queue,WitnessPipeline& s,WitnessMirror& mirror,uint64_t epoch,
-    uint64_t first,WitnessCounts& counts,Api& api,Issue issue,Coarse coarse,Strong strong,WitnessObserver* observer=nullptr){
+    uint64_t first,WitnessCounts& counts,Api& api,Issue issue,Coarse coarse,Strong strong,WitnessObserver* observer=nullptr,bool qualifiedEqual=false){
     if(queue.empty())return false;
     auto draw=[&](unsigned i,bool m){issue(queue.data()[i],m);};
     const bool replayed=splitWitnessRun(api,s.context.Get(),s.rt.slots[0],s.depth.Get(),s.rt.slots[6],s.rt.slots[7],
         s.vertex.Get(),s.combined.Get(),s.fine.Get(),s.material.Get(),s.blend.Get(),s.depthAccess,mirror,epoch,first,true,
-        counts,queue.size(),draw,[&](unsigned i){if(coarse(i))return true;strong();return false;},observer);
+        counts,queue.size(),draw,[&](unsigned i){if(coarse(i))return true;strong();return false;},observer,qualifiedEqual);
     if(!replayed){
         strong();
         for(unsigned i=0;i<queue.size();++i)draw(i,true);

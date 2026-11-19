@@ -383,8 +383,26 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     edvr::NativeVrsStatus handoffBefore{};
     bool handoffRatesUnchanged=false;
     using witness_gpu::RateStep;
+    unsigned equalEye=0;edvr::NativeVrsCohortReceipt equalReceipt;
     auto witnessRate=[&](RateStep step,ID3D11RenderTargetView* c,ID3D11DepthStencilView* d){
         using Stage=edvr::NativeVrsCohortStage;
+        if(step>=RateStep::EqualLeft){
+            auto equalRate=[&](Stage stage){return edvr::nativeVrsSetCohortRate(context.Get(),equalEye,c,d,projection,false,equalReceipt,stage);};
+            if(step==RateStep::EqualLeft || step==RateStep::EqualRight){
+                equalEye=unsigned(step==RateStep::EqualRight);
+                return equalRate(Stage::StrongFull) && edvr::nativeVrsStatus().fullRateAcknowledged;
+            }
+            if(step==RateStep::EqualFine){
+                edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;
+                return equalRate(Stage::PrepareFine);
+            }
+            if(step==RateStep::EqualExpire){
+                ++edvr::providerEpoch;
+                return !equalRate(Stage::NextMaterial) && edvr::nativeVrsStatus().fullRateAcknowledged;
+            }
+            return equalRate(step==RateStep::EqualMaterial?Stage::FirstMaterial:Stage::NextMaterial) &&
+                edvr::nativeVrsStatus().coarseAcknowledged;
+        }
         auto atRate=[&](Stage stage){return edvr::nativeVrsSetCohortRate(context.Get(),0,c,d,projection,false,runReceipt,stage);};
         if(step==RateStep::ArmHandoff){
             edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;
