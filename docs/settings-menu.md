@@ -48,13 +48,6 @@
 - **Ruled out:** four entries (shared-DirectInput-vtable door, `menu.aim =
   both` default, `Compositor_FrameTiming` at the modern offsets, the
   climbing "with EDVR" drop count): "Ruled out" in Status detail.
-- **Environment:** The DirectInput8Create fix is stated
-  runtime-independent ("applies to both SteamVR and OpenComposite"); the
-  first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
-  later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
-  without restating the headset. The shared-vtable door held on the
-  install tested first but not the Steam copy, where Steam's overlay may
-  hand out private per-device tables.
 - **Detail:** "The keyboard gate" for the three doors and fail-open
   rules; "Navigation and interaction" for the DirectInput finding, the
   footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
@@ -63,6 +56,14 @@
   for gates G1-G14; "Open questions for Sean"; "Phasing" for phases A/B/C.
 
 ## Status detail (moved out of Status 2026-09-29)
+
+**Test environment:** The DirectInput8Create fix is stated
+runtime-independent ("applies to both SteamVR and OpenComposite"); the
+first flight (2026-09-07) was a Pimax Crystal Super under SteamVR;
+later entries (2026-09-08 on) say "the Steam copy" or "Sean's rig"
+without restating the headset. The shared-vtable door held on the
+install tested first but not the Steam copy, where Steam's overlay may
+hand out private per-device tables.
 
 **2026-10-17 pre-RC3 R1: add-on write completion correction.**
 
