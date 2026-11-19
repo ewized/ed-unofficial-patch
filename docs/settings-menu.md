@@ -3,7 +3,7 @@
 ## Status
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
-- **VRS material coverage (experimental, untested).** Original scene pixel shaders can now qualify regardless of material family or input semantic names. The earlier, narrower build at `3d287e87` demonstrated 1x1, 2x2 and 4x4 shading and exact fine motion data under simulated gaze. The broader build awaits physical headset testing.
+- **VRS material coverage:** no material-family or input-semantic allowlist is used. Broad coverage is the normal behavior, with independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions, and this behavior is retained. Automated validation of that build and matched-scene performance remain unmeasured.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -944,10 +944,10 @@ region** beside **Frame generation**. The external Magic file controls and the
 separate VRS/Beyond page are removed. The native VRS configuration names remain
 `experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
 
-The experimental build accepts compatible original scene pixel shaders
-regardless of material family or input semantic names. This broader
-eligibility is untested. The owner checks shader bytecode, actual bindings,
-the settled eye depth target, the viewport and the current gaze sample.
+Native VRS accepts compatible original scene pixel shaders regardless of
+material family or input semantic names. There is no material allowlist or
+trial-mode switch. The owner checks shader bytecode, actual bindings, the
+settled eye depth target, the viewport and the current gaze sample.
 Qualified opaque shaders that carry MRT6/7 motion data use a separate,
 minimal full-rate witness pass against a private depth/stencil surface.
 Their material pass then runs at the requested rate without overwriting
@@ -967,6 +967,15 @@ does not expose an 8x8 rate. **VRS zone highlight** leaves the centre clear,
 uses light blue for 2x2 and stronger blue for 4x4. It shows the acknowledged
 zone map, not which draw produced every final pixel. Rasterized edges can
 stay sharp even when material pixel shading is coarse.
+
+### Manual acceptance of broad material coverage
+
+Build `f93ef4e6` removed the material-family and input-semantic restrictions
+from the shared compatibility check. The build was compiled and installed
+without running automated tests. Manual feedback reported no visual
+regressions, and broad coverage is retained as the normal behavior. This
+feedback does not establish a measured FPS improvement or physical gaze
+calibration. The independent UI and fine-motion protections remain in place.
 
 ### Simulator validation (2026-11-19)
 
