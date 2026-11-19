@@ -88,7 +88,7 @@ template<class Check> void runFgRecoveryCases(Check check) {
     unsigned multiplier=2,generatedCount=1,phaseMask=3;
     int64_t previousPoseDisplayTime=13*period,currentPoseDisplayTime=15*period;
   } fresh;
-  const auto observe=[](Bootstrap& policy,const Batch& batch,uint64_t tick) {
+  const auto observe=[&](Bootstrap& policy,const Batch& batch,uint64_t tick) {
     const int64_t display=int64_t(tick)*period;
     policy.observeBehind(batch,policy.phaseFits(display,batch.currentPoseDisplayTime,period,2,1),tick,display,period);
   };
