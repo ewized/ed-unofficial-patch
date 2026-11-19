@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** in a stationary on-foot tutorial, median application GPU time rose from about 9.7 ms to 54.6 ms with VRS on. Retaining the rate-map binding during fine motion draws in `61c50e14` substantially reduced resource setter calls, but GPU time stayed at 54.6 ms. See the on-foot measurements below.
+- **VRS performance investigation:** confirmed in a stationary on-foot tutorial: median application GPU time rose from about 9.7 ms to 54.6 ms with VRS on. Binding reuse in `61c50e14` reduced driver calls without recovering GPU time. The uniform witness palette in `4778c602` passed the focused RTX check; server maintenance prevented its game comparison. The slowdown remains unresolved. See the on-foot measurements below.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -980,10 +980,21 @@ calibration. The independent UI and fine-motion protections remain in place.
 
 ### On-foot performance with broad material coverage
 
-The simulated headset stayed stationary in the Surface Operation tutorial.
+On 2026-11-19 UTC, an RTX 5090 rendered the stationary starting view of
+the Surface Operation on-foot tutorial through SteamVR/OpenXR and the
+Mod Linker simulated headset. Each eye rendered at 3840x2160, at 90 Hz,
+with DLAA and DLSS model K. Frame generation, the FPS overlay and
+foveation highlight were off; application GPU timing was on. The focus
+profile was narrow. These measurements do not cover physical headset
+tracking or an active firefight.
+
 On `f93ef4e6`, median application GPU times were 9.664 ms with VRS off,
 54.618 ms with VRS on, and 9.743 ms after turning it off again. Median
-application CPU time with VRS on was 22.85 ms.
+application CPU times were 5.580, 22.846 and 5.801 ms respectively.
+Native frame completion fell from approximately 90/s to 17.4/s and
+returned to 90/s after turning VRS off. The compared samples were
+completed 30-second benchmark windows. CPU and GPU values are separate
+elapsed intervals, not additive measurements of exclusive execution.
 
 On `61c50e14`, the fine motion draw kept the same eye's rate-map view
 bound. Median application GPU time was 9.674 ms off and 54.639 ms on.
@@ -991,6 +1002,25 @@ Median application CPU time was 5.632 ms off and 21.421 ms on. The
 resource setter count fell substantially, ruling out repeated map binding
 as the dominant GPU cost in this scene. The cost of replaying geometry and
 changing viewport shading rates between the paired draws remains open.
+
+`4778c602` keeps VRS enabled during the private motion draw and maps
+every rate-map index to 1x1 shading. It restores the foveated palette for
+the material draw; public full-rate boundaries still disable VRS and
+unbind the map. The production DLLs compiled, and the focused real RTX
+fixture verified exact full-rate witness pixels, restored coarse pixels,
+fine motion/skin/depth/stencil data, two retained transitions and OFF
+restoration. The full readiness suite was not run. Elite then displayed
+a server-maintenance notice and exited before this candidate reached
+the tutorial, so its gameplay performance remains unmeasured.
+
+The PS-invocation diagnostic suppresses paired draws only while its
+recorder is active. It stops at 600 frames or five matched triples per
+eye, then normal paired draws resume. A 30-second window spanning that
+transition is mixed evidence and must not be used as a split-disabled
+performance comparison. For a future diagnostic isolation, enabling
+`advanced.vrs_work_reference` while leaving coverage and PS measurement
+off suppresses paired draws persistently without issuing reference
+queries; its extra CPU wrapper still makes it a diagnostic treatment.
 
 ### Simulator validation (2026-11-19)
 
