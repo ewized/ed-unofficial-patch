@@ -181,7 +181,7 @@
       const auto& b=images.metadata;
       if(b.currentSequence<=fgDisplayedSequence) {
         if(imported)fgBootstrap.observeBehind(b,
-          fgBootstrap.phaseFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1));
+          fgBootstrap.phaseFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1),fgTick,displayTime,period);
         images.ready=false;
         return Outcome::BehindWatermark;
       }
@@ -210,7 +210,7 @@
         "slot=empty:0/generated:1/native:2/repeat:3/refused_credit:4,"
         "handoff=none:0/generated_ready:1/committed_endpoint:2/no_pending_native:3/native_endpoint_ready:4/"
         "scene:5/poll_rejected:6/source_identity:7/fallback_coverage:8/no_synthesis_proof:9/"
-        "cold_trial_spent:10/attempt_already_spent:11/time:12/deferred:13\n",
+        "cold_trial_spent:10/attempt_already_spent:11/time:12/deferred:13/recovery_deferred:14\n",
         reason,(unsigned long long)count,(unsigned long long)lost);
       for(std::size_t i=0;i<count;++i) {
         const auto& row=rows[i];
@@ -527,7 +527,7 @@
     const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind);
     if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_end");fgCancelCredit();return true;}
     if(generated)fgBootstrap.displayGenerated(images.metadata);
-    else if(newNative)fgBootstrap.displayNative(fgDisplayedSequence);
+    else if(newNative)fgBootstrap.displayNative(fgDisplayedSequence,fgTick);
     if(tracingHandoff) {
       row.timeUs=edvrNativeTraceNowUs();row.phase=pixels?fgLastPhase:0;
       row.presented=pixels?(generated?row.current:fgDisplayedSequence):0;

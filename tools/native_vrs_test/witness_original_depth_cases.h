@@ -32,7 +32,8 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
     ds.StencilWriteMask=0;
     if(!make(masked))return false;
 
-    struct Step {ID3D11DepthStencilState* state;bool original,copy,mutate,refuse;};
+    enum class Write {None, Other, Alias, Unknown};
+    struct Step {ID3D11DepthStencilState* state;bool original,copy,mutate,refuse;Write write=Write::None;};
     const Step steps[]={
         {readOnly.Get(),true,false,false,false}, // cold read needs neither a mirror nor an allocation
         {nullptr,false,true,false,false},         // null DS state writes depth (LESS)
@@ -43,6 +44,9 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
         {backWrites.Get(),false,false,false,false},
         {readOnly.Get(),true,false,false,true},  // refused coarse issue restores original PS and MRTs
         {nullptr,false,true,false,false},
+        {nullptr,false,false,false,false,Write::Other},
+        {nullptr,false,true,false,false,Write::Alias},
+        {nullptr,false,true,false,false,Write::Unknown},
     };
     struct Api {
         ID3D11DeviceContext* ctx;ID3D11DepthStencilView* original;ID3D11DepthStencilView* last;
@@ -62,9 +66,12 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
     };
     WitnessMirror mirror;WitnessCounts counts;uint64_t epoch=1;
     WitnessPtr<ID3D11Texture2D> read[2][4];
+    WitnessPtr<ID3D11DepthStencilView> alias[2];
     D3D11_TEXTURE2D_DESC desc{};
     for(unsigned p=0;p<2;++p){
         auto& t=targets[p];
+        D3D11_DEPTH_STENCIL_VIEW_DESC vd{};t.depth->GetDesc(&vd);vd.Flags=D3D11_DSV_READ_ONLY_DEPTH;
+        if(FAILED(device->CreateDepthStencilView(t.tex[3].Get(),&vd,&alias[p])) || alias[p].Get()==t.depth.Get())return false;
         for(unsigned k=0;k<4;++k){
             t.tex[k]->GetDesc(&desc);desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
             if(FAILED(device->CreateTexture2D(&desc,nullptr,&read[p][k])))return false;
@@ -77,6 +84,27 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
         const auto& step=steps[i];epoch+=step.mutate;
         for(unsigned p=0;p<2;++p){
             auto& t=targets[p];
+            if(step.write!=Write::None){
+                // The copies below are actual immediate-context writes. One reaches
+                // the scene texture through a different DSV, one lacks provenance.
+                WitnessPtr<ID3D11Resource> dst;
+                if(step.write==Write::Other)dst=targets[2].tex[0].Get();
+                else alias[p]->GetResource(&dst);
+                if(p){
+                    const auto relation=witnessWriteRelation(mirror,step.write==Write::Unknown?nullptr:dst.Get());
+                    const auto expected=step.write==Write::Other?WitnessWrite::Unrelated:
+                        step.write==Write::Alias?WitnessWrite::Matching:WitnessWrite::Unknown;
+                    if(relation!=expected){std::fprintf(stderr,"mirror write step %u relation=%u expected=%u\n",
+                        i,unsigned(relation),unsigned(expected));return false;}
+                    epoch+=relation!=WitnessWrite::Unrelated;
+                }
+                if(step.write==Write::Other)ctx->CopyResource(dst.Get(),t.tex[0].Get());
+                else{
+                    const bool unknown=step.write==Write::Unknown;
+                    ctx->ClearDepthStencilView(targets[2].depth.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,unknown?.21f:.78f,unknown?18:35);
+                    ctx->CopyResource(dst.Get(),targets[2].tex[3].Get());
+                }
+            }
             ID3D11RenderTargetView* rt[8]{};rt[0]=t.color.Get();rt[6]=t.slot.Get();rt[7]=t.skin.Get();
             ctx->OMSetRenderTargets(8,rt,t.depth.Get());ctx->PSSetShader(combined,nullptr,0);
             if(step.mutate)ctx->ClearDepthStencilView(t.depth.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.9f,19);
@@ -132,7 +160,7 @@ bool originalDepthCases(ID3D11Device* device,ID3D11DeviceContext* ctx,Targets* t
             if(!same || !nonzero){std::fprintf(stderr,"original depth step %u target %u equal=%d nonzero=%d\n",i,k,same,nonzero);return false;}
         }
     }
-    return counts.readOnlyOriginalRuns==4 && counts.readOnlyOriginalDraws==4 && counts.copies==3 &&
-           counts.reused==2 && counts.paired==8 && counts.rateRefused==1;
+    return counts.readOnlyOriginalRuns==4 && counts.readOnlyOriginalDraws==4 && counts.copies==5 &&
+           counts.reused==3 && counts.paired==11 && counts.rateRefused==1;
 }
 } // namespace witness_gpu

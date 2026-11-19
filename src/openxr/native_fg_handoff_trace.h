@@ -13,11 +13,11 @@ enum class Slot { Empty, Generated, Native, Repeat, RefusedCredit };
 enum class Handoff : uint8_t {
     None, GeneratedReady, CommittedEndpoint, NoPendingNative, NativeEndpointReady,
     Scene, PollRejected, SourceIdentity, FallbackCoverage, NoSynthesisProof,
-    ColdTrialSpent, AttemptAlreadySpent, Time, Deferred
+    ColdTrialSpent, AttemptAlreadySpent, Time, Deferred, RecoveryDeferred
 };
 inline bool recordHandoff(Handoff* observation,Handoff decision) noexcept {
     if(observation)*observation=decision;
-    return decision==Handoff::Deferred;
+    return decision==Handoff::Deferred||decision==Handoff::RecoveryDeferred;
 }
 
 struct Poll {

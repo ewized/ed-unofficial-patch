@@ -600,7 +600,7 @@ struct State : DrawHot {
     native_vrs::WitnessMappedBuffers witnessMaps;
     FlatReplayQueryTracker witnessQueries;
     std::mutex witnessQueryMutex;
-    std::atomic<uint64_t> witnessEpoch{1},witnessDraw{0};
+    std::atomic<uint64_t> witnessEpoch{1},witnessMirrorEpoch{1},witnessDraw{0};
     PFN_SwapDeviceContextState realSwapDeviceContextState = nullptr;
     // The bound target's underlying resource, cached per binding generation
     // for the FSS viewport paths -- resolved only while fssResActive(), so a
@@ -1234,7 +1234,7 @@ bool installWitnessThreadControls(State& state,ID3D11Device* device,ID3D11Device
 void witnessMutation(ID3D11DeviceContext* ctx) {
     if(g_witnessInternal || g_engineWitnessCohortReplaying)return;
     vrsCohortNoteBreak(ctx, VrsCohortBreak::Target);
-    if(g_state && ctx==g_state->ownerCtx && nativeVrsLive())++g_state->witnessEpoch;
+    if(g_state && ctx==g_state->ownerCtx && nativeVrsLive()){++g_state->witnessEpoch;++g_state->witnessMirrorEpoch;}
 }
 // CB/VB uploads cannot write the single-sample Texture2D depth resource.
 void witnessResourceMutation(ID3D11DeviceContext* ctx,ID3D11Resource* resource) {
@@ -1248,7 +1248,12 @@ void witnessResourceMutation(ID3D11DeviceContext* ctx,ID3D11Resource* resource) 
     if(!g_state || ctx!=g_state->ownerCtx || !nativeVrsLive())return;
     D3D11_RESOURCE_DIMENSION type=D3D11_RESOURCE_DIMENSION_UNKNOWN;
     if(resource)resource->GetType(&type);
-    if(type==D3D11_RESOURCE_DIMENSION_TEXTURE2D || type==D3D11_RESOURCE_DIMENSION_UNKNOWN)++g_state->witnessEpoch;
+    if(type!=D3D11_RESOURCE_DIMENSION_TEXTURE2D && type!=D3D11_RESOURCE_DIMENSION_UNKNOWN)return;
+    ++g_state->witnessEpoch; // every texture/unknown write still breaks fine-to-coarse and cohort state
+    if(!nativeVrsCoarseRequested()){++g_state->witnessMirrorEpoch;return;}
+    auto* known=type==D3D11_RESOURCE_DIMENSION_TEXTURE2D && vScreenWitnessCohortQualified(ctx)?resource:nullptr;
+    if(!engineVelocityWitnessWriteUnrelated(known,g_state->witnessMirrorEpoch.load(),g_state->witnessDraw.load()))
+        ++g_state->witnessMirrorEpoch;
 }
 bool witnessDrawMayConsume(ID3D11DeviceContext* ctx);
 bool witnessDrawEntered(ID3D11DeviceContext* ctx) {
@@ -1394,6 +1399,7 @@ template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,native_vr
             current.finePending=!coarse && ready;
             return ready;
         }};
+    request.mirrorEpoch=g_state->witnessMirrorEpoch.load();
     if(kWitnessReplayEnabled && vScreenWitnessCohortQualified(ctx)){
         if(!request.querySafe)g_state->witnessQueryRefused.fetch_add(1,std::memory_order_relaxed);
         else if(witnessDrawMayConsume(ctx))g_state->witnessObserverRefused.fetch_add(1,std::memory_order_relaxed);
@@ -7630,7 +7636,7 @@ void vScreenNativeFrameBoundary(uint64_t frameOrdinal) {
         vrsCohortFrame(g_state->ownerCtx,frameOrdinal,vrsEnabled);
         if(g_state->ownerCtx && g_state->witnessOwnerThread==GetCurrentThreadId())
             engineVelocityWitnessTimingFrame(g_state->ownerCtx,frameOrdinal,vrsEnabled);
-        if(nativeVrsLive()&&g_state->ownerCtx)++g_state->witnessEpoch;
+        if(nativeVrsLive()&&g_state->ownerCtx){++g_state->witnessEpoch;++g_state->witnessMirrorEpoch;}
     }
     if(!nativeVrsLive()||!g_state||!g_state->ownerCtx)return;
     nativeVrsTick(g_state->ownerCtx,frameOrdinal,!runtimeFlatProfile());

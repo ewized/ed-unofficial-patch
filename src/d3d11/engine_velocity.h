@@ -332,6 +332,7 @@ struct EngineWitnessIssue {
     void (*draw)(void*,bool material);
     bool (*rate)(void*,bool);
     const EngineWitnessBatchInput* batch=nullptr;
+    uint64_t mirrorEpoch=epoch; // only proven unrelated resource writes may preserve this generation
 };
 bool engineVelocitySplitMaterial(const EngineWitnessIssue&);
 extern std::atomic<bool> g_engineWitnessCohortPending;
@@ -339,6 +340,7 @@ extern thread_local bool g_engineWitnessCohortReplaying;
 inline bool engineVelocityWitnessCohortPending() noexcept {return g_engineWitnessCohortPending.load(std::memory_order_acquire);}
 void engineVelocityFlushWitnessCohort(ID3D11DeviceContext*);
 bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext*) noexcept;
+bool engineVelocityWitnessWriteUnrelated(ID3D11Resource* dst,uint64_t mirrorEpoch,uint64_t draw) noexcept;
 void engineVelocityReportWitness();
 // Private borrowed timestamp commands pass the context hooks without becoming
 // application query events or advancing the witness mutation generations.

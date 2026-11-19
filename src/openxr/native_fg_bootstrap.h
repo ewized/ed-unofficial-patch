@@ -38,9 +38,11 @@ inline bool interpolationFits(int64_t now,int64_t sourceTime,int64_t period,
 class Bootstrap {
   Epoch epoch_{};
   Timeline timeline_{};
-  bool generated_=false,trialSpent_=false,attempted_=false;
+  bool generated_=false,attempted_=false;
   uint64_t completed_=0,firstPending_=0,displayed_=0,previousDisplayed_=0;
+  uint64_t displayedTick_=0,previousDisplayedTick_=0,lastTrialSource_=0;
   uint64_t bootstrapEndpoint_=0,committed_=0;
+  int64_t recoveryPoseTime_=0;
 
   template<class Batch> bool provesSynthesis(const Batch& batch) const {
     return epoch_.valid()&&nativeFgFixedMultiplier(batch.multiplier)&&
@@ -79,8 +81,11 @@ public:
       attempted_=false;
     }
   }
-  void displayNative(uint64_t sequence) {
-    if(sequence>displayed_){previousDisplayed_=displayed_;displayed_=sequence;}
+  void displayNative(uint64_t sequence,uint64_t tick=0) {
+    if(sequence>displayed_) {
+      previousDisplayed_=displayed_;displayed_=sequence;
+      previousDisplayedTick_=displayedTick_;displayedTick_=tick;
+    }
     if(sequence>=committed_)committed_=0;
     consumeNative(sequence);
   }
@@ -95,19 +100,20 @@ public:
     using fghandoff::recordHandoff;
     if(attempted_)return recordHandoff(observation,Handoff::AttemptAlreadySpent);
     if(!displayed)return recordHandoff(observation,Handoff::SourceIdentity);
-    if(!generated_) {
-      if(trialSpent_)return recordHandoff(observation,Handoff::ColdTrialSpent);
-      if(bootstrapEndpoint_!=displayed)return recordHandoff(observation,Handoff::NoSynthesisProof);
-    }
+    if(!generated_&&(bootstrapEndpoint_!=displayed||
+       (lastTrialSource_&&!timeline_.opportunities(recoveryPoseTime_,displayTime,admissionPeriod,0))))
+      return recordHandoff(observation,lastTrialSource_?Handoff::ColdTrialSpent:Handoff::NoSynthesisProof);
     if(completed_<=displayed||completed_-displayed!=1||firstPending_!=completed_||
        latestQueued!=completed_||latestExported>=completed_)return recordHandoff(observation,Handoff::SourceIdentity);
     if(nextPeriod<=0||!phaseFits(displayTime,sourceTime,admissionPeriod,multiplier,1,nextPeriod))
       return recordHandoff(observation,Handoff::Time);
+    if(observation)*observation=lastTrialSource_&&!generated_?Handoff::RecoveryDeferred:Handoff::Deferred;
     attempted_=true;
-    trialSpent_=true;
-    return recordHandoff(observation,Handoff::Deferred);
+    lastTrialSource_=completed_;
+    bootstrapEndpoint_=0;recoveryPoseTime_=0;
+    return true;
   }
-  void miss(){generated_=false;bootstrapEndpoint_=0;}
+  void miss(){generated_=false;bootstrapEndpoint_=0;recoveryPoseTime_=0;}
   void abandonNativeAttempt(){if(attempted_)miss();}
   bool acceptPhase(int64_t displayTime,int64_t sourceTime,int64_t period,unsigned multiplier,unsigned phase) {
     const bool timely=phaseFits(displayTime,sourceTime,period,multiplier,phase);
@@ -117,19 +123,29 @@ public:
     return timely;
   }
 
-  // A timely result for the exact displayed A->B pair can prove one cold
-  // trial. Only a submitted generated phase replenishes that allowance.
-  template<class Batch> void observeBehind(const Batch& batch,bool timely) {
-    if(!trialSpent_&&timely&&provesSynthesis(batch)&&previousDisplayed_&&
-       batch.previousSequence==previousDisplayed_&&batch.currentSequence==displayed_)
-      bootstrapEndpoint_=displayed_;
+  // After a miss, only a newer pair that actually arrived on the next
+  // owner poll after its native endpoint can prove another one-slot trial.
+  // Require the real runtime timeline for this stronger delivery proof.
+  template<class Batch> void observeBehind(const Batch& batch,bool timely,uint64_t tick=0,int64_t displayTime=0,
+                                           int64_t period=0) {
+    if(!timely||!provesSynthesis(batch)||!previousDisplayed_||batch.previousSequence!=previousDisplayed_||
+       batch.currentSequence!=displayed_)return;
+    if(lastTrialSource_) {
+      if(batch.currentSequence<=lastTrialSource_||!previousDisplayedTick_||previousDisplayedTick_>=displayedTick_||
+         tick<=displayedTick_||tick-displayedTick_!=1||batch.phaseMask!=((1u<<batch.multiplier)-1u)||
+         batch.previousPoseDisplayTime<=0||batch.previousPoseDisplayTime>=batch.currentPoseDisplayTime)return;
+      const auto slots=timeline_.opportunities(batch.currentPoseDisplayTime,displayTime,period,0);
+      if(!slots||!*slots||*slots>batch.multiplier+1)return;
+      recoveryPoseTime_=batch.currentPoseDisplayTime;
+    }
+    bootstrapEndpoint_=displayed_;
   }
   template<class Batch> void displayGenerated(const Batch& batch) {
     if(provesSynthesis(batch)) {
       committed_=batch.currentSequence;
       attempted_=false;
-      trialSpent_=false;
-      bootstrapEndpoint_=0;
+      lastTrialSource_=0;
+      bootstrapEndpoint_=0;recoveryPoseTime_=0;
       generated_=true;
     }
   }

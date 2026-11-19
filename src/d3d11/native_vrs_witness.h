@@ -10,11 +10,33 @@ template<class T> using WitnessPtr=Microsoft::WRL::ComPtr<T>;
 struct WitnessMirror {
     WitnessPtr<ID3D11DepthStencilView> source,view;
     WitnessPtr<ID3D11Texture2D> texture;
+    WitnessPtr<IUnknown> sourceIdentity,privateIdentity,deviceIdentity;
     uint64_t epoch=0,draw=0;
     bool reusable=false;
     D3D11_TEXTURE2D_DESC textureDesc{};
     DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN; // actual single-sample DSV format
 };
+enum class WitnessWrite { Unknown, Matching, Unrelated };
+// Called after draining on the verified native immediate-context owner. A
+// different interface pointer cannot distinguish aliases. Even distinct COM
+// identities need a private texture on the same device with an immutable
+// descriptor incompatible with both depth allocations.
+inline WitnessWrite witnessWriteRelation(const WitnessMirror& mirror,ID3D11Resource* dst) noexcept {
+    if(!dst || !mirror.sourceIdentity || !mirror.privateIdentity || !mirror.deviceIdentity)return WitnessWrite::Unknown;
+    WitnessPtr<ID3D11Resource> resource=dst;
+    WitnessPtr<IUnknown> id;
+    if(FAILED(resource.As(&id)) || !id)return WitnessWrite::Unknown;
+    if(id.Get()==mirror.sourceIdentity.Get() || id.Get()==mirror.privateIdentity.Get())return WitnessWrite::Matching;
+    WitnessPtr<ID3D11Texture2D> texture;
+    if(FAILED(resource.As(&texture)) || !texture)return WitnessWrite::Unknown;
+    D3D11_TEXTURE2D_DESC td{};texture->GetDesc(&td);
+    if(td.MiscFlags || ((td.BindFlags&D3D11_BIND_DEPTH_STENCIL) && td.Width==mirror.textureDesc.Width &&
+       td.Height==mirror.textureDesc.Height && td.Format==mirror.textureDesc.Format))return WitnessWrite::Unknown;
+    WitnessPtr<ID3D11Device> device;texture->GetDevice(&device);
+    WitnessPtr<IUnknown> owner;
+    if(!device || FAILED(device.As(&owner)) || owner.Get()!=mirror.deviceIdentity.Get())return WitnessWrite::Unknown;
+    return WitnessWrite::Unrelated;
+}
 // Non-null only for the exact bound view whose OM state preserves every depth
 // and stencil sample. EQUAL with enabled depth writes still needs the mirror.
 struct WitnessDepthAccess {
@@ -95,6 +117,7 @@ bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* c
            td.MipLevels!=1||td.ArraySize!=1||td.SampleDesc.Count!=1||td.Usage!=D3D11_USAGE_DEFAULT||
            td.CPUAccessFlags||td.MiscFlags||(td.BindFlags & ~(D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE)))return refuse();
         WitnessMirror next;
+        source.As(&next.sourceIdentity);device.As(&next.deviceIdentity);
         next.textureDesc=td;next.textureDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         next.source=depth;next.format=vd.Format;mirror=std::move(next);
     }
@@ -103,7 +126,7 @@ bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* c
         WitnessPtr<ID3D11Texture2D> texture;
         if(FAILED(device->CreateTexture2D(&mirror.textureDesc,nullptr,&texture)) ||
            FAILED(device->CreateDepthStencilView(texture.Get(),&vd,&mirror.view)))return refuse();
-        mirror.texture=std::move(texture);
+        texture.As(&mirror.privateIdentity);mirror.texture=std::move(texture);
     }
     if(!api.full()) {++counts.rateRefused;return false;}
     ID3D11RenderTargetView* outputs[8]{};outputs[6]=rt[6];outputs[7]=rt[7];

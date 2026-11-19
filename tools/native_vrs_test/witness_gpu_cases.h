@@ -532,6 +532,7 @@ Witness referencePs(V i){
             const bool exact=originalDepthCases(dev,ctx,target,vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get());
             ctx->ClearState();
             std::printf("{\"readonly_original_dsv_transitions_and_pixels_exact\":%s}\n",exact?"true":"false");
+            std::printf("{\"mirror_unrelated_write_reused_alias_and_unknown_recopied_exact\":%s}\n",exact?"true":"false");
             if(!exact)return failure(__LINE__);
         }
         return true;

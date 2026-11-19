@@ -1228,6 +1228,42 @@ observations only; the diagnostic does not change pacing or add waits.
 Combined delivery needs further diagnosis. Neither capture establishes
 physical headset scanout or active-combat performance.
 
+The `fc533934` phase capture completed 1,880 frames and 8,043 valid GPU
+intervals without missing results or ring exhaustion. Estimated gross
+replay cost was 3.808 ms/frame: 1.358 depth unbind/copy, 1.139 fine witness,
+0.634 coarse binding, 0.451 material/restoration and 0.226 preparation.
+All 11,777,302 materials paired in cohorts. There were 48,880 writable
+D32S8 copies, averaging 26 per frame, and no read-only copies. Thirty
+percent of cohort ranks were outside the preceding-frame sampling range,
+mostly no-copy singletons; copy ranks outside the range were 0.68%.
+These are sampled gross intervals including required material shading,
+not the difference from VRS Off. They exclude GPU work during admission
+prearm. Read all four record prefixes with
+`--grep 'VRS witness (timing|stratum|interval|depth copy)'`; selecting only
+`VRS witness timing` omits the interval, stratum and copy records.
+
+The mirror now has a separate continuity generation from the strict
+fine/coarse rate generation. A texture write still drains queued work and
+invalidates rate state. It preserves an already-current mirror only when
+the qualified native owner proves a distinct canonical resource identity,
+the same device, no shared-resource flags and incompatible immutable depth
+properties. Matching aliases, unknown or indistinguishable destinations,
+cold mirrors, intervening draws and full barriers retain invalidation.
+Write counters describe those decisions; an unrelated write is not itself
+a measured saved copy. Native pixel and game timing checks remain pending.
+
+The same build's startup FG capture retained 506 rows without overflow.
+It presented 56 generated frames before recording 86 `cold_trial_spent`
+decisions. A failed held source exhausted the trial; a later complete,
+timely batch for a newer native pair still could not restore recovery.
+A fixed-input replay reproduces that state. The bounded recovery change
+requires a strictly newer complete batch for the last two successfully
+presented native endpoints, arriving on the immediately following owner
+tick with a valid runtime timeline. The failed source cannot fund another
+attempt. Each new attempt retains the existing one-poll limit and timing
+budget; an empty next poll immediately returns to native cadence. Portable
+replay checks pass; native and live validation remain pending.
+
 ### Simulator validation (2026-11-19)
 
 Commit `3d287e87` passed the full native Windows build: 211 native jobs

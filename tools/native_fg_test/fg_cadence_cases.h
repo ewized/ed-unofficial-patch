@@ -77,15 +77,103 @@ template<class Check> void runFgRuntimeOpportunityCases(Check check) {
         !timeline.phaseFits(due,poseTime,period,2,1,max),"FG checked age arithmetic rejects extreme timestamps and forecasts");
 }
 
+template<class Check> void runFgRecoveryCases(Check check) {
+  using namespace fgbootstrap;
+  using Handoff=fghandoff::Handoff;
+  constexpr int64_t period=11111111;
+  constexpr Epoch epoch{1,2,3,4};
+  struct Batch {
+    uint64_t generation=1,configGeneration=2,referenceGeneration=3,historyGeneration=4;
+    uint64_t previousSequence=3,currentSequence=4;
+    unsigned multiplier=2,generatedCount=1,phaseMask=3;
+    int64_t previousPoseDisplayTime=13*period,currentPoseDisplayTime=15*period;
+  } fresh;
+  const auto observe=[](Bootstrap& policy,const Batch& batch,uint64_t tick) {
+    const int64_t display=int64_t(tick)*period;
+    policy.observeBehind(batch,policy.phaseFits(display,batch.currentPoseDisplayTime,period,2,1),tick,display,period);
+  };
+  Handoff decision=Handoff::None;
+  const auto defer=[&](Bootstrap& policy,uint64_t displayed,uint64_t tick,int64_t sourcePose) {
+    return policy.deferNative(displayed,displayed+1,displayed,sourcePose,int64_t(tick)*period,period,period,2,&decision);
+  };
+  const auto afterMiss=[&](uint64_t nativeTick) {
+    Bootstrap policy;policy.sync(epoch);
+    auto generated=fresh;generated.previousSequence=1;generated.currentSequence=2;
+    policy.displayNative(1,10);policy.displayGenerated(generated);policy.displayNative(2,11);
+    for(uint64_t tick=11;tick<=14;++tick)policy.noteSlot(tick,int64_t(tick)*period,period,period);
+    policy.completeNative(3);
+    check(defer(policy,2,14,13*period)&&decision==Handoff::Deferred,"FG warm cadence charges one slot");
+    policy.noteSlot(15,15*period,period,period);
+    check(!defer(policy,2,15,13*period)&&decision==Handoff::AttemptAlreadySpent,
+      "FG empty next poll always releases immediate native fallback");
+    policy.abandonNativeAttempt();policy.displayNative(3,nativeTick);
+    policy.noteSlot(16,16*period,period,period);policy.completeNative(4);
+    return policy;
+  };
+  Bootstrap policy=afterMiss(15);
+  auto attempted=fresh;attempted.previousSequence=2;attempted.currentSequence=3;
+  attempted.previousPoseDisplayTime=12*period;attempted.currentPoseDisplayTime=13*period;
+  observe(policy,attempted,16);
+  check(!defer(policy,3,16,15*period)&&decision==Handoff::ColdTrialSpent,
+    "FG later arrival of the charged source cannot replenish its trial");
+  policy.displayNative(4,16);policy.noteSlot(17,17*period,period,period);policy.completeNative(5);
+
+  Bootstrap recovery=policy;
+  observe(recovery,fresh,17);
+  check(defer(recovery,4,17,16*period)&&decision==Handoff::RecoveryDeferred,
+    "FG newer exact full batch on the immediately following owner tick recovers one trial");
+  recovery.noteSlot(18,18*period,period,period);
+  check(!defer(recovery,4,18,16*period)&&decision==Handoff::AttemptAlreadySpent&&creditDue(18,19,false),
+    "FG a recovery trial can miss once without extending the hold or credit spacing");
+  recovery.abandonNativeAttempt();recovery.displayNative(5,18);
+  recovery.noteSlot(19,19*period,period,period);recovery.completeNative(6);
+  observe(recovery,fresh,19);
+  check(!defer(recovery,5,19,18*period)&&decision==Handoff::ColdTrialSpent,
+    "FG duplicate proof cannot recover a second time after progress consumes it");
+
+  Batch invalid[]{fresh,fresh,fresh,fresh,fresh,fresh,fresh,fresh,fresh,fresh};
+  invalid[0].previousSequence=2;invalid[1].phaseMask=1;invalid[2].generatedCount=0;
+  invalid[3].currentPoseDisplayTime=18*period;invalid[4].currentPoseDisplayTime=12*period;
+  invalid[4].previousPoseDisplayTime=11*period;invalid[5].currentPoseDisplayTime=15*period+1;
+  invalid[6].generation=9;invalid[7].configGeneration=9;invalid[8].referenceGeneration=9;invalid[9].historyGeneration=9;
+  for(const auto& batch:invalid) {
+    Bootstrap refused=policy;observe(refused,batch,17);
+    check(!defer(refused,4,17,16*period)&&decision==Handoff::ColdTrialSpent,
+      "FG recovery rejects unproven endpoints, phase metadata, pose time or epoch");
+  }
+  Bootstrap skipped=policy;
+  skipped.displayNative(4,17);skipped.noteSlot(18,18*period,period,period);
+  observe(skipped,fresh,18);
+  check(!defer(skipped,4,18,17*period),"FG a repeated native endpoint cannot restart the next-tick evidence window");
+  Bootstrap unknown=afterMiss(0);
+  unknown.displayNative(4,16);unknown.noteSlot(17,17*period,period,period);unknown.completeNative(5);
+  observe(unknown,fresh,17);
+  check(!defer(unknown,4,17,16*period),"FG both endpoints must have real successful native submission ticks");
+  Bootstrap changed=policy;
+  changed.syncDisplayPeriod(period+1);
+  changed.noteSlot(17,17*period,period+1,period+1);
+  observe(changed,fresh,17);
+  check(!defer(changed,4,17,16*period),"FG strict wall age alone after a rate change cannot recover a trial");
+  Bootstrap broken=policy;observe(broken,fresh,17);
+  broken.noteSlot(18,0,period,period);broken.noteSlot(19,19*period,period,period);
+  check(!defer(broken,4,19,18*period),"FG an intervening runtime timeline break invalidates acquired recovery proof");
+  policy.sync({1,2,3,5});policy.completeNative(5);observe(policy,fresh,17);
+  check(!defer(policy,4,17,16*period)&&decision==Handoff::NoSynthesisProof,
+    "FG a history reset discards the previous pair and charged source");
+}
+
 template<class Check> void runFgCadenceCases(Check check) {
   using namespace fgbootstrap;
   runFgRuntimeOpportunityCases(check);
+  runFgRecoveryCases(check);
   constexpr int64_t period=11111111;
   const Epoch epoch{1,2,3,4};
   struct Batch {
     uint64_t generation=1,configGeneration=2,referenceGeneration=3,historyGeneration=4;
     unsigned multiplier=2,generatedCount=1;
     uint64_t previousSequence=1,currentSequence=2;
+    unsigned phaseMask=3;
+    int64_t previousPoseDisplayTime=0,currentPoseDisplayTime=0;
   } proof;
   const auto defer=[&](Bootstrap& policy,uint64_t displayed,uint64_t queued,uint64_t exported) {
     return policy.deferNative(displayed,queued,exported,10*period,12*period,period,period,2);
