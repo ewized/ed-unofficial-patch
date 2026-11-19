@@ -453,6 +453,9 @@ int wmain(int argc, wchar_t** argv) {
     check(witness_gpu::run(device.Get(),context.Get(),&D3DCompile,
         [](witness_gpu::RateStep,ID3D11RenderTargetView*,ID3D11DepthStencilView*){return true;},false),
         "private depth batch reproduces every depth/stencil bit, slot and skin sample across overlapping and coplanar geometry");
+    check(witness_gpu::run(device.Get(),context.Get(),&D3DCompile,
+        [](witness_gpu::RateStep,ID3D11RenderTargetView*,ID3D11DepthStencilView*){return true;},false,true),
+        "deferred direct draws replay fine first, preserve sloped motion and skin, and retain full-rate fallback after a material commits");
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
     consumer_tests::run({device.Get(), context.Get(), &check});

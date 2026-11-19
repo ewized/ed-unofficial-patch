@@ -1,6 +1,7 @@
 #include "transition_flash_eye_base.h"
 #include "transition_flash_eye_base_core.h"
 #include "glitch_frame.h"
+#include "native_reflex_engine_hook.h"
 #include "native_on_foot.h"   // the F0 gate counter (log only)
 #include "../common/code_hook.h"
 #include "../common/game_build.h"
@@ -8,6 +9,7 @@
 #include "../common/runtime_profile.h"
 
 #include <windows.h>
+#include <intrin.h>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -300,7 +302,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         float m[16];
         if (sehReadU64(cameraObj + 0x50, ship) && sehReadBlock64(ship + 0x3330, m)) noteConsume(gameMode, m);
     }
+    const auto* trace = native_reflex::traceObserver.load(std::memory_order_acquire);
+    const auto ticket = trace ? trace->viewConsume(cameraObj, gameMode, _ReturnAddress()) : 0;
     forward(cameraObj, gameMode, ptr3);
+    if (ticket) native_reflex::traceSample({native_reflex::TraceEvent::ViewConsumeEnd, cameraObj, 0, ticket});
 }
 
 // =====================================================================

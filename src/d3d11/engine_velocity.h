@@ -47,6 +47,8 @@
 
 #include "binding_shadow.h"
 #include "engine_velocity_families.h"
+#include "native_vrs.h"
+#include "native_vrs_replay.h"
 
 struct ID3D11Buffer;
 struct ID3D11DeviceContext;
@@ -309,6 +311,15 @@ bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceV
 // original shaders or the currently held exact motion/marker replacement;
 // binding generations/context must still name those original shaders.
 bool engineVelocityFlatSourceShaders(ID3D11DeviceContext*, uint64_t vs, uint64_t ps);
+struct EngineWitnessBatchInput {
+    native_vrs::WitnessDraw draw{};
+    NativeVrsProjection projection{};
+    uint64_t inputs=0,pipeline=0,outputGeneration=0;
+    bool certified=false,expandedMaterial=false;
+    void (*replay)(ID3D11DeviceContext*,const native_vrs::WitnessDraw&,bool material)=nullptr;
+    decltype(&nativeVrsSetCohortRate) rate=nullptr;
+    bool (*invalidateFrame)(ID3D11DeviceContext*,unsigned eye,uint64_t outputGeneration,uint64_t frame) noexcept=nullptr;
+};
 struct EngineWitnessIssue {
     ID3D11DeviceContext* ctx;
     ID3D11RenderTargetView* color;
@@ -319,8 +330,14 @@ struct EngineWitnessIssue {
     void* user;
     void (*draw)(void*,bool material);
     bool (*rate)(void*,bool);
+    const EngineWitnessBatchInput* batch=nullptr;
 };
 bool engineVelocitySplitMaterial(const EngineWitnessIssue&);
+extern std::atomic<bool> g_engineWitnessCohortPending;
+extern thread_local bool g_engineWitnessCohortReplaying;
+inline bool engineVelocityWitnessCohortPending() noexcept {return g_engineWitnessCohortPending.load(std::memory_order_acquire);}
+void engineVelocityFlushWitnessCohort(ID3D11DeviceContext*);
+bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext*) noexcept;
 void engineVelocityReportWitness();
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);

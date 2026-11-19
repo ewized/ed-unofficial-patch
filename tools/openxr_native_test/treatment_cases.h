@@ -11,6 +11,8 @@ using Microsoft::WRL::ComPtr;
 struct State {
   DWORD thread=0;
   bool wrongThread=false, passthrough=false;
+  bool vrsV2=false;
+  uint64_t incompleteSequence=0;
   char fail=0;
   unsigned invalidations=0;
   std::string calls;
@@ -22,6 +24,8 @@ inline HRESULT WINAPI projection(void*,uint64_t,uint32_t,float,float){return S_O
 inline HRESULT WINAPI invalidate(void*){++state.invalidations;return S_OK;}
 inline HRESULT WINAPI close(void*){return S_OK;}
 inline HRESULT WINAPI skip(void*,uint64_t,uint32_t,uint32_t,uint32_t){state.calls+='H';return S_OK;}
+inline uint32_t WINAPI vrsFailures(void*,uint64_t sequence){return sequence&&sequence==state.incompleteSequence?2u:0u;}
+inline uint32_t WINAPI temporalDiagnostics(void*){return EDVR_NATIVE_TEMPORAL_FG_HANDOFF_TRACE;}
 inline HRESULT output(char stage,unsigned index,ID3D11Texture2D* input,ID3D11Texture2D** out,float* box) {
   state.wrongThread|=GetCurrentThreadId()!=state.thread;
   state.calls+=stage;state.inputs.push_back(input);*out=nullptr;
@@ -43,9 +47,14 @@ inline HRESULT WINAPI publish(void*,const float* head,const float (*)[12],const 
 #pragma comment(linker, "/export:edvrAcquireNativeTemporal")
 #pragma comment(linker, "/export:edvrAcquireNativeSharpen")
 #pragma comment(linker, "/export:edvrAcquireNativeMenu")
-extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest*,EdvrNativeTemporalTable* table) {
+extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest* request,EdvrNativeTemporalTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
-  *table={sizeof(*table),EDVR_NATIVE_TEMPORAL_VERSION_1,&state,beginTemporal,projection,temporal,invalidate,close,skip};return S_OK;
+  const uint32_t version=state.vrsV2?EDVR_NATIVE_TEMPORAL_VERSION_2:EDVR_NATIVE_TEMPORAL_VERSION_1;
+  const uint32_t size=state.vrsV2?uint32_t(sizeof(*table)):EDVR_NATIVE_TEMPORAL_TABLE_V1_SIZE;
+  if(request->version!=version||table->version!=version||table->size!=size)return E_INVALIDARG;
+  const EdvrNativeTemporalTable reply{size,version,&state,beginTemporal,projection,temporal,invalidate,close,skip,
+    state.vrsV2?vrsFailures:nullptr,state.vrsV2?temporalDiagnostics:nullptr};
+  std::memcpy(table,&reply,size);return S_OK;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenRequest*,EdvrNativeSharpenTable* table) {
   using namespace edvr::openxr::test::treatment_fixture;
@@ -138,7 +147,25 @@ template<class Check> void runTreatmentCases(Check check) {
     "nonrendering submit validates");}),"nonrendering rendezvous");
   check(state.calls.empty()&&h.graphicsCalls.calls-before==1,"nonrendering submit does not run treatments or copy");
   check(f.owner.stop(),"treatment owner stops without deferred callbacks");
-  f.dispatcher.close();h.temporal.close();h.sharpen.close();h.menu.close();h.captured.shutdown();state={};
+  f.dispatcher.close();h.temporal.close();h.sharpen.close();h.menu.close();h.captured.shutdown();
+  state.vrsV2=true;
+  check(h.temporal.acquire(provider,device.Get(),1)==S_OK,"host negotiates exact-source VRS withhold callback");
+  check(h.temporal.fgHandoffTraceRequested(),"V2 provider can enable local FG handoff trace");
+  f.fake.shouldRender=true;
+  check(h.boundary.waitAndBegin()==XR_SUCCESS,"VRS failure fixture has a live XR frame");
+  h.activeFrameSequence=500;state.incompleteSequence=499;
+  check(!h.rejectIncompleteVrsSource()&&h.state.frameOpen(),"older source receipt leaves active frame open");
+  state.incompleteSequence=500;h.previousPairValid=h.fgFallbackValid=true;
+  const auto empty=h.presentationCounts.emptyFrames;
+  const auto ends=f.fake.endCalls;
+  check(h.rejectIncompleteVrsSource()&&!h.state.frameOpen()&&h.presentationCounts.emptyFrames==empty+1&&
+    f.fake.endCalls==ends+1&&!h.previousPairValid&&!h.fgFallbackValid,
+    "exact incomplete stereo source ends empty and offers neither previous nor FG content");
+  check(h.rejectIncompleteVrsSource()&&f.fake.endCalls==ends+1,"late other-eye submit cannot end the frame twice");
+  h.activeFrameSequence=501;f.fake.frameTime+=10;
+  check(h.boundary.waitAndBegin()==XR_SUCCESS&&!h.rejectIncompleteVrsSource()&&h.state.frameOpen(),
+    "next source resumes normal pacing after exact one-frame withholding");
+  h.boundary.clear();h.temporal.close();state={};
 }
 
 template<class Check> void runDeferredTreatmentCases(Check check) {

@@ -85,6 +85,18 @@ struct NativeVrsWitnessReceipt {
     NativeVrsWitnessStamp stamp;
     NativeVrsWitnessStamp take() noexcept {const auto saved=stamp;stamp={};return saved;}
 };
+enum class NativeVrsCohortStage {PrepareFine,FirstMaterial,NextMaterial,StrongFull};
+using NativeVrsCohortBarrier=void(*)(ID3D11DeviceContext*);
+void nativeVrsInstallCohortBarrier(const std::atomic<bool>* pending,NativeVrsCohortBarrier) noexcept;
+struct NativeVrsCohortReceipt {
+    NativeVrsWitnessReceipt first;
+    NativeVrsWitnessStamp active;
+};
+// Valid only inside one owner-thread replay with no intervening state changes.
+// FirstMaterial verifies the rebound OM targets. NextMaterial rechecks the
+// active eye map, producer, configuration, frame and gaze age for each issue.
+bool nativeVrsSetCohortRate(ID3D11DeviceContext*,unsigned eye,ID3D11RenderTargetView*,ID3D11DepthStencilView*,
+    const NativeVrsProjection&,bool expanded,NativeVrsCohortReceipt&,NativeVrsCohortStage) noexcept;
 // Caller identified an original material draw, a settled scene depth eye and
 // a full-eye scene color target. At issue, this validates actual attachments,
 // depth test, raster state, viewport, provider and frame. A true result means

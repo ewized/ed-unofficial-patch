@@ -443,6 +443,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
+    --extra-export edvr_selftest_witness_generations ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_flat_sdk_snapshot ^
     --extra-export edvr_selftest_flat_sdk_owner_view ^

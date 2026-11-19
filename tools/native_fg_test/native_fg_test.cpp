@@ -1,6 +1,7 @@
 #include "../../src/openxr/native_fg_schedule.h"
 #include "../../src/openxr/native_fg_credit.h"
 #include "../../src/openxr/native_fg_lifecycle.h"
+#include "../../src/openxr/native_fg_handoff_trace.h"
 #include "../../src/openxr/owner_service.h"
 #include "../../src/d3d11/frame_generation_auto_policy.h"
 #include "fg_cadence_cases.h"
@@ -81,6 +82,24 @@ void lifecycle() {
   check(!churn.observe(5000,false,key).emit,"Off after final report has no ongoing heartbeat");
   check(churn.observe(5001,true,key).emit,"later requested lifetime resumes reporting");
   check(churn.observe(1,true,key).emit,"clock reversal cannot strand reporting");
+}
+void handoffTrace() {
+  fghandoff::Recorder<2> trace;
+  unsigned emissions=0;
+  check(!trace.sampleWanted(),"FG handoff recorder does no work before opt-in");
+  trace.finish([&](const auto*,auto,auto){++emissions;});
+  trace.arm();
+  for(unsigned source=1;source<=4;++source)if(trace.sampleWanted()) {
+    fghandoff::Sample sample;sample.source=source;
+    trace.append(sample);
+  }
+  trace.finish([&](const auto* rows,auto count,auto lost){
+    ++emissions;
+    check(count==2&&lost==2&&rows[0].source==1&&rows[1].source==2,
+      "FG handoff recorder retains its first bounded block and counts overflow");
+  });
+  trace.finish([&](const auto*,auto,auto){++emissions;});
+  check(emissions==1&&!trace.sampleWanted(),"FG handoff recorder emits exactly once per opt-in");
 }
 void schedule() {
   for(unsigned multiplier:{2u,3u,4u}) {
@@ -168,7 +187,7 @@ void creditGate() {
 int main(int argc,char** argv) {
   if(argc==2&&std::strcmp(argv[1],"--dry-run")==0){std::puts("native_fg_test: CPU-only scheduler/credit contracts; no graphics/runtime");return 0;}
   if(argc!=2||std::strcmp(argv[1],"--self-test")!=0)return 2;
-  schedule();credits();creditGate();lifecycle();automaticPolicy();
+  schedule();credits();creditGate();lifecycle();automaticPolicy();handoffTrace();
   test::runFgCadenceCases(check);
   edvr::openxr::fgtest::runFgHudSamplingCases(check);
   edvr::openxr::fgtest::runFgUiOverlayCases(check);

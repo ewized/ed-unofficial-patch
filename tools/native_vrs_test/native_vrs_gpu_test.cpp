@@ -6,6 +6,7 @@
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -34,6 +35,14 @@ int guardFilter(unsigned long,const char*) {return EXCEPTION_EXECUTE_HANDLER;}
 // not claim a real native channel, runtime startup or physical eye tracking.
 static uint64_t providerEpoch=1;
 static bool changeEpochOnCoarse=false;
+static std::atomic<bool> fixtureCohortPending{false};
+static ID3D11DeviceContext* fixtureOwner=nullptr;
+static DWORD fixtureOwnerThread=0;
+static bool ownerDrainedBeforeReset=false;
+void drainFixtureCohort(ID3D11DeviceContext* ctx){
+    ownerDrainedBeforeReset=ctx==fixtureOwner && GetCurrentThreadId()==fixtureOwnerThread && nativeVrsStatus().coarseAcknowledged;
+    fixtureCohortPending.store(false);
+}
 NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device*,unsigned long){return {providerEpoch,1,true};}
 uint64_t nativeTemporalGazeEpoch() noexcept{
     if(changeEpochOnCoarse && nativeVrsStatus().coarseAcknowledged){
@@ -132,7 +141,7 @@ void printStatus(const char* stage){
 // axes of each material footprint alongside the original visibility proof.
 // All staging reads occur after the last issue, outside its gaze receipt.
 template<class Compile,class Rate>
-bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile compile,Rate& rate) {
+bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile compile,Rate& rate,bool grouped=false) {
     using witness_gpu::RateStep;
     constexpr UINT patch=8,stages=6;
     const char* const names[stages]={"combined_guard","split_overlap","split_coplanar",
@@ -160,7 +169,7 @@ bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile com
         }
         return rate(step,target,depth);
     };
-    const bool exact=witness_gpu::run(device,context,compile,probe,true);
+    const bool exact=witness_gpu::run(device,context,compile,probe,true,grouped);
     bool footprints=captured==(1u<<stages)-1 && preparations==5;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     hr(context->Map(samples.Get(),0,D3D11_MAP_READ,0,&mapped),"diagnostic material readback");
@@ -185,12 +194,16 @@ bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile com
             }
         }
         valid=valid && low<high;
+        if(grouped){
+            constexpr float biases[stages]={16,0,4,8,12,16};
+            valid=valid && low>biases[stage]-3 && high<biases[stage];
+        }
         footprints=footprints && valid;
-        std::printf("{\"split_material_stage\":\"%s\",\"equal_x_of_56\":%u,\"equal_y_of_56\":%u,\"range\":[%.9g,%.9g],\"footprint_exact\":%s}\n",
-            names[stage],equalX,equalY,low,high,valid?"true":"false");
+        std::printf("{\"split_material_stage\":\"%s\",\"grouped\":%s,\"equal_x_of_56\":%u,\"equal_y_of_56\":%u,\"range\":[%.9g,%.9g],\"footprint_exact\":%s}\n",
+            names[stage],grouped?"true":"false",equalX,equalY,low,high,valid?"true":"false");
     }
     context->Unmap(samples.Get(),0);
-    std::printf("{\"retained_witness_material_pixels_exact\":%s}\n",footprints?"true":"false");
+    std::printf("{\"%s\":%s}\n",grouped?"cohort_material_footprints_and_constant_updates_exact":"retained_witness_material_pixels_exact",footprints?"true":"false");
     return exact && footprints;
 }
 int run(LUID expected){
@@ -209,6 +222,11 @@ int run(LUID expected){
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL got{};
     const D3D_FEATURE_LEVEL want=D3D_FEATURE_LEVEL_11_0;
     hr(deviceFn(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,&want,1,D3D11_SDK_VERSION,&device,&got,&context),"D3D11CreateDevice");
+    ComPtr<ID3D11Multithread> threadState;hr(context.As(&threadState),"Query ID3D11Multithread");
+    threadState->SetMultithreadProtected(FALSE);
+    require(!threadState->GetMultithreadProtected(),"unprotected serialized immediate context");
+    edvr::fixtureOwner=context.Get();edvr::fixtureOwnerThread=GetCurrentThreadId();
+    edvr::nativeVrsInstallCohortBarrier(&edvr::fixtureCohortPending,&edvr::drainFixtureCohort);
     Reset reset{context.Get()};
     const char shader[]=R"HLSL(
 struct Vertex {float4 p:SV_Position;float2 uv:TEXCOORD0;};
@@ -289,7 +307,11 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const bool otherEyePrepared=edvr::nativeVrsPrepareWitness(context.Get(),1,rtv.Get(),dsv.Get(),projection,receipt);
     const bool otherEyeResumed=edvr::nativeVrsBeforeWorld(context.Get(),1,rtv.Get(),dsv.Get(),&projection,false,&receipt);
     const bool otherEyeRetained=otherEyePrepared && otherEyeResumed;
+    edvr::fixtureCohortPending.store(true);
     edvr::nativeVrsFullRate(context.Get());
+    const bool directBarrier=edvr::ownerDrainedBeforeReset && !edvr::fixtureCohortPending.load() &&
+        edvr::nativeVrsStatus().fullRateAcknowledged;
+    std::printf("{\"direct_full_rate_drains_owner_before_reset\":%s}\n",directBarrier?"true":"false");
     const auto priorEpoch=edvr::providerEpoch;
     const auto priorAccepted=edvr::nativeVrsStatus().worldAccepted;
     edvr::changeEpochOnCoarse=true;
@@ -356,19 +378,38 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     edvr::nativeVrsConfigure(true);
     uint64_t witnessFrame=3,resourceSetsAtPause=0,rateSetsAtPause=0,verifiedReactivations=0;
     bool startFrame=true,switched=false,transitionsExact=true;
+    edvr::NativeVrsCohortReceipt runReceipt;
+    unsigned heldMaterials=0;bool lateCohortRefused=false;
+    edvr::NativeVrsStatus handoffBefore{};
+    bool handoffRatesUnchanged=false;
     using witness_gpu::RateStep;
     auto witnessRate=[&](RateStep step,ID3D11RenderTargetView* c,ID3D11DepthStencilView* d){
+        using Stage=edvr::NativeVrsCohortStage;
+        auto atRate=[&](Stage stage){return edvr::nativeVrsSetCohortRate(context.Get(),0,c,d,projection,false,runReceipt,stage);};
+        if(step==RateStep::ArmHandoff){
+            edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;
+            if(!atRate(Stage::PrepareFine) || !atRate(Stage::FirstMaterial) || !edvr::nativeVrsStatus().coarseAcknowledged)return false;
+            if(!atRate(Stage::StrongFull))return false;
+            handoffBefore=edvr::nativeVrsStatus();
+            return handoffBefore.fullRateAcknowledged && !handoffBefore.coarseAcknowledged;
+        }
+        if(step==RateStep::AfterHandoff){
+            const auto after=edvr::nativeVrsStatus();
+            handoffRatesUnchanged=after.fullRateAcknowledged && after.rateSets==handoffBefore.rateSets &&
+                after.resourceSets==handoffBefore.resourceSets && after.worldAccepted==handoffBefore.worldAccepted &&
+                after.contextRefusals==handoffBefore.contextRefusals;
+            startFrame=true;return handoffRatesUnchanged;
+        }
         if(step==RateStep::BeginPass || step==RateStep::StrongFull){
             if(step==RateStep::BeginPass)startFrame=true;
             switched=false;
-            edvr::nativeVrsFullRate(context.Get());
-            const bool strong=edvr::nativeVrsStatus().fullRateAcknowledged;
+            const bool strong=atRate(Stage::StrongFull) && edvr::nativeVrsStatus().fullRateAcknowledged;
             transitionsExact=transitionsExact&&strong;return strong;
         }
         if(step==RateStep::PrepareWitness){
             if(startFrame){edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;startFrame=false;}
             const auto before=edvr::nativeVrsStatus();
-            if(!edvr::nativeVrsPrepareWitness(context.Get(),0,c,d,projection,receipt))return false;
+            if(!atRate(Stage::PrepareFine))return false;
             const auto fine=edvr::nativeVrsStatus();
             switched=before.coarseAcknowledged;
             resourceSetsAtPause=before.resourceSets;
@@ -377,7 +418,21 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
                 (switched?(!fine.fullRateAcknowledged && fine.resourceSets==resourceSetsAtPause &&
                            fine.rateSets==rateSetsAtPause+1):fine.fullRateAcknowledged);
         }
-        if(!edvr::nativeVrsBeforeWorld(context.Get(),0,c,d,&projection,false,&receipt))return false;
+        if(step==RateStep::ContinueMaterial || step==RateStep::ExpireMaterial){
+            const auto before=edvr::nativeVrsStatus();
+            if(step==RateStep::ExpireMaterial){++edvr::providerEpoch;startFrame=true;}
+            const bool accepted=atRate(Stage::NextMaterial);
+            const auto after=edvr::nativeVrsStatus();
+            if(step==RateStep::ExpireMaterial){
+                lateCohortRefused=!accepted && after.worldAccepted==before.worldAccepted && after.fullRateAcknowledged;
+                return lateCohortRefused;
+            }
+            const bool held=accepted && after.coarseAcknowledged && after.worldAccepted==before.worldAccepted+1 &&
+                after.rateSets==before.rateSets && after.resourceSets==before.resourceSets;
+            if(held)++heldMaterials;
+            return held;
+        }
+        if(!atRate(Stage::FirstMaterial))return false;
         if(switched){
             const auto resumed=edvr::nativeVrsStatus();
             transitionsExact=transitionsExact && resumed.coarseAcknowledged &&
@@ -387,13 +442,18 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
         return true;
     };
     const bool witnessPixels=verifyWitness(device.Get(),context.Get(),compileFn,witnessRate);
+    const bool cohortPixels=verifyWitness(device.Get(),context.Get(),compileFn,witnessRate,true);
     edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),++witnessFrame);
     const auto witnessOff=edvr::nativeVrsStatus();
     const bool witness=witnessPixels && transitionsExact && verifiedReactivations>=2 && witnessOff.fullRateAcknowledged &&
         witnessOff.retainedWitnessReactivations-finalStatus.retainedWitnessReactivations==verifiedReactivations;
     std::printf("{\"verified_same_eye_witness_reactivations\":%llu,\"transitions_exact\":%s}\n",verifiedReactivations,transitionsExact?"true":"false");
     std::printf("{\"split_sloped_overlap_coplanar_depth_stencil_slot_skin_exact\":%s}\n",witness?"true":"false");
-    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&uniformWitness&&otherEyeRetained&&witness&&receiptRefusals&&lateEpochRefused;
+    const bool cohort=cohortPixels && heldMaterials==2 && lateCohortRefused && handoffRatesUnchanged && directBarrier;
+    std::printf("{\"handoff_no_vendor_setters_or_owner_transfer\":%s}\n",handoffRatesUnchanged?"true":"false");
+    std::printf("{\"cohort_ordered_motion_skin_depth_stencil_and_refusal_exact\":%s,\"coarse_continuations_without_setters\":%u,\"cohort_midrun_epoch_refused\":%s}\n",
+        cohort?"true":"false",heldMaterials,lateCohortRefused?"true":"false");
+    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&uniformWitness&&otherEyeRetained&&witness&&receiptRefusals&&lateEpochRefused&&cohort;
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");

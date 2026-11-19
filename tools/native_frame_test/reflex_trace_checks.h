@@ -21,6 +21,13 @@ template<class Check> void run(Check check) {
     traceObserver.store(nullptr, std::memory_order_release);
     traceDrawIssued(nullptr, nullptr, 3, 1);
     check(issuedDraws == 1, "a sealed or disabled capture does not query draw targets");
+    TraceAddresses<2> watched;
+    check(!watched.find(0, true) && !watched.find(7), "unknown camera addresses stay unregistered on a lookup");
+    std::thread registration([&] { watched.find(7, true); });
+    const bool registered = watched.find(7, true);
+    registration.join();
+    check(registered && watched.find(7) && watched.find(8, true), "duplicate concurrent registrations preserve capacity");
+    check(!watched.find(9, true) && watched.find(8) && watched.find(7), "a full capture preserves prior camera addresses");
     TraceBuffer<int, 2> limited;
     check(!limited.readable(0), "an unreserved trace slot is unreadable");
     check(limited.append(17) == 1 && limited.append(42) == 2, "trace tickets name distinct rows");

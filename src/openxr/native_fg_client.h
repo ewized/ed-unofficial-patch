@@ -3,6 +3,7 @@
 #include "eye_capture.h"
 #include "native_trace.h"
 #include "native_fg_import_pins.h"
+#include "native_fg_handoff_trace.h"
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -83,18 +84,30 @@ class NativeFgClient final {
   // A pending, not-yet-signalled provider fence is held without a GPU wait.
   // Once ready, each aliased source is opened/validated before ANY GPU read.
   HRESULT poll(uint64_t generation,uint64_t reference,uint64_t config,unsigned multiplier,
-               uint32_t width,uint32_t height,XrTime now) {
+               uint32_t width,uint32_t height,XrTime now,fghandoff::Poll* observation=nullptr) {
+    const auto note=[&](fghandoff::Import outcome,uint64_t source=0,XrTime poseTime=0) {
+      if(observation)*observation={outcome,source,poseTime};
+    };
+    note(fghandoff::Import::Rejected);
     if(quarantined_)return E_PENDING;
     if(!onOwner()||!table_.context||!device_)return S_FALSE;
     if(!nativeFgFixedMultiplier(multiplier))return E_INVALIDARG;
-    const HRESULT collected=collectImportPins();if(collected!=S_OK)return collected;
+    const HRESULT collected=collectImportPins();
+    if(collected!=S_OK) {
+      if(collected==S_FALSE)note(fghandoff::Import::RetirementWait,pending_.currentSequence,pending_.currentPoseDisplayTime);
+      return collected;
+    }
     if(images_.ready)return S_FALSE;
     if(!pending_.token) {
       pending_={sizeof(pending_),EDVR_FG_BATCH_VERSION_3};
       const HRESULT hr=table_.poll(table_.context,&pending_);
-      if(hr!=S_OK){pending_={};return hr;}
+      if(hr!=S_OK){
+        if(hr==S_FALSE)note(fghandoff::Import::ProviderNoBatch);
+        pending_={};return hr;
+      }
     }
     const auto& b=pending_;
+    note(fghandoff::Import::Rejected,b.currentSequence,b.currentPoseDisplayTime);
     const unsigned full=(1u<<multiplier)-1u;
     if(b.size!=sizeof(b)||b.version!=EDVR_FG_BATCH_VERSION_3||!b.token||
        b.generation!=generation||b.referenceGeneration!=reference||b.configGeneration!=config||!b.historyGeneration||
@@ -110,13 +123,13 @@ class NativeFgClient final {
        (b.uiFlags&&(!b.generatedCount||!b.uiTextures[0]||!b.uiTextures[1]))||
        (b.uiFlags&&(!b.nativeWorldTextures[0]||!b.nativeWorldTextures[1]))||
        (!b.uiFlags&&(b.uiTextures[0]||b.uiTextures[1]||b.nativeWorldTextures[0]||b.nativeWorldTextures[1])))return reject(E_INVALIDARG);
-    if(b.currentPoseDisplayTime>now)return S_FALSE;
+    if(b.currentPoseDisplayTime>now){note(fghandoff::Import::Future,b.currentSequence,b.currentPoseDisplayTime);return S_FALSE;}
     if(retiredValue_>=UINT64_MAX-1)return reject(E_UNEXPECTED);
     Microsoft::WRL::ComPtr<ID3D11Fence> ready;
     HRESULT hr=device5_->OpenSharedFence(b.readyFence,IID_PPV_ARGS(&ready));if(FAILED(hr))return reject(hr);
     const uint64_t completed=ready->GetCompletedValue();
     if(completed==UINT64_MAX)return reject(DXGI_ERROR_DEVICE_REMOVED);
-    if(completed<b.readyValue)return S_FALSE;
+    if(completed<b.readyValue){note(fghandoff::Import::FenceWait,b.currentSequence,b.currentPoseDisplayTime);return S_FALSE;}
     if(!importPins_.begin(Microsoft::WRL::ComPtr<IUnknown>(ready.Get())))return E_PENDING;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> inputs[EDVR_FG_MAX_PHASES][2];
     Microsoft::WRL::ComPtr<ID3D11Texture2D> nativeUi[2];
@@ -201,7 +214,8 @@ class NativeFgClient final {
         (unsigned long long)batch.historyGeneration,(unsigned long long)value);
       notedBatch_=true;if(batch.generatedCount)notedGenerated_=true;
     }
-    images_.next=images_.metadata.generatedCount?1u:0u;images_.ready=true;return S_OK;
+    images_.next=images_.metadata.generatedCount?1u:0u;images_.ready=true;
+    note(fghandoff::Import::Imported,images_.metadata.currentSequence,images_.metadata.currentPoseDisplayTime);return S_OK;
   }
   Images& images(){return images_;}
   // Nonblocking owner-side collection, including status calls while FG is Off.

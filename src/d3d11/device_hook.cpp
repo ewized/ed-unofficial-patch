@@ -10,6 +10,9 @@
 #include "native_vrs_material_receipt.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
+#include "../common/native_witness_drain.h"
+#include "../common/module_pin.h"
+#include "../common/system_d3d11.h"
 
 #include "weapon_motion.h"
 #include "flat_overlay_layer.h"
@@ -167,6 +170,7 @@ constexpr size_t kDevCreateDsv           = 10;
 constexpr size_t kDevCreateSlots         = 11;
 
 constexpr size_t kSwapPresent            = 8;
+constexpr size_t kSwapPresent1           = 22;
 constexpr size_t kSwapResizeBuffers = 13, kSwapResizeBuffers1 = 39;
 constexpr size_t kFactoryCreateSwapChain = 10;
 constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
@@ -191,6 +195,7 @@ typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSamplerState)(
 typedef HRESULT(STDMETHODCALLTYPE* PFN_DevCreate)(ID3D11Device*, const void*,
                                                   const void*, void**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Present)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_Present1)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_ResizeBuffers1)(IDXGISwapChain3*, UINT, UINT, UINT, DXGI_FORMAT, UINT, const UINT*, IUnknown* const*);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateSwapChain)(IDXGIFactory*, IUnknown*,
@@ -226,7 +231,10 @@ PFN_GetLastPresentCount g_realGetLastPresentCount = nullptr;
 PFN_GetFullscreenDesc g_realGetFullscreenDesc = nullptr;
 PFN_GetHwnd g_realGetHwnd = nullptr;
 
+bool drainSwapChainWitness(IDXGISwapChain* chain) noexcept;
+
 HRESULT STDMETHODCALLTYPE hookedFgSetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
+    if (!drainSwapChainWitness(self)) return DXGI_ERROR_WAS_STILL_DRAWING;
     return xessFgOwns(self) ? xessFgSetFullscreenState(fullscreen, target) : g_realSetFullscreenState(self, fullscreen, target);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetFullscreenState(IDXGISwapChain* self, BOOL* fullscreen, IDXGIOutput** target) {
@@ -242,6 +250,7 @@ HRESULT STDMETHODCALLTYPE hookedFgGetDesc(IDXGISwapChain* self, DXGI_SWAP_CHAIN_
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedFgResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
+    if (!drainSwapChainWitness(self)) return DXGI_ERROR_WAS_STILL_DRAWING;
     return xessFgOwns(self) ? xessFgResizeTarget(mode) : g_realResizeTarget(self, mode);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetContainingOutput(IDXGISwapChain* self, IDXGIOutput** output) {
@@ -281,6 +290,9 @@ struct State {
 
     ID3D11Device*   device = nullptr;
     IDXGISwapChain* swapChain = nullptr;
+    // Borrowed from the installed native device; never queried from a foreign
+    // swap-chain hook or dereferenced to recover an unknown context.
+    ID3D11DeviceContext* witnessContext = nullptr;
     // The factory we hooked, as an identity token only: compared, never
     // dereferenced, and no reference is held (the factory is released right
     // after hooking, as it always was). Patching entries in place hooks every
@@ -351,6 +363,7 @@ struct State {
     size_t flatProbeShaderBytes = 0;
     uint32_t flatProbeShaderDrops = 0;
     PFN_Present      realPresent = nullptr;
+    PFN_Present1     realPresent1 = nullptr;
     PFN_ResizeBuffers realResizeBuffers = nullptr;
     PFN_ResizeBuffers1 realResizeBuffers1 = nullptr;
     PFN_CreateSwapChain        realCreateSwapChain = nullptr;
@@ -555,6 +568,26 @@ std::atomic<bool> g_configRefreshRequested{false};
 constexpr uint32_t kMissedDumpNotes = 3;
 
 State* g_state = nullptr;
+
+bool drainSwapChainWitness(IDXGISwapChain* chain) noexcept {
+    return !g_state || chain != g_state->swapChain || !g_state->witnessContext ||
+           nativeWitnessDrain(g_state->witnessContext);
+}
+
+bool beforeSwapChainReplacement() noexcept {
+    if (!g_state->swapChain || !g_state->witnessContext) return true;
+    // Factory calls need not run on the immediate-context thread. Without
+    // that serialized context boundary, a foreign caller may only observe.
+    return nativeWitnessDrain();
+}
+
+HRESULT STDMETHODCALLTYPE hookedWitnessPresent1(IDXGISwapChain1* self, UINT syncInterval, UINT flags,
+                                                 const DXGI_PRESENT_PARAMETERS* parameters) {
+    if ((flags & DXGI_PRESENT_TEST) == 0 && !drainSwapChainWitness(self))
+        return DXGI_ERROR_WAS_STILL_DRAWING;
+    // Leave Present1 data and the existing flat/FG routing untouched.
+    return g_state->realPresent1(self, syncInterval, flags, parameters);
+}
 
 // Which slot the flip timeline anchors its page on.
 //
@@ -1263,6 +1296,7 @@ void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_F
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    if (!drainSwapChainWitness(self)) return DXGI_ERROR_WAS_STILL_DRAWING;
     // The XeSS-FG bridge (xess_fg.h): the hidden swap chain sizes from the real window, and the proxy follows it, in
     // either profile.
     const bool bridged = xessFgOwns(self);
@@ -1282,6 +1316,7 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT cou
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
+    if (!drainSwapChainWitness(self)) return DXGI_ERROR_WAS_STILL_DRAWING;
     const bool bridged = xessFgOwns(static_cast<IDXGISwapChain*>(self));
     if (bridged) xessFgBeforeResize(&width, &height);
     if (!runtimeFlatProfile()) {
@@ -1888,6 +1923,8 @@ void presentFrameBoundary() {
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
+    if ((flags & DXGI_PRESENT_TEST) == 0 && !drainSwapChainWitness(self))
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     // The hook's entry, one clock read for both clocks that want it: the runtime's
     // Present trace (microseconds) and the frame-tick chain (frame_ticks.h).
     const int64_t hookEnter = self == g_state->swapChain ? qpcNow() : 0;
@@ -2134,6 +2171,8 @@ bool createBridged(void* factory, IUnknown* device, HWND realWindow, UINT width,
 HRESULT STDMETHODCALLTYPE hookedCreateSwapChain(IDXGIFactory* self, IUnknown* device,
                                                 DXGI_SWAP_CHAIN_DESC* desc,
                                                 IDXGISwapChain** out) {
+    if (self == g_state->factory && device == g_state->device && !beforeSwapChainReplacement())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     HRESULT bridged = E_FAIL;
     if (desc && createBridged(self, device, desc->OutputWindow, desc->BufferDesc.Width, desc->BufferDesc.Height,
                               desc->BufferDesc.Format, !desc->Windowed, out, &bridged,
@@ -2161,6 +2200,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
     IDXGIFactory2* self, IUnknown* device, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* restrictTo,
     IDXGISwapChain1** out) {
+    if (static_cast<void*>(self) == g_state->factory && device == g_state->device && !beforeSwapChainReplacement())
+        return DXGI_ERROR_WAS_STILL_DRAWING;
     HRESULT bridged = E_FAIL;
     if (desc && createBridged(static_cast<void*>(self), device, hwnd, desc->Width, desc->Height, desc->Format,
                               fs && !fs->Windowed, out, &bridged,
@@ -3059,11 +3100,25 @@ void hookDevice(ID3D11Device* device) {
     // (see device_hook.h). GetImmediateContext returns the same context each
     // time, so this is that context; released right after, identity only.
     HookMode ctxMode = HookMode::InPlace;
+    bool nativeImmediateImplementation = false;
     {
         ID3D11DeviceContext* ctx = nullptr;
         device->GetImmediateContext(&ctx);
         if (ctx) {
             ctxMode = contextHookModeFor(ctx);
+            // A forceable hook mode is not evidence of native ownership.
+            // Capture this before exposure or vScreen publishes a new vptr.
+            const auto mode = Config::get().getString("advanced.context_hook_mode", "auto");
+            if (runtimeScopeIncludesVr() && ctxMode == HookMode::LiveCopy && _stricmp(mode.c_str(), "auto") == 0) {
+                const auto system = chooseSystemD3D11(static_cast<HMODULE>(systemD3D11Module()));
+                void** table = nullptr;
+                constexpr size_t kWitnessNativeSlots = 96;
+                nativeImmediateImplementation = system.verified &&
+                    guarded("device/witness-context-identity", [&] { table = *reinterpret_cast<void***>(ctx); }) &&
+                    vtableInsideModule(table, system.module) &&
+                    vtableEntriesInModule(table, kWitnessNativeSlots, system.module) == kWitnessNativeSlots;
+                if (nativeImmediateImplementation) s.witnessContext = ctx;
+            }
 
             // The multithread-protection probe, opened here because this is
             // where the immediate context is already in hand. Asked of the
@@ -3215,7 +3270,7 @@ void hookDevice(ID3D11Device* device) {
             // from vScreen's Map and Unmap -- so nothing else depends on the
             // order.
             installGlitchFrameFix();
-            installVScreenFixes(device, ctxMode);
+            installVScreenFixes(device, ctxMode, nativeImmediateImplementation);
             // visual.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
             // own install does it too when it has a State; this call does not depend on that and is idempotent beside it.
             if (runtimeFlatProfile()) introSkipConfigure(Config::get());
@@ -3326,6 +3381,24 @@ void forceWindowForeground(HWND hwnd) {
 namespace {
 // Cleared only by a VR launch whose ResizeBuffers hook failed. Without that hook a switch into flat runs passthrough.
 std::atomic<bool> g_flatSwitchAvailable{true};
+
+// Only a System32 DXGI chain can prove these interfaces use the very table
+// being hooked here. Never probe wrapper QI: it can unwrap its Present owner.
+bool witnessSwapChainAliases(IDXGISwapChain* chain, ID3D11Device* expectedDevice) {
+    IDXGISwapChain1* first = nullptr;
+    IDXGISwapChain3* third = nullptr;
+    IDXGISwapChain4* fourth = nullptr;
+    ID3D11Device* device = nullptr;
+    const bool same = SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&first))) && first == chain &&
+                      SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&third))) && third == chain &&
+                      SUCCEEDED(chain->QueryInterface(IID_PPV_ARGS(&fourth))) && fourth == chain &&
+                      SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device))) && device == expectedDevice;
+    if (device) device->Release();
+    if (fourth) fourth->Release();
+    if (third) third->Release();
+    if (first) first->Release();
+    return same;
+}
 }
 bool flatSwitchAvailable() { return g_flatSwitchAvailable.load(std::memory_order_relaxed); }
 
@@ -3339,6 +3412,8 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         // kept so a repeat of the same one logs nothing.
         static IDXGISwapChain* lastUnhooked = nullptr;
         if (swapChain != s.swapChain && swapChain != lastUnhooked) {
+            // Whichever chain takes over, its lifecycle has not been proven.
+            if (s.witnessContext) vScreenSetWitnessCohortLifecycleCoverage(s.witnessContext, false);
             lastUnhooked = swapChain;
             Log::get().note("swap chain: a new swap chain %p after %p is not hooked (H7)", static_cast<void*>(swapChain),
                             static_cast<void*>(s.swapChain));
@@ -3351,8 +3426,15 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         s.swapChainHook.uninstall();
         return;
     }
-    s.swapChainHook.replace(kSwapPresent, &hookedPresent,
-                            reinterpret_cast<void**>(&s.realPresent));
+    const bool present = s.swapChainHook.replace(kSwapPresent, &hookedPresent,
+                                                  reinterpret_cast<void**>(&s.realPresent));
+    const auto witness = vScreenWitnessContext(s.witnessContext);
+    const bool nativeLifecycle = s.witnessContext && witness.ownerThread && witness.barriersInstalled &&
+        graphicsModulePinned() && nativeWitnessDrainInstalled() && !xessFgOwns(swapChain) &&
+        s.swapChainHook.executablePrefix() > kSwapResizeBuffers1 &&
+        swapChainResize1ProbeSafe(s.swapChainHook.originalVTable()[kSwapPresent]) &&
+        witnessSwapChainAliases(swapChain, s.device);
+    bool nativeSwapHooks = false;
     if (runtimeScopeIncludesFlat()) {
         const bool resize = s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
             reinterpret_cast<void**>(&s.realResizeBuffers));
@@ -3379,6 +3461,19 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             g_flatSwitchAvailable.store(false, std::memory_order_relaxed);
             Log::get().note("flat runtime resize hooks: ResizeBuffers could not be hooked; a switch into the flat profile will run passthrough this session");
         }
+    }
+    if (nativeLifecycle) {
+        const bool resize = s.realResizeBuffers || s.swapChainHook.replace(kSwapResizeBuffers, &hookedFlatResizeBuffers,
+            reinterpret_cast<void**>(&s.realResizeBuffers));
+        const bool resize1 = s.realResizeBuffers1 || s.swapChainHook.replace(kSwapResizeBuffers1, &hookedFlatResizeBuffers1,
+            reinterpret_cast<void**>(&s.realResizeBuffers1));
+        const bool present1 = s.swapChainHook.replace(kSwapPresent1, &hookedWitnessPresent1,
+            reinterpret_cast<void**>(&s.realPresent1));
+        const bool fullscreen = s.swapChainHook.replace(kSwapSetFullscreenState, &hookedFgSetFullscreenState,
+            reinterpret_cast<void**>(&g_realSetFullscreenState));
+        const bool target = s.swapChainHook.replace(kSwapResizeTarget, &hookedFgResizeTarget,
+            reinterpret_cast<void**>(&g_realResizeTarget));
+        nativeSwapHooks = present && resize && resize1 && present1 && fullscreen && target;
     }
     if (xessFgOwns(swapChain)) {
         // The bridged swap chain's window and present queries (see hookedFgGetDesc). Its Present and resizes already go
@@ -3417,6 +3512,8 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         return;
     }
     s.swapChain = swapChain;
+    if (nativeSwapHooks && nativeWitnessDrainInstalled())
+        vScreenSetWitnessCohortLifecycleCoverage(s.witnessContext, true);
     Log::get().note("Present hook installed");
     {
         DXGI_SWAP_CHAIN_DESC windowDesc{};
@@ -3584,6 +3681,11 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    // FreeLibrary may call here under the loader lock. An admitted renderer
+    // must be process-pinned; never try to replay GPU commands from detach.
+    if (g_state && g_state->witnessContext)
+        vScreenSetWitnessCohortLifecycleCoverage(g_state->witnessContext, false);
+    if (!vScreenWitnessCohortDrained()) return;
     storeHookSetFlatWorldProbe(false,0);
     flatWorldWitnessShutdown();
     flatTemporalStop();

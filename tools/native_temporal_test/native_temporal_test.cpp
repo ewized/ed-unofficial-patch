@@ -12,6 +12,7 @@
 #include <chrono>
 #include <vector>
 #include "../../src/common/native_temporal.h"
+#include "../../src/common/native_witness_drain.h"
 #include "../../src/common/config.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/temporal_mode.h"   // the map gate's pass verdict bits and flag (temporalMapStillBits, kTemporalFlagMapKeep)
@@ -181,8 +182,9 @@ EdvrNativeTemporalFrame frame(uint64_t generation,uint64_t sequence){
   for(unsigned e=0;e<2;++e){f.eyeToHead[e][0]=f.eyeToHead[e][5]=f.eyeToHead[e][10]=1;f.eyeToHead[e][3]=e?.032f:-.032f;
     f.frusta[e][0]=e?-.8f:-1.2f;f.frusta[e][1]=e?1.4f:.7f;f.frusta[e][2]=-.9f;f.frusta[e][3]=1.1f;}return f;
 }
-EdvrNativeTemporalTable acquire(Device& d,uint64_t generation,const char* mode="on"){
-  edvr::Config::get().set("fix.temporal_aa",mode);EdvrNativeTemporalRequest r{sizeof(r),1,d.device.Get(),generation};EdvrNativeTemporalTable t{sizeof(t),1};
+EdvrNativeTemporalTable acquire(Device& d,uint64_t generation,const char* mode="on",uint32_t version=1){
+  const uint32_t size=version==2?uint32_t(sizeof(EdvrNativeTemporalTable)):EDVR_NATIVE_TEMPORAL_TABLE_V1_SIZE;
+  edvr::Config::get().set("fix.temporal_aa",mode);EdvrNativeTemporalRequest r{sizeof(r),version,d.device.Get(),generation};EdvrNativeTemporalTable t{size,version};
   require(edvrAcquireNativeTemporal(&r,&t)==S_OK,"acquire");return t;
 }
 EdvrNativeTemporalProjection begin(EdvrNativeTemporalTable& t,const EdvrNativeTemporalFrame& f,bool project=true){
@@ -511,7 +513,37 @@ void run(){
   warmDev=reinterpret_cast<ID3D11Device*>(1);warmThread=1;
   check(!edvr::nativeTemporalWarmTarget(&warmDev,&warmThread),"no warm target once the channel closes");
   {uint32_t rw=0,rh=0;float u=0,dn=0;check(!edvr::nativeTemporalRecommended(&rw,&rh)&&!edvr::nativeTemporalVerticalTangents(&u,&dn)&&!edvr::nativeTemporalAsked(&rw,&rh)&&!edvr::nativeTemporalTrueVerticalTangents(&u,&dn),"no recommendation, frustum, ask or true frustum once the channel closes");}
-  auto fresh=acquire(d,12);f=frame(12,1);begin(fresh,f);check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
+  auto fresh=acquire(d,12,"on",EDVR_NATIVE_TEMPORAL_VERSION_2);f=frame(12,1);
+  {
+    static bool allow=false,warm=false;
+    static unsigned drains=0;
+    static uint64_t sequence=0;
+    static ID3D11DeviceContext* identity=nullptr;
+    edvr::setNativeWitnessDrain([](ID3D11DeviceContext* ctx) noexcept {
+      ++drains;identity=ctx;sequence=edvr::nativeTemporalFrameSequence();
+      warm=edvr::nativeTemporalWarmTarget(nullptr,nullptr); // takes the provider mutex
+      return allow;
+    });
+    EdvrNativeTemporalProjection out{sizeof(out),EDVR_NATIVE_TEMPORAL_VERSION_1};
+    check(fresh.beginFrame(fresh.context,&f,&out)==E_PENDING&&sequence==0&&
+          edvr::nativeTemporalFrameSequence()==0&&identity==d.context.Get()&&warm,
+          "producer drain sees the original sequence and actual context before publishing a frame");
+    allow=true;begin(fresh,f);
+    check(sequence==0&&edvr::nativeTemporalFrameSequence()==1,"drained retry publishes the same frame");
+    allow=false;
+    const auto count=calls.size();
+    check(treat(fresh,1,0,source.Get())==E_PENDING&&calls.size()==count&&
+          fresh.skipEye(fresh.context,1,0,0,0)==E_PENDING&&
+          fresh.invalidate(fresh.context)==E_PENDING&&fresh.close(fresh.context)==E_PENDING&&
+          drains==6&&sequence==1&&edvr::nativeTemporalFrameSequence()==1,
+          "refused drain leaves stereo input unread, sequence intact and channel active");
+    HRESULT foreign=E_FAIL;
+    std::thread owner([&]{foreign=fresh.invalidate(fresh.context);});owner.join();
+    check(foreign==E_PENDING&&identity==nullptr&&drains==7,
+          "foreign lifecycle calls cannot pass the producer's GPU context");
+    edvr::setNativeWitnessDrain(nullptr);
+  }
+  check(treat(t,1,0,source.Get())==E_INVALIDARG,"stale table cannot address new generation");
   check(fresh.skipEye(fresh.context,1,0,0,0)==S_OK&&fresh.skipEye(fresh.context,1,1,0,0)==S_OK&&
         !edvr::nativeTemporalGazeEpoch()&&!edvr::nativeTemporalGazeReadiness(d.device.Get(),GetCurrentThreadId()).ready,
         "actual skipped stereo eyes cannot establish the successful-output milestone");
@@ -546,11 +578,35 @@ void run(){
   check(treat(fresh,4,1,source.Get())==S_FALSE&&offAaDepthNotes==depthBase+2&&offAaDepthEye==1&&closeFloat(offAaDepthNear,.025f),"F202: and for the right eye, the one the lens reads");
   f=frame(12,5);p=begin(fresh,f,false);const unsigned depth0=offAaDepthNotes;
   check(treat(fresh,5,1,source.Get())==S_FALSE&&offAaDepthNotes==depth0+1&&closeFloat(offAaDepthNear,.025f),"F202: a frame the game made no matrix query in hands the depth step the last near plane, so the lens is not left without one");
+  const auto owner=edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),5);
+  check(owner&&fresh.vrsFailures&&fresh.vrsFailures(fresh.context,5)==0,"V2 owner enrolls exact immediate context and sequence");
+  bool foreign=false,foreignStale=false;uint64_t foreignEnrollment=0;
+  std::thread other([&]{
+    foreignEnrollment=edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),5);
+    foreignStale=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner,4);
+    foreign=edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),1,owner,5);
+  });other.join();
+  check(!foreignEnrollment&&!foreignStale&&foreign,
+    "foreign notification can mark the exact enrolled source but cannot enroll or mark an older one");
+  check(!edvr::nativeTemporalInvalidateVrsEye(nullptr,0,owner,5)&&
+        !edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner+1,5)&&
+        !edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),2,owner,5),"wrong context, generation and eye cannot poison a frame");
+  check(edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),1,owner,5)&&
+        fresh.vrsFailures(fresh.context,5)==2&&fresh.vrsFailures(fresh.context,4)==0&&
+        !edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),5),"failed eye disables batching for this exact stereo source");
+  check(treat(fresh,5,0,source.Get())==E_ABORT&&offAaDepthNotes==depth0+1,
+    "incomplete source cannot passthrough raw AA-off pixels or publish history");
+  f=frame(12,6);begin(fresh,f);
+  check(!edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner,5)&&
+        !fresh.vrsFailures(fresh.context,6)&&treat(fresh,6,0,source.Get())==S_FALSE,
+        "late frame cannot poison next complete source");
   check(fresh.close(fresh.context)==S_OK,"fresh close");
+  check(!edvr::nativeTemporalInvalidateVrsEye(d.context.Get(),0,owner,6),"closed output owner cannot accept a callback");
   check(!edvr::nativeTemporalGazeEpoch(),"AA-Off pass-through never publishes gaze readiness");
   edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Quality);
   edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Quality,1.f);ngxEvaluated=true;
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);
+  check(!edvr::nativeTemporalVrsOutputGeneration(d.context.Get(),1),"V1 pairing never authorizes batch replay");
   const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes;
   check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");
   check(edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,"one NGX eye cannot confirm a stereo quality preset");
@@ -634,6 +690,11 @@ void run(){
   }
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
   require(client.acquire(GetModuleHandleW(nullptr),d.device.Get(),15)==S_OK,"actual client validates provider table");
+  check(!client.fgHandoffTraceRequested(),"FG handoff diagnostic defaults off");
+  edvr::Config::get().set("log.fg_handoff_trace","on");
+  check(client.fgHandoffTraceRequested(),"authoritative config enables the owner diagnostic live");
+  edvr::Config::get().set("log.fg_handoff_trace","off");
+  check(!client.fgHandoffTraceRequested(),"new config generation clears the owner diagnostic");
   edvr::openxr::GeometryInput g{};g.generation=1;g.sequence=1;g.displayTime=1;g.headPose.orientation.w=1;
   g.headFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;g.viewFlags=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
   for(unsigned e=0;e<2;++e){g.views[e].pose.orientation.w=1;g.views[e].pose.position.x=e?.03f:-.03f;g.views[e].fov={-.8f,.7f,.7f,-.6f};g.width[e]=480;g.height[e]=360;}

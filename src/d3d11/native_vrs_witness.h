@@ -14,17 +14,17 @@ struct WitnessMirror {
 };
 struct WitnessCounts {uint64_t paired=0,copies=0,reused=0,stateRefused=0,shaderRefused=0,queryRefused=0,rateRefused=0;};
 
-// Runs both halves synchronously with unchanged IA, vertex processing, viewport,
-// rasterizer, OM blend, depth function and stencil reference. No mutation is
-// made until every non-rate prerequisite is proven. After the fine issue the
-// material must be issued even if coarse activation fails: its marker exists.
+// Replay ordered fine witnesses against their private DSV before committing
+// any scene material. Every draw in this synchronous span shares its exact
+// inputs and state. A refused coarse issue switches the entire remaining
+// suffix to combined full rate against the correctly evolved scene DSV.
 template<class Api,class Draw,class Coarse>
-bool splitWitness(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
+bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
     ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,ID3D11VertexShader* vertex,
     ID3D11PixelShader* combined,ID3D11PixelShader* fine,ID3D11PixelShader* material,ID3D11BlendState* blend,
-    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,Draw draw,Coarse coarse) {
+    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,unsigned length,Draw draw,Coarse coarse) {
     auto refuse=[&]{++counts.stateRefused;return false;};
-    if(!ctx||!color||!depth||!slots||!vertex||!combined||!fine||!material||!blend)return refuse();
+    if(!length||!ctx||!color||!depth||!slots||!vertex||!combined||!fine||!material||!blend)return refuse();
     WitnessPtr<ID3D11Device> device;ctx->GetDevice(&device);
     WitnessPtr<ID3D11VertexShader> vs;WitnessPtr<ID3D11PixelShader> ps;
     UINT vc=0,pc=0;ctx->VSGetShader(&vs,nullptr,&vc);ctx->PSGetShader(&ps,nullptr,&pc);
@@ -69,20 +69,32 @@ bool splitWitness(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* colo
         api.targets(0,nullptr,nullptr);
         api.copy(mirror.texture.Get(),source.Get());++counts.copies;
     }else ++counts.reused;
+    counts.reused+=length-1; // later witnesses evolve the same depth/stencil mirror in order
     api.targets(8,outputs,mirror.view.Get());
     struct Restore {
         Api& api;ID3D11RenderTargetView** rt;ID3D11DepthStencilView* depth;ID3D11PixelShader* ps;
         ~Restore(){api.targets(8,rt,depth);api.pixel(ps);}
     } restore{api,rt,depth,combined};
-    api.pixel(fine);draw(false);
+    api.pixel(fine);
+    for(unsigned i=0;i<length;++i)draw(i,false);
     api.targets(6,rt,depth);api.pixel(material);
-    if(!coarse()){
-        // A producer or driver can refuse between the two issues. Reinstate
-        // the combined full-rate draw against the untouched original depth.
-        // MRT6 and E use replacement writes, so this re-certifies visible pixels.
-        ++counts.rateRefused;mirror.reusable=false;
-        api.targets(8,rt,depth);api.pixel(combined);draw(true);return true;
+    for(unsigned i=0;i<length;++i){
+        if(!coarse(i)){
+            counts.rateRefused+=length-i;mirror.reusable=false;
+            api.targets(8,rt,depth);api.pixel(combined);
+            for(;i<length;++i)draw(i,true);
+            return true;
+        }
+        draw(i,true);++counts.paired;
     }
-    draw(true);++counts.paired;mirror.epoch=epoch;mirror.draw=drawNumber;mirror.reusable=true;return true;
+    mirror.epoch=epoch;mirror.draw=drawNumber+length-1;mirror.reusable=true;return true;
+}
+template<class Api,class Draw,class Coarse>
+bool splitWitness(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
+    ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,ID3D11VertexShader* vertex,
+    ID3D11PixelShader* combined,ID3D11PixelShader* fine,ID3D11PixelShader* material,ID3D11BlendState* blend,
+    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,Draw draw,Coarse coarse) {
+    return splitWitnessRun(api,ctx,color,depth,slots,skin,vertex,combined,fine,material,blend,mirror,epoch,drawNumber,
+        reuseAllowed,counts,1,[&](unsigned,bool m){draw(m);},[&](unsigned){return coarse();});
 }
 }

@@ -1,14 +1,16 @@
 #pragma once
 #include "../../src/d3d11/native_vrs_witness.h"
+#include "../../src/d3d11/native_vrs_witness_state.h"
 #include "../../src/d3d11/dxbc_engine_velocity.h"
 #include "witness_pixel_reference.h"
 #include <d3dcompiler.h>
 #include <vector>
 #include <cstdio>
+#include <thread>
 
 namespace witness_gpu {
 using Microsoft::WRL::ComPtr;
-enum class RateStep {BeginPass,PrepareWitness,Material,StrongFull};
+enum class RateStep {BeginPass,PrepareWitness,Material,ContinueMaterial,ExpireMaterial,ArmHandoff,AfterHandoff,StrongFull};
 inline bool failure(int line){
     std::fprintf(stderr,"witness_gpu_cases.h line %d failed\n",line);return false;
 }
@@ -24,7 +26,7 @@ inline bool pixelFailure(const char* assertion,unsigned x,unsigned y,float owner
 // Both backends drive the same splitWitness and exact production DXBC tail.
 // WARP compares material too; the physical GPU must change only that output.
 template<class Compile,class Rate>
-bool run(ID3D11Device* dev,ID3D11DeviceContext* ctx,Compile compile,Rate rate,bool hardware) {
+bool run(ID3D11Device* dev,ID3D11DeviceContext* ctx,Compile compile,Rate rate,bool hardware,bool grouped=false) {
     constexpr UINT side=256;
     struct Targets {
         ComPtr<ID3D11Texture2D> tex[4];
@@ -53,8 +55,9 @@ V vs(uint vertex:SV_VertexID){
  V o;o.pos=float4(xy,0.375+xy.x*0.0625+xy.y*0.125+(triIndex==2?0.25:triIndex>=4?0.125:0),1);
  o.slot=triIndex>=4?6:triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
 }
+cbuffer Material : register(b0) {float bias;};
 float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCOORD):SV_TARGET {
- return uv.x+2*uv.y+float(slot)*0.01+pos.z;
+ return uv.x+2*uv.y+float(slot)*0.01+pos.z+bias;
 }
 struct Witness {float2 marker:SV_Target6;float4 skin:SV_Target7;};
 Witness referencePs(V i){
@@ -136,8 +139,18 @@ Witness referencePs(V i){
     ctx->RSSetViewports(1,&viewport);ctx->RSSetState(raster.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);
     ctx->VSSetShader(vs.Get(),nullptr,0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
+    ComPtr<ID3D11Buffer> materialParams;
+    if(grouped){
+        D3D11_BUFFER_DESC desc{};desc.ByteWidth=16;desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        if(FAILED(dev->CreateBuffer(&desc,nullptr,&materialParams)))return failure(__LINE__);
+        ctx->PSSetConstantBuffers(0,1,materialParams.GetAddressOf());
+    }
+    auto setBias=[&](unsigned stage){
+        if(materialParams){const float params[4]={4.f*stage,0,0,0};ctx->UpdateSubresource(materialParams.Get(),0,nullptr,params,0,0);}
+    };
     edvr::native_vrs::WitnessMirror mirror;edvr::native_vrs::WitnessCounts counts;
     ComPtr<ID3D11Texture2D> overlap[2];
+    ComPtr<ID3D11Texture2D> handoffPixels[2][4];
     for(unsigned pass=0;pass<3;++pass){
         const bool split=pass==1,independent=pass==2;
         auto& t=target[pass];const FLOAT zero[4]{};
@@ -147,6 +160,44 @@ Witness referencePs(V i){
         ctx->ClearDepthStencilView(t.depth.Get(),3,1,0);
         ID3D11RenderTargetView* rt[8]{};rt[0]=t.color.Get();rt[6]=t.slot.Get();rt[7]=t.skin.Get();
         ctx->OMSetRenderTargets(8,rt,t.depth.Get());ctx->PSSetShader(independent?reference.Get():combined.Get(),nullptr,0);
+        if(grouped && !independent){
+            using namespace edvr::native_vrs;
+            ctx->OMSetDepthStencilState(strict.Get(),2);
+            setBias(0);
+            const WitnessDraw draws[]={WitnessDraw::indexed(3,0,0),WitnessDraw::indexed(3,3,0),WitnessDraw::indexed(3,6,0)};
+            if(!split){for(const auto& d:draws)issueWitnessDraw(*ctx,d);}
+            else{
+                // The immediate context stays on one thread at a time. The
+                // notifier forwards its real CB mutation only after every
+                // earlier scene draw ran under the owner's strong full rate.
+                if(dev->GetCreationFlags()&D3D11_CREATE_DEVICE_SINGLETHREADED)return failure(__LINE__);
+                WitnessPipeline held;
+                if(!held.capture(ctx,t.color.Get(),t.depth.Get(),t.slot.Get(),t.skin.Get(),vs.Get(),combined.Get(),
+                                 fine.Get(),ps.Get(),blend.Get()))return failure(__LINE__);
+                const bool armed=rate(RateStep::ArmHandoff,t.color.Get(),t.depth.Get());
+                WitnessCohort pending;
+                const WitnessCohortKey key{ctx,t.color.Get(),t.depth.Get(),&held,1,1,1,0};
+                if(!armed)return failure(__LINE__);
+                for(const auto& d:draws)if(pending.append(key,d)!=WitnessCohortAppend::Appended)return failure(__LINE__);
+                unsigned issued=0;bool preserved=false;const DWORD owner=GetCurrentThreadId();
+                std::thread notifier([&]{
+                    preserved=GetCurrentThreadId()!=owner && replayPrearmedOriginals(pending,ctx,armed,
+                        [&](const WitnessDraw& d){issueWitnessDraw(*ctx,d);++issued;});
+                    if(preserved)setBias(23);
+                });
+                notifier.join();
+                if(!preserved || issued!=3 || !pending.empty() || !rate(RateStep::AfterHandoff,t.color.Get(),t.depth.Get()))
+                    return failure(__LINE__);
+            }
+            for(unsigned i=0;i<4;++i){
+                D3D11_TEXTURE2D_DESC desc{};t.tex[i]->GetDesc(&desc);
+                desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+                if(FAILED(dev->CreateTexture2D(&desc,nullptr,&handoffPixels[pass][i])))return failure(__LINE__);
+                ctx->CopyResource(handoffPixels[pass][i].Get(),t.tex[i].Get());
+            }
+            for(auto* r:{t.color.Get(),t.slot.Get(),t.skin.Get()})ctx->ClearRenderTargetView(r,zero);
+            ctx->ClearDepthStencilView(t.depth.Get(),3,1,0);
+        }
         auto fineRate=[&]{return rate(RateStep::PrepareWitness,t.color.Get(),t.depth.Get());};
         struct Api{
             ID3D11DeviceContext* ctx;decltype(fineRate)& restored;
@@ -156,11 +207,19 @@ Witness referencePs(V i){
             void copy(ID3D11Resource* d,ID3D11Resource* s){ctx->CopyResource(d,s);}
         } api{ctx,fineRate};
         for(unsigned step=0;step<4;++step){
+            setBias(step); // the previous run must already have consumed its version of b0
             if(step==2)ctx->ClearDepthStencilView(t.depth.Get(),D3D11_CLEAR_STENCIL,1,19);
             ctx->OMSetDepthStencilState(step?ties.Get():strict.Get(),step<2?2:step==2?19:20);
             bool combinedFallback=false;
-            auto issue=[&](bool material){
-                if(split && step==2 && material){
+            using namespace edvr::native_vrs;
+            const unsigned length=!grouped?1:step==0?3:step==2?2:1;
+            auto descriptor=[&](unsigned i){
+                if(grouped && step==0)return WitnessDraw::indexed(3,3*i,0);
+                if(grouped && step==2 && i==0)return WitnessDraw::indexed(3,3,0);
+                return WitnessDraw::indexed(step?3:9,step?9:0,0);
+            };
+            auto issue=[&](const WitnessDraw& d,bool material){
+                if(split && step==2 && d.start==9 && material){
                     ComPtr<ID3D11PixelShader> actual;ctx->PSGetShader(&actual,nullptr,nullptr);
                     ID3D11RenderTargetView* actualRt[8]{};ComPtr<ID3D11DepthStencilView> actualDepth;
                     ctx->OMGetRenderTargets(8,actualRt,&actualDepth);
@@ -168,11 +227,32 @@ Witness referencePs(V i){
                         actualRt[6]==t.slot.Get() && actualRt[7]==t.skin.Get();
                     for(auto* r:actualRt)if(r)r->Release();
                 }
-                ctx->DrawIndexed(step?3:9,step?9:0,0);
+                issueWitnessDraw(*ctx,d);
             };
-            if(!split)issue(true);
+            if(!split){for(unsigned i=0;i<length;++i)issue(descriptor(i),true);}
+            else if(grouped){
+                WitnessPipeline state;
+                if(!state.capture(ctx,t.color.Get(),t.depth.Get(),t.slot.Get(),t.skin.Get(),vs.Get(),combined.Get(),
+                                  fine.Get(),ps.Get(),blend.Get()))return failure(__LINE__);
+                WitnessCohort queue;
+                const WitnessCohortKey key{ctx,t.color.Get(),t.depth.Get(),&state,1,step+1,step+1,0};
+                for(unsigned i=0;i<length;++i)if(queue.append(key,descriptor(i))!=WitnessCohortAppend::Appended)return failure(__LINE__);
+                const uint64_t first[]={1,4,5,7};
+                bool strong=true;unsigned fineIssued=0,materials=0;bool ordered=true;
+                const bool done=replayWitnessCohort(queue,state,mirror,step>=2?2:1,first[step],counts,api,
+                    [&](const WitnessDraw& d,bool material){
+                        if(material){ordered=ordered&&fineIssued==length;++materials;}
+                        else {ordered=ordered&&materials==0;++fineIssued;}
+                        issue(d,material);
+                    },[&](unsigned i){
+                        if(step==2 && i==1){rate(RateStep::ExpireMaterial,t.color.Get(),t.depth.Get());return false;}
+                        return rate(i?RateStep::ContinueMaterial:RateStep::Material,t.color.Get(),t.depth.Get());
+                    },[&]{strong=rate(RateStep::StrongFull,t.color.Get(),t.depth.Get());});
+                if(!done || !strong || !ordered || fineIssued!=length || materials!=length)return failure(__LINE__);
+                queue.retire();
+            }
             else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),t.slot.Get(),t.skin.Get(),
-                vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get(),mirror,step>=2?2:1,step+1,true,counts,issue,
+                vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get(),mirror,step>=2?2:1,step+1,true,counts,[&](bool m){issue(descriptor(0),m);},
                 [&]{
                     if(step==2){rate(RateStep::StrongFull,t.color.Get(),t.depth.Get());return false;}
                     return rate(RateStep::Material,t.color.Get(),t.depth.Get());
@@ -186,6 +266,7 @@ Witness referencePs(V i){
             }
         }
         if(independent)continue;
+        setBias(4);
         if(split){
             ComPtr<ID3D11PixelShader> restoredPs;ctx->PSGetShader(&restoredPs,nullptr,nullptr);
             ID3D11RenderTargetView* restored[8]{};ComPtr<ID3D11DepthStencilView> restoredDepth;
@@ -226,6 +307,30 @@ Witness referencePs(V i){
         ID3D11ShaderResourceView* empty=nullptr;ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,&empty);
     }
     ctx->OMSetRenderTargets(0,nullptr,nullptr);ctx->ClearState();
+    if(grouped){
+        for(unsigned i=0;i<4;++i){
+            D3D11_MAPPED_SUBRESOURCE full{},worker{};
+            if(FAILED(ctx->Map(handoffPixels[0][i].Get(),0,D3D11_MAP_READ,0,&full)))return failure(__LINE__);
+            if(FAILED(ctx->Map(handoffPixels[1][i].Get(),0,D3D11_MAP_READ,0,&worker))){
+                ctx->Unmap(handoffPixels[0][i].Get(),0);return failure(__LINE__);
+            }
+            const unsigned bytes=i==0?4:i==2?16:8;
+            bool equal=true,nonzero=false;
+            for(unsigned y=0;y<side && equal;++y){
+                const auto* a=static_cast<const BYTE*>(full.pData)+y*full.RowPitch;
+                const auto* b=static_cast<const BYTE*>(worker.pData)+y*worker.RowPitch;
+                for(unsigned x=0;x<side;++x){
+                    // The three X24 padding bytes are undefined.
+                    const unsigned used=i==3?5:bytes;
+                    if(std::memcmp(a+x*bytes,b+x*bytes,used)){equal=false;break;}
+                    for(unsigned c=0;c<used;++c)nonzero|=a[x*bytes+c]!=0;
+                }
+            }
+            ctx->Unmap(handoffPixels[1][i].Get(),0);ctx->Unmap(handoffPixels[0][i].Get(),0);
+            if(!equal || !nonzero){std::fprintf(stderr,"handoff target %u equal=%d nonzero=%d\n",i,equal,nonzero);return false;}
+        }
+        std::puts("{\"serialized_handoff_color_depth_stencil_motion_skin_exact\":true}");
+    }
     for(auto& first:overlap){
         D3D11_MAPPED_SUBRESOURCE mapped{};if(FAILED(ctx->Map(first.Get(),0,D3D11_MAP_READ,0,&mapped)))return failure(__LINE__);
         unsigned front=0,other=0;
@@ -305,7 +410,7 @@ Witness referencePs(V i){
             }
         }
     }
-    if(counts.paired==4 && counts.copies==4 && counts.reused==1 && counts.rateRefused==1 &&
+    if(counts.paired==(grouped?7u:4u) && counts.copies==4 && counts.reused==(grouped?4u:1u) && counts.rateRefused==1 &&
        distinctMaterial==hardware && sawNear && sawTie && sawSlope && sawStencil)return true;
     std::fprintf(stderr,"witness totals paired=%llu copies=%llu reused=%llu rateRefused=%llu materialDiff=%d hardware=%d slot5=%d slot9=%d slope=%d stencil21=%d\n",
         counts.paired,counts.copies,counts.reused,counts.rateRefused,distinctMaterial,hardware,sawNear,sawTie,sawSlope,sawStencil);

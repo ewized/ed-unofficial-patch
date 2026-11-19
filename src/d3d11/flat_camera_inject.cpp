@@ -13,6 +13,7 @@
 #include "../common/game_build.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
+#include "native_reflex_engine_hook.h"
 #include "flat_camera_ownership.h"
 #include "flat_camera_signature.h"
 #include "flat_stationary_camera_capture.h"
@@ -605,6 +606,8 @@ void refreshPre(uintptr_t r0, uintptr_t ctx, uintptr_t p2, uintptr_t camera) noe
     g_inject.lastCtx.store(ctx, std::memory_order_relaxed);
     g_inject.lastP2.store(p2, std::memory_order_relaxed);
     g_inject.lastCamera.store(camera, std::memory_order_relaxed);
+    if (const auto* trace = native_reflex::traceObserver.load(std::memory_order_acquire))
+        trace->viewRefresh(ctx, camera, r0);
     noteCameraFov(camera);   // S0: both profiles, every thread, before the gate and the VR branch
     mapCameraNoteEye(camera);   // the Galaxy Map's eye offsets: one atomic load while no map is open
 

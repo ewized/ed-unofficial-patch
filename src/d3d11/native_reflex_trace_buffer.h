@@ -9,6 +9,27 @@
 
 namespace edvr::native_reflex {
 
+// Addresses are never removed during this single capture. This lets a copy
+// from any caller invalidate an earlier receipt even if the address is reused.
+template<uint32_t Capacity> class TraceAddresses {
+    std::array<std::atomic<uintptr_t>, Capacity> slots_{};
+public:
+    // The array fills in order. Concurrent observers of the same new address
+    // either publish it or acquire the slot that just won the race.
+    bool find(uintptr_t address, bool add = false) noexcept {
+        if (!address) return false;
+        for (auto& slot : slots_) {
+            uintptr_t current = slot.load(std::memory_order_acquire);
+            if (current == address) return true;
+            if (current) continue;
+            if (!add) return false;
+            if (slot.compare_exchange_strong(current, address, std::memory_order_acq_rel) || current == address)
+                return true;
+        }
+        return false;
+    }
+};
+
 template<class Row, uint32_t Capacity>
 class TraceBuffer {
     static constexpr uint64_t sealed = uint64_t(1) << 63;

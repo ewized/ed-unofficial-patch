@@ -46,6 +46,8 @@ constexpr int kCallFault=INT_MIN;
 
 struct Shared {
     std::mutex configMutex; // configuration only; never acquired by draw calls
+    std::atomic<const std::atomic<bool>*> cohortPending{nullptr};
+    std::atomic<NativeVrsCohortBarrier> cohortBarrier{nullptr};
     std::atomic<uint64_t> configVersion{0},invalidateVersion{0};
     std::atomic<bool> enabled{false},highlight{false};
     std::atomic<float> hq{.15f},mid{.45f};
@@ -63,6 +65,12 @@ struct Shared {
     std::atomic<uint64_t> contextRefusals{0},frameRefusals{0},targetRefusals{0};
 };
 Shared& shared(){static Shared* const value=new Shared;return *value;}
+void drainBeforeRateChange(ID3D11DeviceContext* ctx){
+    auto& a=shared();const auto* pending=a.cohortPending.load(std::memory_order_acquire);
+    if(!pending || !pending->load(std::memory_order_acquire) || !ctx || ctx!=a.owner.load(std::memory_order_acquire) ||
+       GetCurrentThreadId()!=a.thread.load(std::memory_order_acquire))return;
+    if(const auto barrier=a.cohortBarrier.load(std::memory_order_acquire))barrier(ctx);
+}
 struct EyeMap {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<NvRateView> view;
@@ -380,6 +388,10 @@ bool receiptFresh(const State& s) noexcept {
 bool nativeVrsCoarseRequested() noexcept {
     return shared().enabled.load(std::memory_order_acquire);
 }
+void nativeVrsInstallCohortBarrier(const std::atomic<bool>* pending,NativeVrsCohortBarrier barrier) noexcept {
+    shared().cohortBarrier.store(barrier,std::memory_order_release);
+    shared().cohortPending.store(pending,std::memory_order_release);
+}
 void nativeVrsConfigure(bool enabled,float hqRadius,float midRadius) noexcept {
     try {
         auto& a=shared();std::lock_guard<std::mutex> lock(a.configMutex);
@@ -398,6 +410,7 @@ void nativeVrsConfigureFocus(bool enabled,const char* profile) noexcept {
     nativeVrsConfigure(enabled,radii.sharp,radii.transition);
 }
 void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allowProducer) noexcept {
+    drainBeforeRateChange(context);
     try {
         auto& a=shared();
         if(!allowProducer||!a.enabled.load(std::memory_order_acquire)){
@@ -480,6 +493,7 @@ bool nativeVrsWitnessReady(ID3D11DeviceContext* context) noexcept {
         s.gazeEpoch && s.gazeEpoch==nativeTemporalGazeEpoch() && receiptFresh(s);
 }
 bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection& projection,NativeVrsWitnessReceipt& prepared) noexcept {
+    drainBeforeRateChange(context);
     prepared.stamp={};
     if(eye>=2||!nativeVrsWitnessReady(context))return false;
     auto& s=state();
@@ -498,6 +512,7 @@ bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11Ren
     }catch(...){refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
 }
 bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection* projection,bool expandedMaterial,NativeVrsWitnessReceipt* prepared) noexcept {
+    drainBeforeRateChange(context);
     try {
         auto& a=shared();
         const auto stamp=prepared?prepared->take():NativeVrsWitnessStamp{};
@@ -560,6 +575,7 @@ bool nativeVrsHighlightMap(ID3D11Device* device,uint64_t sequence,unsigned eye,
     }catch(...){return false;}
 }
 void nativeVrsFullRate(ID3D11DeviceContext* context) noexcept {
+    drainBeforeRateChange(context);
     try {
         if(!shared().driverReady.load(std::memory_order_acquire))return;
         ++shared().full;if(!owner(context))return;
@@ -567,9 +583,42 @@ void nativeVrsFullRate(ID3D11DeviceContext* context) noexcept {
     }catch(...){auto& s=state();refuse(s,NativeVrsFailure::DriverCall,kCallFault);s.cache.invalidate();publish(s);}
 }
 void nativeVrsInvalidate(ID3D11DeviceContext* context) noexcept {
+    drainBeforeRateChange(context);
     ++shared().invalidations;++shared().invalidateVersion;
     if(!shared().driverReady.load(std::memory_order_acquire))return;
     nativeVrsFullRate(context);
+}
+bool nativeVrsSetCohortRate(ID3D11DeviceContext* ctx,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,
+    const NativeVrsProjection& projection,bool expanded,NativeVrsCohortReceipt& receipt,NativeVrsCohortStage stage) noexcept {
+    if(!ctx || eye>=2)return false;
+    auto& s=state();auto& a=shared();
+    switch(stage){
+    case NativeVrsCohortStage::PrepareFine:
+        receipt.active={};
+        return nativeVrsPrepareWitness(ctx,eye,rtv,dsv,projection,receipt.first);
+    case NativeVrsCohortStage::FirstMaterial:{
+        const auto stamp=receipt.first.stamp;
+        if(!nativeVrsBeforeWorld(ctx,eye,rtv,dsv,&projection,expanded,&receipt.first))return false;
+        receipt.active=stamp;
+        return true;
+    }
+    case NativeVrsCohortStage::NextMaterial:
+        ++a.world;
+        if(nativeVrsWitnessReady(ctx) && receipt.active.matches(witnessStamp(s,eye)) &&
+           s.invalidation==a.invalidateVersion.load(std::memory_order_acquire) &&
+           s.eyes[eye].target.Get()==rtv && s.eyes[eye].depth.Get()==dsv &&
+           sameProjection(s.eyes[eye].projection,projection) && s.cache.active(receipt.active.map)){
+            if(expanded)++a.expandedAccepted[eye];
+            ++a.accepted;return true;
+        }
+        [[fallthrough]];
+    case NativeVrsCohortStage::StrongFull:
+        receipt.active={};receipt.first.take();
+        nativeVrsFullRate(ctx);
+        return stage==NativeVrsCohortStage::StrongFull && a.owner.load(std::memory_order_acquire)==ctx &&
+            a.thread.load(std::memory_order_acquire)==GetCurrentThreadId() && s.cache.fullRateKnown();
+    }
+    return false;
 }
 NativeVrsStatus nativeVrsStatus() noexcept {
     auto& a=shared();NativeVrsStatus out{};
@@ -637,6 +686,7 @@ bool measureKey(ID3D11DeviceContext* context,const NativeVrsPsDraw& draw,native_
 }
 }
 NativeVrsPsToken nativeVrsPsBefore(ID3D11DeviceContext* context,const NativeVrsPsDraw& draw)noexcept {
+    drainBeforeRateChange(context);
     NativeVrsPsToken token{};if(!nativeVrsPsMeasureLive()||!measureOwner(context))return token;
     try {
         auto& s=state();auto& m=measureState();auto& request=measureRequest();
@@ -669,6 +719,7 @@ NativeVrsPsToken nativeVrsPsBefore(ID3D11DeviceContext* context,const NativeVrsP
     }catch(...){return token;}
 }
 void nativeVrsPsAfter(ID3D11DeviceContext* context,const NativeVrsPsToken& token)noexcept {
+    drainBeforeRateChange(context);
     if(!token.active||!measureOwner(context))return;
     try {
         auto& s=state();auto& m=measureState();const unsigned eye=token.candidate/8;

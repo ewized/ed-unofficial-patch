@@ -8,6 +8,7 @@
 #include "../common/world_scale.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/native_witness_drain.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/runtime_profile.h"
 #include "journal_watch.h"
@@ -341,6 +342,8 @@ void resolveTrim(uint32_t out[kTrimCount]) {
 
 HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
+    // The OpenXR owner does not hold the serialized game context here.
+    if (!edvr::nativeWitnessDrain()) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
     // A version 1, 2, 3 or 4 caller is an openvr_api.dll from before the
@@ -667,6 +670,7 @@ HRESULT WINAPI latchSubmit(void* context, uint64_t sequence,
 }
 
 HRESULT WINAPI invalidate(void* context) {
+    if (!edvr::nativeWitnessDrain()) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
     if (!state || state != g_current || !state->active) return E_INVALIDARG;
@@ -681,6 +685,7 @@ HRESULT WINAPI invalidate(void* context) {
 }
 
 HRESULT WINAPI close(void* context) {
+    if (!edvr::nativeWitnessDrain()) return E_PENDING;
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
     if (!state) return E_INVALIDARG;

@@ -300,6 +300,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t fgNativePresented=0,fgGeneratedPresented=0,fgRepeated=0,fgEmpty=0,fgRefused=0,fgCredits=0,fgLastLineMs=0;
   EdvrNativePresentation presentationCounts{};
   fglifecycle::Reporter fgLifecycle;
+  std::unique_ptr<fghandoff::Recorder<768>> fgHandoffTrace;
+  bool fgHandoffTraceAttempted=false;
   fgbootstrap::Bootstrap fgBootstrap;
   uint32_t fgLastDisableReason=0;
   XrTime fgLastSourceTime=0;XrDuration fgLastAge=0;unsigned fgLastPhase=0;
@@ -319,6 +321,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrTime fgFallbackTime=0;
   uint64_t fgFallbackSequence=0,fgFallbackReference=0;
   bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
+  uint64_t vrsRejectedSequence=0; // exact game source, never the independent FG display tick
   XrView previousViews[2]{};
   StereoPlacement previousPlacement[2]{};
   XrSpace previousSpace=XR_NULL_HANDLE;
@@ -2019,11 +2022,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto rejected=boundary.submit(eye,texture,bounds,flags);
       lastCompositorResult=boundary.lastResult();return rejected;
     }
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
     bool pairReady=false;
     if(fgEnabled.load(std::memory_order_acquire))return fgSubmitNative(eye,texture,bounds,flags);
     // Not `captured`: that name is the EyeCapture member (C4458).
     const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     // frame_end_overlap scope: separate device (finishPair below then needs
     // no graphicsCalls rendezvous with Elite's thread -- capture() above,
     // reached from publish(), already ran any producer copy that did),
@@ -2102,6 +2107,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // captured at deferral -- published because publishSubmitTimingCpu already
   // ran there (or didn't) and this must not publish the CPU record again.
   void finishPendingFrameEndBody(vr::EVREye eye,uint64_t sequence,bool published) {
+    if(rejectIncompleteVrsSource())return;
     finishingOverlapped=true; // endFrameReturned names the path
     const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
     finishingOverlapped=false;
@@ -2319,6 +2325,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto clockEnd=QueryPerformanceCounter(&ended);
       if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
       if(FAILED(treatment)) {
+        // Keep the exact failure receipt live until the XR owner can end the
+        // stereo pair empty. Never continue to the raw-image fallback here.
+        if(treatment==E_ABORT&&temporal.vrsFailures(sequence))
+          return vr::VRCompositorError_InvalidTexture;
         invalidateEyeTreatments();timingInvalidate();
         if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=1\n",(unsigned long)treatment);
         return vr::VRCompositorError_InvalidTexture;
@@ -2494,6 +2504,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
+    if(temporal.vrsFailures(sequence))return vr::VRCompositorError_InvalidTexture;
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
     fgMenuVisible=menuTreated;
     if(fgEnabled.load(std::memory_order_acquire)&&menuTreated) {
@@ -2517,6 +2528,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+    if(temporal.vrsFailures(sequence))return vr::VRCompositorError_InvalidTexture;
     if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){
@@ -4328,6 +4340,28 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // The owner shares ownerInvoke (the constructor's setInvokeStats). Detach it once this host is gone, so the owner stops counting for a host
   // that no longer exists; an invoke already in flight keeps its own reference.
   ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);service.setFlatWaits({});}
+  // XR owner, outside the VRS/engine lock. Stop this exact stereo source
+  // before partial pixels or its motion history can be published. Other
+  // context/sequence failures never cause a frame to be withheld.
+  bool rejectIncompleteVrsSource() {
+    const uint64_t sequence=activeFrameSequence;
+    if(!sequence)return false;
+    if(sequence==vrsRejectedSequence)return true;
+    const auto eyes=temporal.vrsFailures(sequence);
+    if(!eyes)return false;
+    vrsRejectedSequence=sequence;
+    nativeTracePrintf("native_vrs_source_withheld,sequence=%llu,incomplete_eye_mask=%u\n",
+      (unsigned long long)sequence,eyes);
+    timingInvalidate();invalidateEyeTreatments();menu.invalidate();
+    temporalFrameEyes=0;previousPairValid=false;
+    fgNativeOutstanding=false;fgAcceptedEyes=0;
+    fgBootstrap.clear();fgPendingNativePose={};fgFallbackValid=false;fgSplitFallbackValid=false;
+    frameGeneration.invalidate(12); // Drop any pending batch derived from this history.
+    const auto ended=fgEnabled.load(std::memory_order_acquire)&&state.frameOpen()
+      ? fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty) : boundary.clear();
+    if(ended!=XR_SUCCESS)publishFatalFailure(ended,"native_vrs_withhold_end");
+    return true;
+  }
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
@@ -4443,6 +4477,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(tracing)writeLongCycleSummary(nullptr,true);
     // The vendor instruments close: an episode or a regime still open ends, and their summaries are written.
     if(tracing)finishInstruments();
+    fgFinishHandoffTrace("close");
     if(tracing)nativeTracePrintf("native_sharpen_summary,left=%llu,right=%llu,failures=%llu\n",
       (unsigned long long)sharpenEyes[0],(unsigned long long)sharpenEyes[1],(unsigned long long)sharpenFailures);
     if(tracing)nativeTracePrintf("native_temporal_summary,frames=%llu,left=%llu,right=%llu,failures=%llu\n",

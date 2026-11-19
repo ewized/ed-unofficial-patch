@@ -18,7 +18,7 @@ enum class TraceEvent {
     TickBegin, TickEnd, InputBegin, InputEnd, EarlyWorker, LateWorker, JobIssue,
     RenderBegin, RenderEnd, CommandList, RenderTarget, NativePose,
     EyeInput, PresentBegin, PresentEnd, HmdRequest, HmdReturn, GameEyeAccepted, GameEyeRejected,
-    GpuDraw, GpuCopy, GpuClear
+    GpuDraw, GpuCopy, GpuClear, ViewCopyBegin, ViewCopyEnd, ViewConsumeBegin, ViewConsumeEnd, ViewRefresh, ViewWatchFull, ViewCopyPrior, ViewMailbox
 };
 struct TraceSample {
     TraceEvent event;
@@ -34,6 +34,8 @@ struct TraceObserver {
     void (*draw)(ID3D11DeviceContext*, const void*, unsigned, unsigned) noexcept;
     void (*copy)(ID3D11DeviceContext*, const void*, ID3D11Resource*, ID3D11Resource*) noexcept;
     void (*clear)(ID3D11DeviceContext*, const void*, ID3D11RenderTargetView*) noexcept;
+    uint64_t (*viewConsume)(uintptr_t, int32_t, const void*) noexcept;
+    void (*viewRefresh)(uintptr_t, uintptr_t, uintptr_t) noexcept;
 };
 inline std::atomic<const TraceObserver*> traceObserver{nullptr};
 inline std::atomic<uint64_t> traceNativeSession{0};

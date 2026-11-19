@@ -50,6 +50,7 @@ struct Row {
     uint64_t session, resourceId, epoch;
     int64_t qpc;
     DWORD thread;
+    uint64_t projection = unknown, viewDigest = 0;
 };
 TraceBuffer<Row, capacity> rows;
 enum class Window { Waiting, Recording, Draining, Done };
@@ -249,7 +250,61 @@ void clearIssued(ID3D11DeviceContext* ctx, const void* caller, ID3D11RenderTarge
             0, uint64_t(whole), rva}, objectSerial(output));
     output->Release();
 }
-const TraceObserver observer{sample, targets, drawIssued, copyIssued, clearIssued};
+// Persistent camera-record addresses observed in this capture. Retaining the
+// numeric address permits recording a competing copy into it from another
+// caller. It grants no lifetime or generation beyond a bracketed operation.
+TraceAddresses<32> viewRecords;
+bool watchView(uintptr_t address, bool add) noexcept {
+    const bool watched = viewRecords.find(address, add);
+    if (address && add && !watched) record({TraceEvent::ViewWatchFull, 0, address});
+    return watched;
+}
+
+// The first four rows are the camera basis and translation. Their digest can
+// reject a changed view. The two exact projection fields are consumed by both
+// eye builders and can stay equal over many distinct camera generations.
+uint64_t basisDigest(uintptr_t address) noexcept {
+    std::array<uint8_t, 64> basis{};
+    if (!readField(address, basis)) return 0;
+    uint64_t hash = 14695981039346656037ull;
+    for (auto byte : basis) hash = (hash ^ byte) * 1099511628211ull;
+    return hash;
+}
+uint64_t viewRow(TraceSample event, uintptr_t cameraRecord) noexcept {
+    Row row = makeRow(event, 0);
+    if (cameraRecord) {
+        uint32_t farBits = 0;
+        uint8_t flags = 0;
+        if (readField(cameraRecord + 0x238, farBits) && readField(cameraRecord + 0x248, flags))
+            row.projection = (uint64_t(flags) << 32) | farBits;
+        row.viewDigest = basisDigest(cameraRecord);
+    }
+    return rows.append(row);
+}
+uint64_t viewConsume(uintptr_t camera, int32_t mode, const void* caller) noexcept {
+    uintptr_t world = 0;
+    uint32_t rva = origin(caller);
+    if (!camera || !rva || !readField(camera + 0x50, world) || !world) return 0;
+    uintptr_t source = world + 0x4A0;
+    watchView(source, true);
+    const auto ticket = viewRow({TraceEvent::ViewConsumeBegin, camera, source, 0, uint32_t(mode), rva}, source);
+    if (ticket) {
+        Row mailbox = makeRow({TraceEvent::ViewMailbox, camera, world + 0x3330, ticket, 0, rva}, 0);
+        mailbox.viewDigest = basisDigest(mailbox.sample.resource);
+        rows.append(mailbox);
+    }
+    return ticket;
+}
+void viewRefresh(uintptr_t ctx, uintptr_t camera, uintptr_t returnSlot) noexcept {
+    // Only the real persistent nodes previously written by an eye consumer
+    // are interesting here. Many constant refresh calls serve other cameras.
+    const uintptr_t source = camera + 0x20;
+    if (!camera || !watchView(source, false)) return;
+    const void* caller = nullptr;
+    readField(returnSlot, caller);
+    viewRow({TraceEvent::ViewRefresh, ctx, source, 0, 0, origin(caller)}, source);
+}
+const TraceObserver observer{sample, targets, drawIssued, copyIssued, clearIssued, viewConsume, viewRefresh};
 
 struct Entry {
     uint32_t rva;
@@ -264,12 +319,40 @@ Entry late{0x7FDCB0, "40534883ec30f30f1089100400000f57"};
 Entry render{0x200DE0, "48895c2408574883ec204c8b89080b00"};
 Entry hmd{0x4E3730, "405553565741564157488dac2478ffff"};
 
+Entry viewCopy{0x59F2A0, "48895c2408574883ec200f1002488bda"};
+using ViewCopyFn = uintptr_t(*)(uintptr_t, uintptr_t);
+
 using PhaseFn = void(*)(uintptr_t, float);
 using WorkerFn = void(*)(uintptr_t);
 using AllocateFn = void*(*)(uintptr_t, uintptr_t, size_t, uint32_t);
 using HmdFn = void*(*)(uintptr_t, void*, double, uint8_t*, uint8_t);
 template<class Fn> Fn original(Entry& entry) noexcept {
     return reinterpret_cast<Fn>(entry.original.load(std::memory_order_acquire));
+}
+// This copier also serves unrelated cameras. Record exact source/destination
+// at the two simulation publishes, computed eye records and final eye-node
+// copies, plus other calls into a persistent record already being watched.
+uintptr_t hookedViewCopy(uintptr_t destination, uintptr_t source) {
+    const auto forward = original<ViewCopyFn>(viewCopy);
+    if (!traceEnabled()) return forward(destination, source);
+    const auto rva = origin(_ReturnAddress());
+    const bool postInputView = rva == 0x281E1DD || rva == 0x281E537 ||
+        rva == 0x281E203 || rva == 0x281E23C || rva == 0x281E229 || rva == 0x281E262;
+    const bool directEye = rva == 0x2845C3E || rva == 0x2845C62;
+    const bool retainedEye = rva == 0x287D828 || rva == 0x287D89C || rva == 0x287D853 || rva == 0x287D8C8;
+    const bool persistent = postInputView || directEye || retainedEye;
+    const bool watched = watchView(destination, persistent);
+    const bool observe = watched || persistent || rva == 0x287B4F1;
+    uint64_t ticket = 0;
+    if (observe) ticket = viewRow({TraceEvent::ViewCopyBegin, source, destination, 0, 0, rva}, source);
+    if (ticket && postInputView)
+        viewRow({TraceEvent::ViewCopyPrior, source, destination, ticket, 0, rva}, destination);
+    const auto result = forward(destination, source);
+    // Also expose a copy that was already running when the destination became
+    // interesting. Its missing begin receipt makes that interval ambiguous.
+    if (observe || watchView(destination, false))
+        viewRow({TraceEvent::ViewCopyEnd, source, destination, ticket, result == destination, rva}, destination);
+    return result;
 }
 void hookedTick(uintptr_t app, float dt) {
     const auto caller = origin(_ReturnAddress());
@@ -358,7 +441,10 @@ void* hookedHmd(uintptr_t service, void* matrix, double prediction, uint8_t* val
     void* result = original<HmdFn>(hmd)(service, matrix, prediction, valid, waitRequested);
     uint8_t validByte = 0;
     const auto resultFlag = readField(reinterpret_cast<uintptr_t>(valid), validByte) ? uint64_t(validByte) : unknown;
-    record({TraceEvent::HmdReturn, service, 0, ticket, resultFlag, caller});
+    Row returned = makeRow({TraceEvent::HmdReturn, service, 0, ticket, resultFlag, caller}, 0);
+    if (result && result == matrix && resultFlag == 1)
+        returned.viewDigest = basisDigest(reinterpret_cast<uintptr_t>(matrix));
+    rows.append(returned);
     return result;
 }
 bool pinMatches(uint32_t rva, const char* hex) noexcept {
@@ -385,7 +471,8 @@ bool install() {
         {&early, reinterpret_cast<void*>(&hookedEarly), "frame trace early worker"},
         {&late, reinterpret_cast<void*>(&hookedLate), "frame trace late worker"},
         {&render, reinterpret_cast<void*>(&hookedRender), "frame trace render"},
-        {&hmd, reinterpret_cast<void*>(&hookedHmd), "frame trace HMD service"}
+        {&hmd, reinterpret_cast<void*>(&hookedHmd), "frame trace HMD service"},
+        {&viewCopy, reinterpret_cast<void*>(&hookedViewCopy), "frame trace camera record copy"}
     };
     for (const auto& target : targetsToInstall)
         if (!pinMatches(target.entry->rva, target.entry->pin)) return false;
@@ -398,7 +485,13 @@ bool install() {
         {0x4E391F, "ffd3"}, {0x4E1AED, "ff5028"}, {0x4E1B34, "ff5028"},
         {0x7F95D3, "e8f89dffff"}, {0x7F96DA, "e8f19cffff"}, {0x7F3540, "e85b09deff"},
         {0x7F387D, "e81e06deff"}, {0x5D41EA, "65488b042558000000"}, {0x5D3D96, "895930"},
-        {0x5D6BBD, "488b4d188b4510418987"}, {0x5D6B7E, "ff5008"}, {0x5D570F, "488d5308"}
+        {0x5D6BBD, "488b4d188b4510418987"}, {0x5D6B7E, "ff5008"}, {0x5D570F, "488d5308"},
+        {0x281E1D8, "e8c310d8fd"}, {0x281E532, "e8690dd8fd"}, {0x287B4EC, "e8af3dd2fd"},
+        {0x2845C39, "e86296d5fd"}, {0x2845C5D, "e83e96d5fd"}, {0x286B1EB, "e840a5fdff"},
+        {0x284583A, "f3410f109ed8060000"}, {0x284586A, "410fb686e8060000"}, {0x284587F, "e89ca1ffff"},
+        {0x281E1FE, "e89d10d8fd"}, {0x281E237, "e86410d8fd"}, {0x281E224, "e87710d8fd"}, {0x281E25D, "e83e10d8fd"},
+        {0x287D823, "e8781ad2fd"}, {0x287D897, "e8041ad2fd"}, {0x287D84E, "e84d1ad2fd"}, {0x287D8C3, "e8d819d2fd"},
+        {0x594FA6, "e845d3ffff"}, {0x59F40E, "898738020000"}, {0x59F43F, "888748020000"}, {0x592560, "f3410f108758020000"}
     };
     for (const auto& site : sites) if (!pinMatches(site.rva, site.bytes)) return false;
     // The opt-in capture leaves forwarding entry hooks until the game exits.
@@ -422,7 +515,8 @@ const char* eventName(TraceEvent type) noexcept {
     static constexpr const char* names[] = {"tick_begin","tick_end","input_begin","input_end","early_worker","late_worker","job_issue",
         "render_begin","render_end","command_list","render_target","native_pose","eye_input",
         "present_begin","present_end","hmd_request","hmd_return","game_eye_accepted","game_eye_rejected",
-        "gpu_draw","gpu_copy","gpu_clear"};
+        "gpu_draw","gpu_copy","gpu_clear","view_copy_begin","view_copy_end",
+        "view_consume_begin","view_consume_end","view_refresh","view_watch_full","view_copy_prior","view_mailbox"};
     return names[static_cast<unsigned>(type)];
 }
 bool writeTrace(uint32_t kept) {
@@ -448,17 +542,17 @@ bool writeTrace(uint32_t kept) {
     char buf[1000];
     std::snprintf(buf, sizeof(buf), "# build=334925,qpc_frequency=%lld,kept=%u,overflow=%llu,window_presents=%u\n",
                   static_cast<long long>(qpcFrequency()), kept, sealedCount - kept, presents);
-    bool ok = line(buf) && line("ordinal,qpc,thread,session,event,epoch,tick,worker,app,issue_group,issue_group_id,actor,resource,resource_id,sequence,detail,caller_rva,head_group,head_id,head_executor,head_payload,app_jobs,app_job_group,app_job_id,app_job_executor,app_job_payload\n");
+    bool ok = line(buf) && line("ordinal,qpc,thread,session,event,epoch,tick,worker,app,issue_group,issue_group_id,actor,resource,resource_id,sequence,detail,caller_rva,head_group,head_id,head_executor,head_payload,app_jobs,app_job_group,app_job_id,app_job_executor,app_job_payload,projection_bits,view_digest\n");
     for (uint32_t i = 0; ok && i < kept; ++i) {
         const auto& row = rows.row(i);
         const auto& e = row.sample;
         const auto& c = row.context;
         const auto& j = row.jobs;
         std::snprintf(buf, sizeof(buf),
-            "%u,%lld,%lu,%llu,%s,%llu,%llu,%llu,%llx,%llx,%llu,%llx,%llx,%llu,%llu,%llu,%x,%llx,%llu,%llx,%llx,%d,%llx,%llu,%llx,%llx\n",
+            "%u,%lld,%lu,%llu,%s,%llu,%llu,%llu,%llx,%llx,%llu,%llx,%llx,%llu,%llu,%llu,%x,%llx,%llu,%llx,%llx,%d,%llx,%llu,%llx,%llx,%llu,%llu\n",
             i + 1, static_cast<long long>(row.qpc), row.thread, row.session, eventName(e.event), row.epoch,
             c.tick, c.worker, c.app, c.group, c.groupId, e.actor, e.resource, row.resourceId, e.sequence, e.detail, e.caller,
-            j.head.group, j.head.id, j.head.executor, j.head.payload, j.matches, j.app.group, j.app.id, j.app.executor, j.app.payload);
+            j.head.group, j.head.id, j.head.executor, j.head.payload, j.matches, j.app.group, j.app.id, j.app.executor, j.app.payload, row.projection, row.viewDigest);
         ok = line(buf);
     }
     if (ok) ok = line("# complete\n") && flush();

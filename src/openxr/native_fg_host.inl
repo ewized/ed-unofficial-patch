@@ -151,13 +151,17 @@
     fgFallbackSpace=source.space;fgFallbackTime=source.time;fgFallbackSequence=source.sequence;
     fgFallbackReference=source.epoch.reference;fgFallbackValid=true;
   }
-  void fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,XrDuration period,bool imported) {
+  fghandoff::Images fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,XrDuration period,bool imported) {
+    using Outcome=fghandoff::Images;
     auto& images=frameGeneration.images();
     if(images.ready&&(images.metadata.generation!=runtimeGeneration||images.metadata.referenceGeneration!=poses.read().originGeneration||
        images.metadata.configGeneration!=fgConfig||images.metadata.historyGeneration!=status.historyGeneration||
-       changes.crosses(images.metadata.generatedCount?images.metadata.previousPoseDisplayTime:images.metadata.currentPoseDisplayTime,displayTime)||
-       images.metadata.currentPoseDisplayTime>displayTime||displayTime-images.metadata.currentPoseDisplayTime>500000000)) {
-      images.ready=false;++fgRefused;
+       changes.crosses(images.metadata.generatedCount?images.metadata.previousPoseDisplayTime:images.metadata.currentPoseDisplayTime,displayTime))) {
+      images.ready=false;++fgRefused;return Outcome::WrongEpoch;
+    }
+    if(images.ready&&(images.metadata.currentPoseDisplayTime>displayTime||
+       displayTime-images.metadata.currentPoseDisplayTime>500000000)) {
+      images.ready=false;++fgRefused;return Outcome::OutsideWindow;
     }
     if(images.ready) {
       // A timely imported result proves that synthesis works in this epoch,
@@ -168,13 +172,52 @@
         if(b.generatedCount&&timely)fgBootstrap.observe(b,true);
         else fgBootstrap.miss();
       }
-      if(images.metadata.currentSequence<=fgDisplayedSequence)images.ready=false;
-      else if(imported)images.next=fgschedule::firstPhase(images.metadata,fgDisplayedSequence);
+      if(b.currentSequence<=fgDisplayedSequence){images.ready=false;return Outcome::BehindWatermark;}
+      if(imported)images.next=fgschedule::firstPhase(b,fgDisplayedSequence);
       if(images.ready&&images.next&&
          !fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
-        images.next=0;fgBootstrap.miss();
+        images.next=0;fgBootstrap.miss();return Outcome::Late;
       }
+      if(images.next)return Outcome::Generated;
+      if(!b.generatedCount)return Outcome::NativeOnly;
+      if(imported)return Outcome::PreviousMismatch;
+      return Outcome::Endpoint;
     }
+    return Outcome::None;
+  }
+  void fgFinishHandoffTrace(const char* reason) {
+    fgHandoffTraceAttempted=false;
+    if(!fgHandoffTrace)return;
+    fgHandoffTrace->finish([&](const fghandoff::Sample* rows,std::size_t count,std::size_t lost) {
+      // The bounded capture did no IO. Write the whole block once, off the
+      // capture interval. Row clocks are QPC microseconds, not log UTC time.
+      NativeTraceBatch block;
+      nativeTracePrintf("native_fg_handoff_summary,reason=%s,rows=%llu,dropped=%llu,clock=qpc_us,pose_clock=xr_ns,"
+        "import=none:0/retire:1/provider:2/future:3/fence:4/imported:5/rejected:6,"
+        "images=none:0/generated:1/endpoint:2/wrong_scope:3/behind:4/previous_mismatch:5/late:6/native_only:7/outside_window:8,"
+        "slot=empty:0/generated:1/native:2/repeat:3/refused_credit:4\n",
+        reason,(unsigned long long)count,(unsigned long long)lost);
+      for(std::size_t i=0;i<count;++i) {
+        const auto& row=rows[i];
+        nativeTracePrintf("native_fg_handoff,kind=%s,time_us=%llu,tick=%llu,generation=%llu,config=%llu,history=%llu,"
+          "source=%llu,frame_open=%u,staged=%u,should_render=%u,native_pending=%llu,watermark=%llu,"
+          "latest_source=%llu,latest_exported=%llu,poll_begin_us=%llu,poll_end_us=%llu,import=%u,poll_hr=%08lx,poll_source=%llu,poll_pose_time_ns=%lld,"
+          "batch_previous=%llu,batch_current=%llu,display_time_ns=%lld,batch_or_source_time_ns=%lld,runtime_period_ns=%lld,admit_period_ns=%lld,"
+          "images=%u,fallback_before=%llu,fallback_after=%llu,slot_begin_us=%llu,slot=%u,phase=%u,presented=%llu,multiplier=%u\n",
+          row.completion?"completion":"slot",(unsigned long long)row.timeUs,(unsigned long long)row.tick,
+          (unsigned long long)row.generation,(unsigned long long)row.config,(unsigned long long)row.history,
+          (unsigned long long)row.source,unsigned(row.frameOpen),unsigned(row.staged),unsigned(row.shouldRender),
+          (unsigned long long)row.pendingNative,(unsigned long long)row.watermark,
+          (unsigned long long)row.latestSource,(unsigned long long)row.latestReady,
+          (unsigned long long)row.pollBeginUs,(unsigned long long)row.pollEndUs,unsigned(row.poll.result),
+          (unsigned long)(uint32_t)row.pollHr,(unsigned long long)row.poll.sequence,(long long)row.poll.poseTime,
+          (unsigned long long)row.previous,(unsigned long long)row.current,(long long)row.displayTime,(long long)row.sourceTime,
+          (long long)row.runtimePeriod,(long long)row.admissionPeriod,unsigned(row.images),
+          (unsigned long long)row.fallbackBefore,(unsigned long long)row.fallbackAfter,
+          (unsigned long long)row.slotBeginUs,unsigned(row.slot),row.phase,(unsigned long long)row.presented,row.multiplier);
+      }
+    });
+    fgHandoffTrace.reset();
   }
   bool fgFallbackUsable(XrTime displayTime) const {
     return fgFallbackValid&&fgFallbackReference==poses.read().originGeneration&&
@@ -257,6 +300,8 @@
   }
   bool fgTickOwner(const RuntimeGate::Lease& operation) {
     if(!fgAvailable.load(std::memory_order_acquire)||!state.running()||state.terminal()||serviceStopped)return false;
+    if(fgEnabled.load(std::memory_order_acquire)&&activeFrameSequence!=vrsRejectedSequence&&
+       rejectIncompleteVrsSource())return true;
     const uint64_t now=GetTickCount64();
     const bool callerFresh=now-gameFrameCallMs.load(std::memory_order_relaxed)<=500;
     if(!callerFresh&&fgNativeOutstanding) {fgNativeOutstanding=false;fgAcceptedEyes=0;frameGeneration.invalidate(10);}
@@ -270,6 +315,17 @@
       !(featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10&&eyeshare::fromBits(featureFrame.leftEyeShare)>0.f)&&
       callerFresh&&
       !(featureFrameKnown&&featureFrame.deferredPacing);
+    if(requested||fgHandoffTraceAttempted) {
+      if(temporal.fgHandoffTraceRequested()) {
+        if(!fgHandoffTraceAttempted) {
+          fgHandoffTraceAttempted=true;
+          // Standalone rigs and normal sessions do not reserve the buffer.
+          fgHandoffTrace.reset(new(std::nothrow) fghandoff::Recorder<768>);
+          if(fgHandoffTrace)fgHandoffTrace->arm();
+          else nativeTracePuts("native_fg_handoff_summary,reason=allocation_failed,rows=0,dropped=0");
+        }
+      } else fgFinishHandoffTrace("disabled");
+    }
     fgLifecycleReport(now,statusResult,status,requested,callerFresh);
     if(!requested) {
       if(fgEnabled.load(std::memory_order_acquire)&&!fgNativeOutstanding) {
@@ -306,14 +362,27 @@
       return true;
     }
     const Frame tick=boundary.frame();
+    const bool tracingHandoff=fgHandoffTrace&&fgHandoffTrace->sampleWanted();
+    fghandoff::Sample row{};
+    if(tracingHandoff) {
+      row.tick=fgTick;row.frameOpen=true;row.shouldRender=tick.shouldRender;
+      row.generation=runtimeGeneration;row.config=fgConfig;row.history=status.historyGeneration;
+      row.source=activeFrameSequence;row.pendingNative=fgBootstrap.completedSequence();
+      row.latestSource=status.latestSourceSequence;row.latestReady=status.latestReadySequence;
+      row.watermark=fgDisplayedSequence;row.fallbackBefore=fgFallbackValid?fgFallbackSequence:0;
+      row.displayTime=tick.predictedDisplayTime;row.runtimePeriod=tick.predictedDisplayPeriod;row.multiplier=fgMultiplier;
+    }
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     bool hasUi=false;
     bool pixels=false,generated=false,newNative=false;
     auto& images=frameGeneration.images();
     bool imported=false;
     if(!images.ready) {
+      if(tracingHandoff)row.pollBeginUs=edvrNativeTraceNowUs();
       const HRESULT polled=frameGeneration.poll(runtimeGeneration,poses.read().originGeneration,fgConfig,fgMultiplier,
-        sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,tick.predictedDisplayTime);
+        sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,tick.predictedDisplayTime,
+        tracingHandoff?&row.poll:nullptr);
+      if(tracingHandoff){row.pollEndUs=edvrNativeTraceNowUs();row.pollHr=polled;}
       if(FAILED(polled))++fgRefused;
       if(!frameGeneration.healthy()) {
         fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"native_fg_copy_retirement");return true;
@@ -324,7 +393,11 @@
     // its separately published display frequency when available.
     const XrDuration period=instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
       ? XrDuration(1000000000./instrumentDisplayHz+.5) : tick.predictedDisplayPeriod;
-    fgPrepareImages(status,tick.predictedDisplayTime,period,imported);
+    if(tracingHandoff&&images.ready) {
+      row.previous=images.metadata.previousSequence;row.current=images.metadata.currentSequence;
+      row.sourceTime=images.metadata.currentPoseDisplayTime;
+    }
+    const auto imageDecision=fgPrepareImages(status,tick.predictedDisplayTime,period,imported);
     const bool generatedSlot=requested&&tick.shouldRender&&images.ready&&images.next&&comfortFade()<=0.f;
     if(images.ready&&!generatedSlot) {
       if(images.next)fgBootstrap.miss();
@@ -338,6 +411,10 @@
       fgBootstrap.miss();
       fgRefreshNativeFallback(tick.predictedDisplayTime);
     }
+    if(tracingHandoff) {
+      row.admissionPeriod=period;row.images=imageDecision;
+      row.fallbackAfter=fgFallbackValid?fgFallbackSequence:0;
+    }
     // Poll and choose this slot before releasing the caller. A missing phase
     // releases the credit immediately; an old nextCredit cannot throttle it.
     if(fgCredit&&!fgNativeOutstanding&&fgbootstrap::creditDue(fgTick,fgNextCredit,generatedSlot)) {
@@ -348,7 +425,11 @@
       fgAcceptedEyes=0;
       if(fgNativeOutstanding){fgNextCredit=fgschedule::nextCredit(fgTick,fgMultiplier);++fgCredits;}
     }
-    if(!state.frameOpen())return true; // a refused credit closed its frame
+    if(!state.frameOpen()) {
+      if(tracingHandoff){row.timeUs=edvrNativeTraceNowUs();row.slot=fghandoff::Slot::RefusedCredit;fgHandoffTrace->append(row);}
+      return true; // a refused credit closed its frame
+    }
+    if(tracingHandoff)row.slotBeginUs=edvrNativeTraceNowUs();
     if(tick.shouldRender&&images.ready) {
       const auto& b=images.metadata;
       // A comfort fade must cover the full image. Use the already-composited
@@ -393,6 +474,13 @@
       newNative?edvr::NativePresentationKind::Native:edvr::NativePresentationKind::Repeated;
     const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind);
     if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_end");fgCancelCredit();return true;}
+    if(tracingHandoff) {
+      row.timeUs=edvrNativeTraceNowUs();row.phase=pixels?fgLastPhase:0;
+      row.presented=pixels?(generated?row.current:fgDisplayedSequence):0;
+      row.slot=!pixels?fghandoff::Slot::Empty:generated?fghandoff::Slot::Generated:
+        newNative?fghandoff::Slot::Native:fghandoff::Slot::Repeat;
+      fgHandoffTrace->append(row);
+    }
     if(hasUi)++fgUiPresented;
     if(!pixels)++fgEmpty;else if(generated)++fgGeneratedPresented;else if(newNative)++fgNativePresented;else ++fgRepeated;
     fgReport();return true;
@@ -403,6 +491,7 @@
     const unsigned bit=1u<<unsigned(eye);
     if(!fgNativeOutstanding||(fgAcceptedEyes&bit))return vr::VRCompositorError_InvalidTexture;
     const auto admitted=capture(eye,texture,bounds,flags,fgNativePixels);
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     if(admitted==vr::VRCompositorError_None)fgAcceptedEyes|=bit;
     dispatchGpuEyeMarker(eye,texture,admitted==vr::VRCompositorError_None);
     if(clock&&counterNow(&ended))timingFrame.submitMs[unsigned(eye)]=elapsedMs(began,ended);
@@ -412,9 +501,22 @@
       // even after bootstrap stops making extra fallback copies.
       const bool pairedReady=!frameWithheld&&fgNativePixels&&captured.completePending(nullptr,&transferWall)==S_OK;
       if(pairedReady) {
+        const bool tracingHandoff=fgHandoffTrace&&fgHandoffTrace->sampleWanted();
+        const uint64_t timeUs=tracingHandoff?edvrNativeTraceNowUs():0;
         EdvrFgStatus fallbackStatus{};
         if(frameGeneration.status(fallbackStatus)==S_OK) {
           fgStageNativeFallback(fgBootstrapEpoch(fallbackStatus));
+        }
+        if(tracingHandoff) {
+          const auto slot=boundary.frame();
+          fghandoff::Sample row{};row.completion=true;row.timeUs=timeUs;row.tick=fgTick;
+          row.frameOpen=state.frameOpen();row.shouldRender=slot.shouldRender;
+          row.generation=runtimeGeneration;row.config=fgConfig;row.history=fallbackStatus.historyGeneration;
+          row.source=activeFrameSequence;row.pendingNative=fgBootstrap.completedSequence();row.watermark=fgDisplayedSequence;
+          row.staged=fgPendingNativePose.sequence==activeFrameSequence;
+          row.displayTime=slot.predictedDisplayTime;row.sourceTime=frameGeometry.displayTime;
+          row.runtimePeriod=slot.predictedDisplayPeriod;row.multiplier=fgMultiplier;
+          fgHandoffTrace->append(row);
         }
       }
       fgNativeOutstanding=false;fgAcceptedEyes=0;

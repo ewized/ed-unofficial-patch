@@ -1,4 +1,6 @@
 #include "../common/native_temporal.h"
+#include "../common/native_vrs_frame_failure.h"
+#include "../common/native_witness_drain.h"
 
 #include "temporal_pass.h"
 #include "frame_generation_coordinator.h"
@@ -32,6 +34,7 @@
 #include <cstring>
 #include <algorithm>
 #include <mutex>
+#include <wrl/client.h>
 
 extern "C" void edvrEyeCaptureUntreated(void*, int, const float*);
 
@@ -74,6 +77,11 @@ struct State {
   ID3D11Device* device = nullptr;
   DWORD thread = 0;
   uint64_t generation = 0;
+  // Set before publishing this single-use State. The paired host pins the
+  // device and its immediate context; the draw callback only compares pointers.
+  ID3D11DeviceContext* vrsOutputContext = nullptr;
+  uint64_t vrsOutputGeneration = 0;
+  edvr::NativeVrsFrameFailure vrsFrameFailure;
   bool active = false, begun = false, standDown = false;
   edvr::NativeGazeReadiness gazeReadiness;
   uint64_t sequence = 0, reference = 0;
@@ -122,6 +130,8 @@ struct State {
 };
 
 State pool[16]; unsigned used = 0; State* current = nullptr; std::mutex mutex;
+static_assert(std::atomic<State*>::is_always_lock_free,"VRS failure owner lookup must not lock");
+std::atomic<State*> vrsOutputOwner{nullptr};
 uint64_t gazeEpoch=0; // monotonic across acquisitions, invalidations and closes
 std::atomic<uint64_t> gazeReadyEpoch{0};
 
@@ -420,7 +430,16 @@ uint32_t jitterCycleFor(State& s,unsigned eye) {
   return cycle;
 }
 
+// Version 2 publishes a single-use owner whose context and producer thread
+// stay immutable for its lifetime. Other callers only check for pending work.
+bool drainWitness(void* channel) noexcept {
+  const auto* s=vrsOutputOwner.load(std::memory_order_acquire);
+  const bool onProducer=s&&channel==s&&GetCurrentThreadId()==s->thread;
+  return edvr::nativeWitnessDrain(onProducer?s->vrsOutputContext:nullptr);
+}
+
 HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporalProjection* out) {
+  if(!drainWitness(p)) return E_PENDING;
   std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
   if(!s||!s->active||s!=current||!f||!out||(f->size!=sizeof(*f)&&f->size!=EDVR_NATIVE_TEMPORAL_FRAME_SIZE_NO_ZOOM)||f->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||
      f->generation!=s->generation||!f->sequence||!f->referenceGeneration||
@@ -431,7 +450,9 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   for(int e=0;e<2;++e) if(!rigid(f->eyeToHead[e])||!frustum(f->frusta[e])) return E_INVALIDARG;
   const Settings next=s->pendingSettings;
   const bool settingsChanged=!sameHistorySettings(next,s->currentSettings);
-  const bool frameReset=!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||settingsChanged;
+  const auto failedEyes=s->vrsOutputGeneration?s->vrsFrameFailure.retire(s->sequence):0;
+  const bool frameReset=!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||
+      settingsChanged||failedEyes;
   if(frameReset) reset(*s);
   if(settingsChanged)edvr::Log::get().note("native temporal: mode=%s, motion=%d, jitter=%u; history reset at the frame boundary.",mode(next),next.motion,unsigned(next.jitter));
   std::memcpy(s->previousJitter,s->renderedJitter,sizeof(s->previousJitter));
@@ -495,6 +516,7 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   }
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
+  if(s->vrsOutputGeneration)s->vrsFrameFailure.begin(f->sequence);
   g_frameSequence.store(f->sequence,std::memory_order_release);   // last: the head, eyes, frusta and shift above are this frame's
   edvr::nativeFgBeginTemporal(*f,frameReset,s->currentSettings.on&&!s->standDown&&
       s->currentSettings.engine==edvr::TemporalEngine::Nvidia&&!s->mapOpen&&!s->zoomedNow);
@@ -510,11 +532,33 @@ HRESULT WINAPI noteProjection(void* p,uint64_t seq,uint32_t eye,float nearZ,floa
   s->projectionSequence[eye]=seq;s->projectionKnown[eye]=true;++s->projectionReads;return S_OK;
 }
 
+uint32_t WINAPI vrsFailures(void* p,uint64_t sequence) {
+  const auto* s=vrsOutputOwner.load(std::memory_order_acquire);
+  return s&&p==s?s->vrsFrameFailure.failedEyes(sequence):0;
+}
+uint32_t WINAPI diagnostics(void* p) {
+  if(p!=vrsOutputOwner.load(std::memory_order_acquire)||!p)return 0;
+  // The XR pump reads this while FG is running. Do not take the INI lock
+  // unless the authoritative config generation changed.
+  static std::atomic<uint64_t> cached{UINT64_MAX};
+  auto& config=edvr::Config::get();
+  const uint64_t generation=config.generation();
+  auto value=cached.load(std::memory_order_relaxed);
+  if((value>>1)!=generation) {
+    value=(generation<<1)|uint64_t(config.getBool("log.fg_handoff_trace",false));
+    cached.store(value,std::memory_order_relaxed);
+  }
+  return value&1?EDVR_NATIVE_TEMPORAL_FG_HANDOFF_TRACE:0;
+}
 HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* box,ID3D11Texture2D** output,float* outBox) {
-  if(output)*output=nullptr;if(outBox)std::memset(outBox,0,16);std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
+  if(output)*output=nullptr;if(outBox)std::memset(outBox,0,16);
+  if(!drainWitness(p)) return E_PENDING;
+  std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   edvr::uiLayerMapRunEnd(nullptr);   // the Galaxy Map's run of sprites leaves EDVR's targets bound; this pass reads and sets the output merger (ui_layer.h)
   struct InsideTreat{InsideTreat(){t_insideTreat=true;}~InsideTreat(){t_insideTreat=false;}} insideTreat;
-  if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||!source||!output||!outBox||eye>1||seq!=s->sequence||s->treated[eye]||!s->begun||!sameDevice(s->device,source))return E_INVALIDARG;
+  if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||!source||!output||!outBox||eye>1||seq!=s->sequence||!s->begun)return E_INVALIDARG;
+  if(s->vrsFrameFailure.failedEyes(seq))return E_ABORT; // host withholds the entire stereo source
+  if(s->treated[eye]||!sameDevice(s->device,source))return E_INVALIDARG;
   if(box&&(!finite(box,4)||box[0]==box[2]||box[1]==box[3]))return E_INVALIDARG;
   if(box) for(int i=0;i<4;++i) if(box[i]<0.0f||box[i]>1.0f)return E_INVALIDARG;
   D3D11_TEXTURE2D_DESC d{};source->GetDesc(&d);
@@ -645,6 +689,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvr::nativeFgBeforeTemporalEye(seq,eye,source);
   if(namedQuality!=edvr::DlssQuality::Custom)edvr::nativeDlssEvaluation={};
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
+  if(s->vrsFrameFailure.failedEyes(seq))return E_ABORT;
   if(namedQuality!=edvr::DlssQuality::Custom)noteDlss(raw?edvr::nativeDlssEvaluation:edvr::NativeDlssEvaluation{},true);
   s->treated[eye]=true;
   if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;gazeReadyEpoch.store(0,std::memory_order_release);edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
@@ -666,8 +711,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;hst.zoomed=zoomedHere;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;edvr::nativeFgInvalidateProducer(2);reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){
+  if(!drainWitness(p)) return E_PENDING;
+  std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;s->vrsFrameFailure.end();edvr::nativeFgInvalidateProducer(2);reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;
+}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
+  if(!drainWitness(p)) return E_PENDING;
   edvr::uiLayerMapRunEnd(nullptr);   // as in treat
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
@@ -684,7 +733,10 @@ HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint3
   s->continuity[eye]=seq;s->treated[eye]=true;++s->skipped;return S_OK;
 }
 HRESULT WINAPI close(void* p){
+  if(!drainWitness(p)) return E_PENDING;
   std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;
+  s->vrsFrameFailure.end();
+  if(s==current)vrsOutputOwner.store(nullptr,std::memory_order_release);
   edvr::Log::get().note("native temporal totals: treated=%llu, jitter_frames=%llu, projection_reads=%llu, missing_projections=%llu, resets=%llu, stood_down=%u, floor_cuts=%llu, layer_only=%llu, layer_only_declined=%llu.",
       (unsigned long long)s->treatedCount,(unsigned long long)s->jitterFrames,(unsigned long long)s->projectionReads,
       (unsigned long long)s->missingProjections,(unsigned long long)s->resets,unsigned(s->standDown),(unsigned long long)s->floorCuts,
@@ -700,6 +752,16 @@ HRESULT WINAPI close(void* p){
 }
 
 namespace edvr {
+uint64_t nativeTemporalVrsOutputGeneration(ID3D11DeviceContext* ctx,uint64_t sequence) noexcept {
+  const auto* s=vrsOutputOwner.load(std::memory_order_acquire);
+  return s&&ctx&&ctx==s->vrsOutputContext&&GetCurrentThreadId()==s->thread&&
+    s->vrsFrameFailure.clean(sequence)?s->vrsOutputGeneration:0;
+}
+bool nativeTemporalInvalidateVrsEye(ID3D11DeviceContext* ctx,unsigned eye,uint64_t generation,uint64_t sequence) noexcept {
+  auto* s=vrsOutputOwner.load(std::memory_order_acquire);
+  return s&&ctx&&ctx==s->vrsOutputContext&&
+    generation&&generation==s->vrsOutputGeneration&&s->vrsFrameFailure.mark(sequence,eye);
+}
 namespace {
 bool gazeOwner(ID3D11Device* device,unsigned long thread) {
   if(!current||!current->active||!current->begun||!current->device||!device||
@@ -914,8 +976,24 @@ bool nativeTemporalTrueVerticalTangents(float* up, float* down) {
 }
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest* r,EdvrNativeTemporalTable* t){
-  if(!t||t->size!=sizeof(*t)||t->version!=EDVR_NATIVE_TEMPORAL_VERSION_1)return E_INVALIDARG;*t={sizeof(*t),EDVR_NATIVE_TEMPORAL_VERSION_1};
-  if(!r||r->size!=sizeof(*r)||r->version!=EDVR_NATIVE_TEMPORAL_VERSION_1||!r->gameDevice||!r->generation)return E_INVALIDARG;
+  if(!t)return E_INVALIDARG;
+  const auto size=t->size,version=t->version;
+  const bool v2=version==EDVR_NATIVE_TEMPORAL_VERSION_2&&size==sizeof(*t);
+  if(!v2&&(version!=EDVR_NATIVE_TEMPORAL_VERSION_1||size!=EDVR_NATIVE_TEMPORAL_TABLE_V1_SIZE))return E_INVALIDARG;
+  EdvrNativeTemporalTable reply{size,version};std::memcpy(t,&reply,size);
+  if(!r||r->size!=sizeof(*r)||r->version!=version||!r->gameDevice||!r->generation)return E_INVALIDARG;
+  Microsoft::WRL::ComPtr<ID3D11DeviceContext> renderContext;
+  if(v2){
+    r->gameDevice->GetImmediateContext(&renderContext);
+    if(!renderContext)return E_NOINTERFACE;
+  }
   std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.pendingSettings=readConfig();s.currentSettings=s.pendingSettings;s.gazeReadiness.reset(++gazeEpoch);s.active=true;current=&s;
-  t->context=&s;t->beginFrame=begin;t->noteProjection=noteProjection;t->treatEye=treat;t->invalidate=invalidate;t->close=close;t->skipEye=skipEye;return S_OK;
+  if(v2){
+    s.vrsOutputContext=renderContext.Get();s.vrsOutputGeneration=used;
+    reply.vrsFailures=vrsFailures;reply.diagnostics=diagnostics;
+    vrsOutputOwner.store(&s,std::memory_order_release);
+  }
+  reply.context=&s;reply.beginFrame=begin;reply.noteProjection=noteProjection;reply.treatEye=treat;
+  reply.invalidate=invalidate;reply.close=close;reply.skipEye=skipEye;
+  std::memcpy(t,&reply,size);return S_OK;
 }
