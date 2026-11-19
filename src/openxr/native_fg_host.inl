@@ -137,15 +137,25 @@
       auto& view=fgPendingNativePose.views[eye];
       view=frameViews[eye];view.pose=seatxf::toNatural(frameOrigin,frameViews[eye].pose);
     }
-    fgBootstrap.completeNative(activeFrameSequence,fgTick);
+    fgBootstrap.completeNative(activeFrameSequence);
+  }
+  bool fgPendingNativeUsable(XrTime displayTime) const {
+    const auto& source=fgPendingNativePose;
+    return source.sequence==fgBootstrap.completedSequence()&&source.epoch==fgBootstrap.epoch()&&
+      source.sequence>fgDisplayedSequence&&source.time>0&&source.time<=displayTime&&
+      !changes.crosses(source.time,displayTime)&&source.space==seated.frame().space;
+  }
+  bool fgDeferNativeFallback(const EdvrFgStatus& status,XrTime displayTime,XrDuration nextPeriod,XrDuration period) {
+    return fgPendingNativeUsable(displayTime)&&fgFallbackSequence==fgDisplayedSequence&&fgFallbackUsable(displayTime)&&
+      fgBootstrap.deferNative(fgDisplayedSequence,status.latestSourceSequence,status.latestReadySequence,
+        fgPendingNativePose.time,displayTime,nextPeriod,period,fgMultiplier);
   }
   void fgRefreshNativeFallback(XrTime displayTime) {
     const auto& source=fgPendingNativePose;
-    if(!fgBootstrap.refreshDue(fgTick)||!(source.epoch==fgBootstrap.epoch())||
-       source.sequence<=fgDisplayedSequence||source.time>displayTime||
-       changes.crosses(source.time,displayTime)||source.space!=seated.frame().space||
-       !fgPendingNative.exchangeBuffers(fgFallback))return;
-    fgBootstrap.displayNative(source.sequence);
+    if(!fgPendingNativeUsable(displayTime)||!fgPendingNative.exchangeBuffers(fgFallback))return;
+    // The credit handler may close this XR frame before presentation. The
+    // staged buffers have still been moved and must never be exchanged twice.
+    fgBootstrap.consumeNative(source.sequence);
     fgSplitFallbackValid=false;
     for(unsigned eye=0;eye<2;++eye)fgFallbackViews[eye]=source.views[eye];
     fgFallbackSpace=source.space;fgFallbackTime=source.time;fgFallbackSequence=source.sequence;
@@ -164,15 +174,13 @@
       images.ready=false;++fgRefused;return Outcome::OutsideWindow;
     }
     if(images.ready) {
-      // A timely imported result proves that synthesis works in this epoch,
-      // even if native fallback already presented that particular endpoint.
       const auto& b=images.metadata;
-      if(imported) {
-        const bool timely=fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1);
-        if(b.generatedCount&&timely)fgBootstrap.observe(b,true);
-        else fgBootstrap.miss();
+      if(b.currentSequence<=fgDisplayedSequence) {
+        if(imported)fgBootstrap.observeBehind(b,
+          fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1));
+        images.ready=false;
+        return Outcome::BehindWatermark;
       }
-      if(b.currentSequence<=fgDisplayedSequence){images.ready=false;return Outcome::BehindWatermark;}
       if(imported)images.next=fgschedule::firstPhase(b,fgDisplayedSequence);
       if(images.ready&&images.next&&
          !fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
@@ -376,14 +384,15 @@
     bool hasUi=false;
     bool pixels=false,generated=false,newNative=false;
     auto& images=frameGeneration.images();
-    bool imported=false;
+    bool imported=false,pollFailed=false;
     if(!images.ready) {
       if(tracingHandoff)row.pollBeginUs=edvrNativeTraceNowUs();
       const HRESULT polled=frameGeneration.poll(runtimeGeneration,poses.read().originGeneration,fgConfig,fgMultiplier,
         sizes[0].recommendedImageRectWidth,sizes[0].recommendedImageRectHeight,tick.predictedDisplayTime,
         tracingHandoff?&row.poll:nullptr);
       if(tracingHandoff){row.pollEndUs=edvrNativeTraceNowUs();row.pollHr=polled;}
-      if(FAILED(polled))++fgRefused;
+      pollFailed=FAILED(polled);
+      if(pollFailed)++fgRefused;
       if(!frameGeneration.healthy()) {
         fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);publishFatalFailure(XR_ERROR_RUNTIME_FAILURE,"native_fg_copy_retirement");return true;
       }
@@ -398,18 +407,30 @@
       row.sourceTime=images.metadata.currentPoseDisplayTime;
     }
     const auto imageDecision=fgPrepareImages(status,tick.predictedDisplayTime,period,imported);
-    const bool generatedSlot=requested&&tick.shouldRender&&images.ready&&images.next&&comfortFade()<=0.f;
+    const bool interpolationAllowed=requested&&tick.shouldRender&&comfortFade()<=0.f;
+    const bool generatedSlot=interpolationAllowed&&images.ready&&images.next;
+    const bool committed=images.ready&&fgBootstrap.needsEndpoint(images.metadata.currentSequence);
+    const bool pending=fgPendingNativeUsable(tick.predictedDisplayTime);
     if(images.ready&&!generatedSlot) {
       if(images.next)fgBootstrap.miss();
       images.next=0;
-      // Don't let a suppressed, late or native-only batch take precedence
-      // over a newer completion already available on the native path.
-      if((fgFallbackValid&&fgFallbackSequence>images.metadata.currentSequence)||
-         (fgBootstrap.refreshDue(fgTick)&&fgBootstrap.completedSequence()>images.metadata.currentSequence))images.ready=false;
+      // Finish the endpoint of an intermediate already displayed. Other
+      // endpoints may give way to a newer complete native pair.
+      if(!committed&&((fgFallbackValid&&fgFallbackSequence>images.metadata.currentSequence)||
+         (pending&&fgBootstrap.completedSequence()>images.metadata.currentSequence)))images.ready=false;
     }
-    if(tick.shouldRender&&!images.ready&&fgBootstrap.refreshDue(fgTick)) {
-      fgBootstrap.miss();
-      fgRefreshNativeFallback(tick.predictedDisplayTime);
+    if(tick.shouldRender&&pending&&!generatedSlot&&!committed) {
+      // The poll above owns any ready phases. If exact B is still queued and
+      // its first phase has time for one more slot, retain displayed A here.
+      // This never holds pose credit or waits on the provider or GPU.
+      const bool usablePoll=!pollFailed&&imageDecision!=fghandoff::Images::WrongEpoch&&
+        imageDecision!=fghandoff::Images::OutsideWindow;
+      const bool deferred=!images.ready&&interpolationAllowed&&usablePoll&&
+        fgDeferNativeFallback(status,tick.predictedDisplayTime,tick.predictedDisplayPeriod,period);
+      if(!deferred) {
+        fgBootstrap.abandonNativeAttempt();
+        if(!images.ready)fgRefreshNativeFallback(tick.predictedDisplayTime);
+      }
     }
     if(tracingHandoff) {
       row.admissionPeriod=period;row.images=imageDecision;
@@ -452,7 +473,6 @@
           fgFallbackSpace=seated.frame().space;
           fgFallbackTime=b.currentPoseDisplayTime;fgFallbackReference=b.referenceGeneration;
           fgFallbackSequence=b.currentSequence;fgDisplayedSequence=b.currentSequence;fgHistory=b.historyGeneration;images.ready=false;
-          fgBootstrap.displayNative(b.currentSequence);
         }
       } else {images.ready=false;++fgRefused;publishFatalFailure(drawn,"native_fg_stereo");return true;}
     }
@@ -467,13 +487,15 @@
       pixels=true;
       fgLastPhase=0;fgLastSourceTime=fgFallbackTime;fgLastAge=tick.predictedDisplayTime-fgFallbackTime;
       generated=false;newNative=fgDisplayedSequence!=fgFallbackSequence;
-      if(pixels){fgDisplayedSequence=fgFallbackSequence;fgBootstrap.displayNative(fgFallbackSequence);}
+      fgDisplayedSequence=fgFallbackSequence;
     }
     const auto kind=!pixels?edvr::NativePresentationKind::Empty:
       generated?edvr::NativePresentationKind::Generated:
       newNative?edvr::NativePresentationKind::Native:edvr::NativePresentationKind::Repeated;
     const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind);
     if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_end");fgCancelCredit();return true;}
+    if(generated)fgBootstrap.displayGenerated(images.metadata);
+    else if(newNative)fgBootstrap.displayNative(fgDisplayedSequence);
     if(tracingHandoff) {
       row.timeUs=edvrNativeTraceNowUs();row.phase=pixels?fgLastPhase:0;
       row.presented=pixels?(generated?row.current:fgDisplayedSequence):0;

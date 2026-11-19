@@ -79,7 +79,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
   check(fixture.initialized&&SUCCEEDED(h.captured.initializeShared(producer.Get(),device.Get(),&executor))&&SUCCEEDED(h.fgFallback.initialize(device.Get()))&&
     SUCCEEDED(h.fgPendingNative.initialize(device.Get()))&&
     SUCCEEDED(h.frameGeneration.images().phases[0].initialize(device.Get())),"FG bootstrap: actual host/local capture owners");
-  h.fgConfig=7;h.fgNativePixels=true;h.frameSpace=h.seated.frame().space;
+  h.fgConfig=7;h.fgMultiplier=2;h.fgNativePixels=true;h.frameSpace=h.seated.frame().space;
   h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
   const fgbootstrap::Epoch epoch{h.runtimeGeneration,7,h.poses.read().originGeneration,3};
   h.fgBootstrap.sync(epoch);
@@ -89,7 +89,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
   check(SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[0]))&&SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[1])),"FG bootstrap: distinct native eyes");
   if(!sources[0]||!sources[1])return;
   constexpr XrDuration period=11111111;
-  const auto nativePair=[&](uint64_t sequence,bool right=true) {
+  const auto nativePair=[&](uint64_t sequence,bool right=true,bool promote=true) {
     fixture.fake.frameTime=1000000000+XrTime(sequence)*22222222;
     check(h.boundary.waitAndBegin()==XR_SUCCESS,"FG bootstrap: actual frame clock");
     h.activeFrameSequence=sequence;h.frameGeometry.displayTime=fixture.fake.frameTime;
@@ -101,7 +101,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
     }
     if(h.captured.completePending()==S_OK) {
       h.fgStageNativeFallback(epoch);
-      h.fgRefreshNativeFallback(fixture.fake.frameTime);
+      if(promote)h.fgRefreshNativeFallback(fixture.fake.frameTime);
     }
   };
   const auto pixel=[&](unsigned eye) {
@@ -128,43 +128,50 @@ template<class Check> void runFgBootstrapCases(Check check) {
   h.fgDisplayedSequence=70;h.fgBootstrap.displayNative(70);displayedTime=h.fgFallbackTime;
   h.captured.reset();nativePair(71,false);
   check(h.fgFallbackSequence==70&&pixel(0)==0xff000046u&&pixel(1)==0xff010046u,"FG bootstrap: failed second-eye capture retains complete previous pair");
+  h.captured.reset();nativePair(71,true,false);
+  const XrTime firstPoll=fixture.fake.frameTime+period;
   EdvrFgStatus report{};report.generation=epoch.generation;report.configGeneration=epoch.config;report.historyGeneration=epoch.history;
+  report.latestSourceSequence=71;report.latestReadySequence=70;
   auto batch=[&](uint64_t previous,uint64_t current) {
     EdvrFgBatch b{};b.generation=epoch.generation;b.configGeneration=epoch.config;b.referenceGeneration=epoch.reference;b.historyGeneration=epoch.history;
     b.previousSequence=previous;b.currentSequence=current;b.previousPoseDisplayTime=1000000000+XrTime(previous)*22222222;
     b.currentPoseDisplayTime=1000000000+XrTime(current)*22222222;b.multiplier=2;b.generatedCount=1;b.phaseMask=3;return b;
   };
-  auto& images=h.frameGeneration.images();const auto candidate=batch(66,67);
-  for(unsigned variant=0;variant<7;++variant) {
+  auto& images=h.frameGeneration.images();const auto candidate=batch(69,70);
+  for(unsigned variant=0;variant<8;++variant) {
     images.metadata=candidate;
     if(variant==0)++images.metadata.generation;if(variant==1)++images.metadata.configGeneration;
     if(variant==2)++images.metadata.referenceGeneration;if(variant==3)++images.metadata.historyGeneration;
     if(variant==4)images.metadata.currentPoseDisplayTime=fixture.fake.frameTime+1;
     if(variant==5){images.metadata.currentPoseDisplayTime=1;images.metadata.previousPoseDisplayTime=1;}
     if(variant==6){images.metadata.generatedCount=0;images.metadata.phaseMask=1;}
+    if(variant==7)--images.metadata.previousSequence;
     images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
-    h.fgBootstrap.completeNative(72,h.fgTick);
-    check(h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: stale/future/wrong epoch/native-only output cannot delay refresh");
-    h.fgBootstrap.displayNative(72);
+    check(!h.fgDeferNativeFallback(report,firstPoll,period,period),
+      "FG bootstrap: stale/future/wrong epoch/native-only/mismatched output cannot delay refresh");
   }
-  images.ready=true;images.metadata=batch(69,70);
+  images.ready=true;images.metadata=candidate;
   h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
-  check(!images.ready,"FG bootstrap: a timely batch behind the watermark proves synthesis but cannot be displayed");
-  nativePair(72);
-  check(h.fgFallbackSequence==70&&!h.fgBootstrap.refreshDue(h.fgTick),
-    "FG bootstrap: defer a new native endpoint for this slot after a timely synthesis proof");
-  images.metadata=batch(70,71);images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
+  check(!images.ready&&h.fgFallbackSequence==70&&h.fgDeferNativeFallback(report,firstPoll,period,period),
+    "FG bootstrap: exact timely behind batch proves one trial using real staged A and B");
+  check(!h.fgDeferNativeFallback(report,firstPoll+period,period,period),
+    "FG bootstrap: a second unavailable poll cannot extend the hold");
+  images.metadata=batch(70,71);images.ready=true;h.fgPrepareImages(report,firstPoll+period,period,true);
   check(images.ready&&images.next==1&&fgschedule::phaseTime(images.metadata,images.next)>displayedTime,
     "FG bootstrap: generated phase catches up without backward presentation or native starvation");
   images.ready=false;++h.fgTick;
   h.activeFrameSequence=73; // Credit 73 already advanced live geometry.
+  h.fgBootstrap.abandonNativeAttempt();
   h.fgRefreshNativeFallback(fixture.fake.frameTime+period);
-  check(h.fgFallbackSequence==72&&h.fgFallbackTime==fixture.fake.frameTime&&
-    pixel(0)==0xff000048u&&pixel(1)==0xff010048u,
+  // If credit closed the frame after promotion, retry before advancing the
+  // displayed sequence. The staged textures have already changed owners.
+  h.fgRefreshNativeFallback(fixture.fake.frameTime+period*2);
+  check(!h.fgBootstrap.completedSequence()&&h.fgFallbackSequence==71&&h.fgFallbackTime==fixture.fake.frameTime&&
+    pixel(0)==0xff000047u&&pixel(1)==0xff010047u,
     "FG bootstrap: missed generation slot promotes the complete staged stereo pair, not the outstanding credit");
+  h.fgDisplayedSequence=71;h.fgBootstrap.displayNative(71);
   h.fgBootstrap.sync({epoch.generation,epoch.config,epoch.reference,epoch.history+1});
-  h.fgBootstrap.completeNative(72,h.fgTick);
-  check(h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: new history re-enters native refresh");
+  check(!h.fgDeferNativeFallback(report,firstPoll+period,period,period),"FG bootstrap: new history clears the old pending handoff");
   // Drive the actual import client with a real, unsignalled shared WARP
   // fence. No provider GPU reads/retirement may occur, and no ready proof is
   // manufactured just because the metadata says generatedCount=1.
@@ -202,14 +209,14 @@ template<class Check> void runFgBootstrapCases(Check check) {
     check(h.frameGeneration.poll(epoch.generation,epoch.reference,epoch.config,2,4,4,fixture.fake.frameTime)==S_FALSE&&
       provider.taken&&!images.ready,"FG bootstrap: pending provider fence cannot publish ready images");
     h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
-    h.fgBootstrap.completeNative(72,h.fgTick);
-    check(h.fgBootstrap.refreshDue(h.fgTick)&&provider.retired==0,"FG bootstrap: pending import cannot delay native refresh or start provider reads");
+    check(!h.fgDeferNativeFallback(report,firstPoll+period,period,period)&&provider.retired==0,
+      "FG bootstrap: pending import cannot delay native refresh or start provider reads");
   }
   if(acquired)check(h.frameGeneration.close()==S_OK&&provider.discarded==(provider.taken?1u:0u)&&provider.released==provider.discarded,
     "FG bootstrap: pending import discarded/released without early GPU retirement");
   for(auto handle:textureHandles)if(handle)CloseHandle(handle);
   if(fenceHandle)CloseHandle(fenceHandle);provider.allowed=false;
-  h.fgBootstrap.clear();check(!h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: Off clears refresh");
+  h.fgBootstrap.clear();check(!h.fgBootstrap.completedSequence(),"FG bootstrap: Off clears the pending handoff");
   h.boundary.clear();check(h.captured.shutdownShared()==S_OK,"FG bootstrap: shared capture retirement");
   h.captured.shutdown();h.fgPendingNative.shutdown();h.fgFallback.shutdown();images.phases[0].shutdown();
 }

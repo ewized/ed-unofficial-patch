@@ -35,39 +35,71 @@ inline bool interpolationFits(int64_t now,int64_t sourceTime,int64_t period,
 
 class Bootstrap {
   Epoch epoch_{};
-  bool generated_=false;
-  uint64_t completed_=0,firstPendingTick_=0;
+  bool generated_=false,bootstrapUsed_=false,attempted_=false;
+  uint64_t completed_=0,firstPending_=0,displayed_=0,previousDisplayed_=0;
+  uint64_t bootstrapEndpoint_=0,committed_=0;
+
+  template<class Batch> bool provesSynthesis(const Batch& batch) const {
+    return epoch_.valid()&&nativeFgFixedMultiplier(batch.multiplier)&&
+      batch.generatedCount==batch.multiplier-1&&batch.generation==epoch_.generation&&
+      batch.configGeneration==epoch_.config&&batch.referenceGeneration==epoch_.reference&&
+      batch.historyGeneration==epoch_.history;
+  }
 public:
   void clear(){*this={};}
   void sync(const Epoch& epoch){if(!(epoch==epoch_)){clear();epoch_=epoch;}}
   const Epoch& epoch() const {return epoch_;}
   uint64_t completedSequence() const {return completed_;}
-  void completeNative(uint64_t sequence,uint64_t tick) {
+  void completeNative(uint64_t sequence) {
     if(!epoch_.valid()||sequence<=completed_)return;
-    if(!completed_)firstPendingTick_=tick;
+    if(!completed_)firstPending_=sequence;
     completed_=sequence;
   }
+  void consumeNative(uint64_t sequence) {
+    if(firstPending_&&sequence>=firstPending_) {
+      if(sequence>=completed_)completed_=0;
+      firstPending_=completed_;
+      attempted_=false;
+    }
+  }
   void displayNative(uint64_t sequence) {
-    if(sequence>=completed_)completed_=firstPendingTick_=0;
+    if(sequence>displayed_){previousDisplayed_=displayed_;displayed_=sequence;}
+    if(sequence>=committed_)committed_=0;
+    consumeNative(sequence);
   }
 
-  // Once a timely generated batch proves the current epoch, preserve A for
-  // the rest of the tick in which B finishes. Poll first on the next tick:
-  // display A->B if ready, or the complete native B if it missed that slot.
-  // Newer source completions cannot extend the original handoff deadline.
-  bool refreshDue(uint64_t tick) const {
-    return epoch_.valid()&&completed_&&(!generated_||tick>firstPendingTick_);
+  // After polling, a proven A->B handoff may keep the displayed A until one
+  // further real slot where phase one would still meet its original deadline.
+  // Replacing B with another completion cannot renew this attempt.
+  bool deferNative(uint64_t displayed,uint64_t latestQueued,uint64_t latestExported,
+                   int64_t sourceTime,int64_t displayTime,int64_t nextPeriod,int64_t admissionPeriod,
+                   unsigned multiplier) {
+    if(attempted_||!displayed||(!generated_&&(bootstrapUsed_||bootstrapEndpoint_!=displayed))||
+       completed_<=displayed||completed_-displayed!=1||
+       firstPending_!=completed_||latestQueued!=completed_||latestExported>=completed_||
+       nextPeriod<=0||displayTime<=0||displayTime>(std::numeric_limits<int64_t>::max)()-nextPeriod||
+       !interpolationFits(displayTime+nextPeriod,sourceTime,admissionPeriod,multiplier,1))return false;
+    attempted_=true;
+    bootstrapUsed_=true;
+    return true;
   }
-  // A missed handoff returns to immediate native presentation. Later timely
-  // generated work may re-prime the epoch without rebuilding GPU resources.
-  void miss(){generated_=false;}
+  void miss(){generated_=false;bootstrapEndpoint_=0;}
+  void abandonNativeAttempt(){if(attempted_)miss();}
 
-  template<class Batch>
-  void observe(const Batch& batch,bool timely) {
-    if(timely&&epoch_.valid()&&nativeFgFixedMultiplier(batch.multiplier)&&
-       batch.generatedCount==batch.multiplier-1&&batch.generation==epoch_.generation&&
-       batch.configGeneration==epoch_.config&&batch.referenceGeneration==epoch_.reference&&
-       batch.historyGeneration==epoch_.history)generated_=true;
+  // Permit a cold trial after a timely result for the exact displayed A->B
+  // pair. After that, only a submitted generated phase can re-arm a hold.
+  template<class Batch> void observeBehind(const Batch& batch,bool timely) {
+    if(!bootstrapUsed_&&timely&&provesSynthesis(batch)&&previousDisplayed_&&
+       batch.previousSequence==previousDisplayed_&&batch.currentSequence==displayed_)
+      bootstrapEndpoint_=displayed_;
   }
+  template<class Batch> void displayGenerated(const Batch& batch) {
+    if(provesSynthesis(batch)) {
+      committed_=batch.currentSequence;
+      bootstrapUsed_=true;
+      generated_=true;
+    }
+  }
+  bool needsEndpoint(uint64_t sequence) const {return committed_&&sequence==committed_;}
 };
 } // namespace edvr::openxr::fgbootstrap
