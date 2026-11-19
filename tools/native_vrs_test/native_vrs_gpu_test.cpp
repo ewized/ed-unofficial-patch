@@ -10,6 +10,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include "../../src/d3d11/native_vrs.h"
+#include "../../src/d3d11/native_vrs_policy.h"
 #include "../../src/d3d11/native_gaze.h"
 #include <algorithm>
 #include <array>
@@ -126,6 +127,87 @@ void printStatus(const char* stage){
         status.fullRateAcknowledged?"true":"false",status.coarseAcknowledged?"true":"false",
         static_cast<unsigned long long>(status.mapUpdates[0]),static_cast<unsigned long long>(status.mapUpdates[1]),static_cast<unsigned long long>(status.mapBytes),
         static_cast<unsigned long long>(status.rateSets),static_cast<unsigned long long>(status.resourceSets),static_cast<unsigned long long>(status.driverErrors));
+}
+// Diagnostic control only. The production owner has already verified and
+// pinned this NVAPI entry point. Reissue its byte-identical viewport table,
+// leaving the accepted eye resource and all D3D state alone.
+auto viewportReassertion(){
+    struct Viewport {uint8_t enabled,padding[3];uint32_t rate[16];};
+    struct Desc {uint32_t version,count;Viewport* viewport;};
+    static_assert(sizeof(Viewport)==68 && sizeof(Desc)==16,"NVAPI V1 x64");
+    using Query=void*(__cdecl*)(uint32_t);
+    using SetRates=int(__cdecl*)(IUnknown*,Desc*);
+    const auto query=symbol<Query>(GetModuleHandleW(L"nvapi64.dll"),"nvapi_QueryInterface");
+    const auto set=reinterpret_cast<SetRates>(query(0x34f7938f));
+    require(set!=nullptr,"diagnostic viewport setter");
+    return [set](ID3D11DeviceContext* context){
+        Viewport viewport{1,{},{}};
+        const auto table=edvr::native_vrs::palette(edvr::native_vrs::ViewportRates::Foveated);
+        std::copy(table.begin(),table.end(),viewport.rate);
+        Desc desc{0x10010,1,&viewport};
+        require(set(context,&desc)==0,"diagnostic viewport reassertion");
+    };
+}
+
+// Run after a failed production proof. Both arms replay the full split with
+// identical OM, PS, depth/stencil and map changes. Snapshot the lower-left
+// triangle after each issue, in an outer tile common to every stage. Read
+// back only after the run, outside its host gaze receipt.
+template<class Compile,class Rate,class Reassert>
+void diagnoseWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile compile,
+                     Rate& rate,Reassert reassert,bool forceViewport) {
+    using witness_gpu::RateStep;
+    constexpr UINT patch=8,stages=6;
+    const char* const names[stages]={"combined_guard","split_overlap","split_coplanar",
+        "combined_fallback","split_after_reset","split_guard"};
+    D3D11_TEXTURE2D_DESC td{};td.Width=stages*patch;td.Height=patch;
+    td.ArraySize=td.MipLevels=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32_FLOAT;
+    td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> samples;
+    hr(device->CreateTexture2D(&td,nullptr,&samples),"diagnostic material staging");
+    ComPtr<ID3D11Resource> color;
+    unsigned pass=0,preparations=0,captured=0,calls=0;
+    auto capture=[&](unsigned stage){
+        const D3D11_BOX box{32,192,0,32+patch,192+patch,1};
+        context->CopySubresourceRegion(samples.Get(),0,stage*patch,0,0,color.Get(),0,&box);
+        captured|=1u<<stage;
+    };
+    auto probe=[&](RateStep step,ID3D11RenderTargetView* target,ID3D11DepthStencilView* depth){
+        if(step==RateStep::BeginPass){
+            if(pass==1)capture(0);
+            if(pass==2)capture(5);
+            color.Reset();target->GetResource(&color);++pass;
+        }else if(step==RateStep::PrepareWitness){
+            if(preparations>0 && preparations<5)capture(preparations);
+            ++preparations;
+        }
+        if(!rate(step,target,depth))return false;
+        if(forceViewport && step==RateStep::Material){reassert(context);++calls;}
+        return true;
+    };
+    const bool exact=witness_gpu::run(device,context,compile,probe,true);
+    const char* arm=forceViewport?"reassert_viewport":"resource_only";
+    std::printf("{\"diagnostic_split\":\"%s\",\"original_pixel_gate\":%s,\"viewport_reassertions\":%u,\"capture_mask\":%u}\n",
+        arm,exact?"true":"false",calls,captured);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr(context->Map(samples.Get(),0,D3D11_MAP_READ,0,&mapped),"diagnostic material readback");
+    const auto pixel=[&](UINT x,UINT y){
+        return reinterpret_cast<const float*>(static_cast<const BYTE*>(mapped.pData)+y*mapped.RowPitch)[x];
+    };
+    for(UINT stage=0;stage<stages;++stage){
+        if(!(captured&(1u<<stage)))continue;
+        unsigned equalX=0,equalY=0;
+        float low=INFINITY,high=-INFINITY;
+        for(UINT y=0;y<patch;++y)for(UINT x=0;x<patch;++x){
+            const UINT i=stage*patch+x;const float v=pixel(i,y);
+            low=std::min(low,v);high=std::max(high,v);
+            if(x+1<patch && pixel(i+1,y)==v)++equalX;
+            if(y+1<patch && pixel(i,y+1)==v)++equalY;
+        }
+        std::printf("{\"diagnostic_split\":\"%s\",\"stage\":\"%s\",\"equal_x_of_56\":%u,\"equal_y_of_56\":%u,\"range\":[%.9g,%.9g]}\n",
+            arm,names[stage],equalX,equalY,low,high);
+    }
+    context->Unmap(samples.Get(),0);
 }
 int run(LUID expected){
     Deadline deadline;
@@ -337,6 +419,13 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");
+    if(!witnessPixels && owner && uniformWitness && transitionsExact && verifiedReactivations>=2){
+        const auto reassert=viewportReassertion();
+        edvr::nativeVrsConfigure(true);
+        for(bool forceViewport:{false,true})
+            diagnoseWitness(device.Get(),context.Get(),compileFn,witnessRate,reassert,forceViewport);
+        edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),++witnessFrame);
+    }
     return success?0:3;
 }
 int wmain(int argc,wchar_t** argv){
