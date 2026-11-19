@@ -27,6 +27,7 @@
 #pragma once
 
 #include "../common/elite_graphics_folder.h"
+#include "../common/dlss_quality.h"
 #include "flat_mono_frame.h"
 
 #include <windows.h>
@@ -49,6 +50,7 @@ struct EliteGraphics {
     char preset[48] = {};       // the preset as written
     bool fileRead = false;      // a Custom.<major>.<minor>.fxcfg was read
     char file[80] = {};         // its name
+    float hmdMultiplier = 0.f;  // known only for a recognized Custom preset file
     // -1: the field was not in the file (or the file was not read). 0 is off.
     int aaMode = -1, bloomQuality = -1, dofEnabled = -1;
     bool aaOn() const { return aaMode > 0; }
@@ -83,6 +85,16 @@ inline bool flatXmlInt(const std::string& xml, const char* tag, int* out) {
     if (end == text.c_str()) return false;
     if (out) *out = static_cast<int>(value);
     return true;
+}
+
+// Missing, malformed and nonphysical values cannot size the game's eye
+// textures. Unlike the legacy diagnostic, reject values with trailing junk.
+inline float flatXmlHmdMultiplier(const std::string& xml) {
+    std::string value;
+    if (!flatXmlText(xml, "HMDRenderTargetMultiplier", &value) || value.empty()) return 0.f;
+    char* end = nullptr;
+    const float multiplier = std::strtof(value.c_str(), &end);
+    return end == value.c_str() + value.size() && dlssEliteMultiplierKnown(multiplier) ? multiplier : 0.f;
 }
 
 // ---- which fxcfg ---------------------------------------------------------------------
@@ -216,7 +228,7 @@ inline bool flatReadSmallFile(const std::wstring& path, std::string* text) {
 }
 inline void flatCopyName(char* dst, size_t cap, const std::string& src) {
     if (!cap) return;
-    const size_t n = std::min(src.size(), cap - 1);
+    const size_t n = (std::min)(src.size(), cap - 1);
     std::memcpy(dst, src.data(), n);
     dst[n] = 0;
 }
@@ -244,6 +256,8 @@ inline EliteGraphics flatReadEliteGraphics(const std::wstring& folder, const Eli
             flatXmlInt(text, "AAMode", &g.aaMode);
             flatXmlInt(text, "BloomQuality", &g.bloomQuality);
             flatXmlInt(text, "DOFEnabled", &g.dofEnabled);
+            if (flatCustomFxcfgVersion(listing.fxcfg[pick].name, nullptr, nullptr))
+                g.hmdMultiplier = flatXmlHmdMultiplier(text);
         }
     }
     return g;

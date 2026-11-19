@@ -7,7 +7,8 @@
 // the game starts, and only when Anti-aliasing is XeSS-SR then (xess_fg.cpp). So with Frame Generation on and XeSS-SR chosen but no bridge, the
 // frame generation rows wait for a restart, and so does the Anti-aliasing row when its value changed since the launch (the choice that made the
 // difference). When the bridge was made and then failed (xessFgProblem), a restart alone does not fix it: those rows are Stopped, which is not
-// pending.
+// pending. In VR the layout for a named DLSS quality is fixed at startup; a
+// change from that route to another AA mode takes effect after restart.
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -17,7 +18,7 @@ namespace edvr {
 // The condition a table entry is judged by.
 enum class RestartRule {
   XessFrameGeneration,   // fix.xess_frame_generation, fix.xess_generated_frames: the bridge was never made this launch
-  XessAntiAliasing,      // fix.temporal_aa: the choice (made since launch) that the bridge needs
+  AntiAliasing,         // fix.temporal_aa: launches a different VR sizing route or changes the flat bridge
 };
 
 struct ConditionalRestartEntry {
@@ -29,18 +30,20 @@ struct ConditionalRestartEntry {
 inline constexpr ConditionalRestartEntry kConditionalRestarts[] = {
     {"fix", "xess_frame_generation", RestartRule::XessFrameGeneration},
     {"fix", "xess_generated_frames", RestartRule::XessFrameGeneration},
-    {"fix", "temporal_aa", RestartRule::XessAntiAliasing},
+    {"fix", "temporal_aa", RestartRule::AntiAliasing},
 };
 
 enum class RestartState { NotPending, PendingRestart, Stopped };
 
 struct RestartInput {
-  bool flatProfile = false;           // the rules are the flat profile's: VR has no XeSS Frame Generation
+  bool flatProfile = false;
   bool aaIsXess = false;              // Anti-aliasing is XeSS-SR now
   bool fgOn = false;                  // fix.xess_frame_generation is on now
   bool bridged = false;               // the bridge was made this launch (xessFgBridged)
   bool problemPresent = false;        // frame generation was tried and failed or stopped (xessFgProblem)
   bool aaChangedSinceLaunch = false;  // fix.temporal_aa differs from its value at launch
+  bool vrDlssQualityActive = false;   // native VR applied a named render size at launch
+  bool aaIsDlss = false;              // the selected value is ordinary DLSS, not legacy DLAA
 };
 
 inline const ConditionalRestartEntry* conditionalRestartFor(const char* section, const char* key) {
@@ -53,10 +56,15 @@ inline const ConditionalRestartEntry* conditionalRestartFor(const char* section,
 // The state of the row section.key. A row that is not in the table is NotPending (its own `restart` mark is rowPending's business, not this table's).
 inline RestartState conditionalRestartState(const RestartInput& in, const char* section, const char* key) {
   const ConditionalRestartEntry* e = conditionalRestartFor(section, key);
-  if (!e || !in.flatProfile || !in.fgOn) return RestartState::NotPending;
+  if (!e) return RestartState::NotPending;
+  if (!in.flatProfile) {
+    return e->rule == RestartRule::AntiAliasing && in.vrDlssQualityActive && !in.aaIsDlss
+               ? RestartState::PendingRestart : RestartState::NotPending;
+  }
+  if (!in.fgOn) return RestartState::NotPending;
   if (in.problemPresent) return e->rule == RestartRule::XessFrameGeneration ? RestartState::Stopped : RestartState::NotPending;
   if (!in.aaIsXess || in.bridged) return RestartState::NotPending;
-  if (e->rule == RestartRule::XessAntiAliasing && !in.aaChangedSinceLaunch) return RestartState::NotPending;
+  if (e->rule == RestartRule::AntiAliasing && !in.aaChangedSinceLaunch) return RestartState::NotPending;
   return RestartState::PendingRestart;
 }
 

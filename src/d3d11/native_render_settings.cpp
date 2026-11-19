@@ -1,4 +1,6 @@
 #include "../common/native_render_settings.h"
+#include "native_dlss_quality.h"
+#include "flat_elite_settings.h"
 #include "native_render_labels.h"
 
 #include <cmath>
@@ -34,6 +36,24 @@ bool copySizingInput(const void* input, EdvrNativeRenderSizing& output) noexcept
 bool writeSizingOutput(void* output, const EdvrNativeRenderSizing& value) noexcept {
     __try {
         *static_cast<EdvrNativeRenderSizing*>(output)=value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool copySizingV2Input(const void* input, EdvrNativeRenderSizingV2& output) noexcept {
+    __try {
+        output=*static_cast<const EdvrNativeRenderSizingV2*>(input);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool writeDlssQuality(void* output, const EdvrNativeDlssQuality& value) noexcept {
+    __try {
+        *static_cast<EdvrNativeDlssQuality*>(output)=value;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -76,6 +96,10 @@ std::string number(uint32_t value) {
     snprintf(text, sizeof(text), "%u", value);
     return text;
 }
+}
+
+edvr::DlssQuality edvr::nativeDlssQualityActive() noexcept {
+    return Config::get().nativeDlssQuality();
 }
 
 bool nativeRenderLabels(NativeRenderLabels* out) {
@@ -237,15 +261,28 @@ extern "C" BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version,
 extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
                                                         uint32_t size,
                                                         const void* input) {
-    if (version != EDVR_NATIVE_RENDER_SIZING_VERSION_1 ||
-        size != sizeof(EdvrNativeRenderSizing) || !input) return FALSE;
+    if (!input) return FALSE;
+    edvr::DlssQuality quality = edvr::DlssQuality::Custom;
     EdvrNativeRenderSizing candidate{};
-    if(!copySizingInput(input,candidate) || candidate.size!=sizeof(candidate) ||
-       candidate.version!=version || candidate.reserved!=0 || candidate.valid>1)
+    if (version == EDVR_NATIVE_RENDER_SIZING_VERSION_1 && size == sizeof(candidate)) {
+        if (!copySizingInput(input, candidate)) return FALSE;
+    } else if (version == EDVR_NATIVE_RENDER_SIZING_VERSION_2 && size == sizeof(EdvrNativeRenderSizingV2)) {
+        EdvrNativeRenderSizingV2 next{};
+        if (!copySizingV2Input(input, next) || next.reserved != 0 ||
+            next.dlssQuality >= static_cast<uint32_t>(edvr::DlssQuality::Invalid)) return FALSE;
+        candidate = next.sizing;
+        quality = static_cast<edvr::DlssQuality>(next.dlssQuality);
+    } else {
+        return FALSE;
+    }
+    if(candidate.size!=size || candidate.version!=version || candidate.reserved!=0 || candidate.valid>1)
         return FALSE;
     if(!candidate.valid) {
         std::lock_guard<std::mutex> lock(g_sizingMutex);
-        if(!g_sizing.valid || candidate.generation==g_sizing.generation) { g_sizing={}; g_labels={}; }
+        if(!g_sizing.valid || candidate.generation==g_sizing.generation) {
+            g_sizing={}; g_labels={};
+            edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Custom);
+        }
         return TRUE;
     }
     if(!candidate.generation || !std::isfinite(candidate.requestedScale) ||
@@ -270,7 +307,10 @@ extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
     {
         std::lock_guard<std::mutex> lock(g_sizingMutex);
         if(g_sizing.valid && candidate.generation<g_sizing.generation) return FALSE;
+        candidate.size=sizeof(candidate);
+        candidate.version=EDVR_NATIVE_RENDER_SIZING_VERSION_1;
         g_sizing=candidate;
+        edvr::Config::get().setNativeDlssQuality(quality);
     }
     // Remembered for a LATER launch's fix.vscreen_res_width = auto, which has
     // to decide the on-foot panel's size before this session's own headset is
@@ -279,6 +319,42 @@ extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
     edvr::noteResolvedEyeWidthForVScreenAuto(edvr::Config::get().logDir(),
                                              candidate.activeWidth[0]);
     return TRUE;
+}
+
+extern "C" BOOL WINAPI edvrQueryNativeDlssQuality(uint32_t version, uint32_t size,
+                                                  void* output) {
+    if (version != EDVR_NATIVE_DLSS_QUALITY_VERSION_1 ||
+        size != sizeof(EdvrNativeDlssQuality) || !output) return FALSE;
+    using namespace edvr;
+    const auto& config = Config::get();
+    EdvrNativeDlssQuality answer{size, version, static_cast<uint32_t>(DlssQuality::Custom), 0.0f};
+    std::string mode;
+    std::string setting;
+    if (runtimeVrProfile()) {
+        mode = config.configuredTemporalMode();
+        setting = config.getString("fix.dlss_quality", "custom");
+    } else {
+        std::string text;
+        if (readFileBytes(config.vrSettingsPath(), &text, 1u << 20)) {
+            mode = iniValue(text, "fix.temporal_aa", "off");
+            setting = iniValue(text, "fix.dlss_quality", "custom");
+        }
+    }
+    if (_stricmp(mode.c_str(), "dlss") != 0) return writeDlssQuality(output, answer);
+    const DlssQuality quality = parseDlssQuality(setting);
+    answer.quality = static_cast<uint32_t>(quality);
+    if (dlssQualityRatio(quality)) {
+        const auto folder = flatEliteGraphicsFolder();
+        const auto elite = flatReadEliteGraphics(folder, flatListEliteGraphics(folder));
+        answer.eliteMultiplier = elite.hmdMultiplier;
+        if (!answer.eliteMultiplier) {
+            Log::get().note("DLSS quality: could not confirm Elite's HMD Quality from the active Custom preset. "
+                            "The game will keep its own render scale (preset %s, file %s).",
+                            elite.presetKnown ? elite.preset : "unknown",
+                            elite.fileRead ? elite.file : "unknown");
+        }
+    }
+    return writeDlssQuality(output, answer);
 }
 
 extern "C" BOOL WINAPI edvrQueryNativeRenderSizing(uint32_t version,

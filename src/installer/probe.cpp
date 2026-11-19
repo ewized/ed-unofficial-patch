@@ -125,7 +125,8 @@ void parsePe(const unsigned char* base, DWORD size, PeFacts* facts) {
             "edvrAcquireNativeGraphics","edvrAcquireNativeMenu","edvrAcquireNativeTemporal",
             "edvrAcquireNativeSharpen","edvrAcquireNativeFrame",
             "edvrAcquireNativeTiming","edvrAcquireGraphicsBridge","edvrAcquireRenderBoundary",
-            "edvrQueryNativeRenderSettings","edvrPublishNativeRenderSizing","edvrQueryNativeRenderSizing"};
+            "edvrQueryNativeRenderSettings","edvrQueryNativeDlssQuality",
+            "edvrPublishNativeRenderSizing","edvrQueryNativeRenderSizing"};
         const char* runtimeNames[]={
             "VRControlPanel","VRDashboardManager","VRTrackedCamera","VR_GetGenericInterface",
             "VR_GetInitToken","VR_GetStringForHmdError","VR_GetVRInitErrorAsEnglishDescription",

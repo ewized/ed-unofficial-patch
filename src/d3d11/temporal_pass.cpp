@@ -5260,21 +5260,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                         static_cast<float>(w) / static_cast<float>(base);
                                     const bool agree = fabsf(seen - autoMult) < 0.02f;
                                     Log::get().note(
-                                        "texture filtering: the mip bias %+.2f was derived at launch "
-                                        "from Elite's render fraction of %.3f, and this frame's "
+                                        "texture filtering: auto mip bias %+.2f uses render fraction %.3f, and this frame's "
                                         "fraction is %.3f -- %s",
                                         static_cast<double>(autoBias), static_cast<double>(autoMult),
                                         static_cast<double>(seen),
                                         agree ? "they agree, so the mips are right for this frame."
                                               : "they DISAGREE. A mip bias is baked into every sampler "
                                                 "at creation, so this session's textures are wrong by "
-                                                "the difference and only a restart can fix it. If a "
-                                                "restart does not, HMDRenderTargetMultiplier no longer "
-                                                "means the render fraction and auto needs rethinking.");
+                                                "the difference and only a restart can fix it. Verify Elite's "
+                                                "HMD Quality and the active DLSS quality in the startup log.");
                                 } else {
                                     Log::get().note(
-                                        "texture filtering: the mip bias %+.2f was derived at launch "
-                                        "from Elite's render fraction of %.3f. NVIDIA is not "
+                                        "texture filtering: auto mip bias %+.2f uses render fraction %.3f. NVIDIA is not "
                                         "upscaling this frame, so there is no ratio here to check it "
                                         "against; the compositor scales the finished frame to the "
                                         "panel instead.",

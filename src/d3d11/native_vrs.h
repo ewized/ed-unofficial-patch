@@ -23,6 +23,7 @@ struct NativeVrsStatus {
     int32_t lastDriverStatus=0;
     uint64_t ticks=0,providerPolls=0,validPairs=0,invalidPairs=0,staleRefusals=0;
     uint64_t worldCalls=0,worldAccepted=0,fullRateCalls=0,invalidations=0;
+    uint64_t expandedMaterialAccepted[2]{};
     uint64_t mapUpdates[2]{},mapBytes=0,rateSets=0,resourceSets=0,driverErrors=0;
     uint64_t contextRefusals=0,frameRefusals=0,targetRefusals=0;
     float sharpRadius=.15f,transitionRadius=.45f;
@@ -65,11 +66,14 @@ struct NativeVrsProjection {
     float frustum[4]{}; // left,right,down,up tangents, before jitter
     float shift[2]{};
 };
-// Caller has already proved exact opaque world shader family, positive DSV eye,
-// and a full-eye world target. This function additionally validates dimensions,
-// host receipt age and native provider validity; true means setters succeeded.
+// Caller identified an original material draw, a settled scene depth eye and
+// a full-eye scene color target. At issue, this validates actual attachments,
+// depth test, raster state, viewport, provider and frame. A true result means
+// the driver acknowledged the map. expandedMaterial tags newly eligible draws
+// for coverage counters only; it does not affect admission.
 bool nativeVrsBeforeWorld(ID3D11DeviceContext*,unsigned eye,
-    ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection* =nullptr) noexcept;
+    ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection* =nullptr,
+    bool expandedMaterial=false) noexcept;
 // All UI, unknown passes and reissues must pass a full-rate boundary. Invalidate
 // on ExecuteCommandList/ClearState/foreign ownership; never trust a prior set.
 void nativeVrsFullRate(ID3D11DeviceContext*) noexcept;

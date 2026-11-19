@@ -61,6 +61,7 @@
 #include "menu_flat_layout.h"
 #include "menu_pages.h"
 #include "menu_restart.h"
+#include "native_dlss_quality.h"
 #include "native_menu.h"
 #include "native_vrs.h"
 #include "native_render_labels.h"
@@ -438,20 +439,16 @@ std::string dottedOf(const MenuRowDef& d) {
     return std::string(d.section) + "." + d.key;
 }
 
-std::string rowValue(const MenuRowDef& d) {
-    if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-        strcmp(d.key, "temporal_aa") == 0)
-        return Config::get().requestedTemporalMode();
-    return Config::get().getString(dottedOf(d).c_str(), d.shipped);
+bool isAntiAliasingRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0;
 }
 
-bool flatDlssSelected() {
-    for (int i = 0; i < kRowDefCount; ++i)
-        if (strcmp(kMenuRows[i].section, "fix") == 0 &&
-            strcmp(kMenuRows[i].key, "temporal_aa") == 0)
-            return _stricmp(g_rows[i].value.c_str(), "dlss") == 0 ||
-                   _stricmp(g_rows[i].value.c_str(), "dlaa") == 0;
-    return false;
+std::string rowValue(const MenuRowDef& d) {
+    if (isAntiAliasingRow(d)) {
+        return runtimeFlatProfile() ? Config::get().requestedTemporalMode()
+                                    : Config::get().configuredTemporalMode();
+    }
+    return Config::get().getString(dottedOf(d).c_str(), d.shipped);
 }
 
 bool boolOf(const std::string& v, bool def) {
@@ -481,26 +478,21 @@ bool isOpenxrRenderScaleRow(const MenuRowDef& d) {
            strcmp(d.key, "openxr_resolution") == 0;
 }
 
-// fix.temporal_aa_model (the DLSS preset row): NVIDIA's reconstruction
-// model, which only DLSS and DLAA read (temporal_mode.h). It stays on the
-// Performance page under every mode -- rather than dropping out of the list
-// on a mode change, which read as the setting vanishing -- and dims and
-// stops responding to input instead.
-bool isDlssPresetRow(const MenuRowDef& d) {
+// Keep both NVIDIA rows visible so the adjacent choices can be found after
+// changing anti-aliasing. The quality row is VR only; the model is shared.
+bool isDlssModelRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa_model") == 0;
 }
 
-bool dlssPresetDisabled() {
-    if (runtimeFlatProfile()) return !flatDlssSelected();
-    return temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) !=
-           TemporalEngine::Nvidia;
+bool isDlssQualityRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "dlss_quality") == 0;
 }
 
 // fix.render_sharpness (the Sharpening row). VR sharpens whatever it submits,
 // so there its row never dims. The flat profile sharpens the temporal pass's
 // output (flat_sharpen.h), so with anti-aliasing off there is nothing for it
 // to act on: the row stays on the panel, dimmed, and stops responding, the way
-// the DLSS preset row does under a mode that does not read it.
+// the DLSS model row does under a mode that does not read it.
 bool isSharpenRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "render_sharpness") == 0;
 }
@@ -558,13 +550,28 @@ bool isXessFgFramesRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "xess_generated_frames") == 0;
 }
 
-// Both read the value the panel shows (g_rows), as flatDlssSelected does, not Config: an F8 change is shown at once but reaches Config only with the reload after
+// Read the value the panel shows (g_rows): an F8 change is shown at once but reaches Config only with the reload after
 // the worker's write, so reading Config dimmed the rows one change late (2026-11-12).
 const std::string& shownValue(const char* section, const char* key) {
     static const std::string none;
     for (int i = 0; i < kRowDefCount; ++i)
         if (strcmp(kMenuRows[i].section, section) == 0 && strcmp(kMenuRows[i].key, key) == 0) return g_rows[i].value;
     return none;
+}
+
+bool dlssSelected() {
+    return _stricmp(shownValue("fix", "temporal_aa").c_str(), "dlss") == 0;
+}
+
+const char* dlssRowInactiveHint(const MenuRowDef& row) {
+    if (isDlssQualityRow(row)) {
+        if (!nativeMenuActive()) return "DLSS quality requires native OpenXR.";
+        if (!dlssSelected()) return "Select DLSS to change its quality.";
+    }
+    if (isDlssModelRow(row) && temporalEngineFor(shownValue("fix", "temporal_aa")) != TemporalEngine::Nvidia) {
+        return "Select DLSS to change its model.";
+    }
+    return nullptr;
 }
 
 bool flatAntiAliasingIsXess() { return _stricmp(shownValue("fix", "temporal_aa").c_str(), "xess") == 0; }
@@ -620,6 +627,11 @@ RestartState rowConditionalState(int def) {
     if (!conditionalRestartFor(d.section, d.key)) return RestartState::NotPending;
     RestartInput in;
     in.flatProfile = runtimeFlatProfile();
+    if (!in.flatProfile) {
+        in.vrDlssQualityActive = nativeDlssQualityActive() != DlssQuality::Custom;
+        in.aaIsDlss = dlssSelected();
+        return conditionalRestartState(in, d.section, d.key);
+    }
     in.aaIsXess = flatAntiAliasingIsXess();
     in.fgOn = xessFgToggleOn();
     in.bridged = xessFgBridged();
@@ -633,8 +645,24 @@ RestartState rowConditionalState(int def) {
     return conditionalRestartState(in, d.section, d.key);
 }
 
-// A row waits for a restart: its own `restart` setting changed since launch, or its condition says so.
-bool rowWaiting(int def) { return g_rows[def].pending || rowConditionalState(def) == RestartState::PendingRestart; }
+// A saved, unchanged quality can still wait for restart when DLSS itself was
+// selected after launch. A quality rejected during startup needs a log diagnosis.
+bool rowWaiting(int def) {
+    const MenuRowDef& row = kMenuRows[def];
+    if (!isDlssQualityRow(row)) {
+        return g_rows[def].pending || rowConditionalState(def) == RestartState::PendingRestart;
+    }
+    if (dlssRowInactiveHint(row)) return false;
+    if (g_rows[def].pending) return true;
+    const DlssQuality requested = parseDlssQuality(g_rows[def].value);
+    if (requested == DlssQuality::Invalid || requested == nativeDlssQualityActive()) return false;
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (isAntiAliasingRow(kMenuRows[i])) {
+            return _stricmp(g_rows[i].snapshot.c_str(), "dlss") != 0;
+        }
+    }
+    return false;
+}
 
 
 // visual.star_glow (the Star glow row). It strengthens the halo of Elite's own bloom, so with Elite's Bloom option off it changes nothing, and the
@@ -1155,6 +1183,8 @@ struct ChoiceItem {
 
 const char* nvidiaLabel() {
     if (runtimeFlatProfile()) return flatRuntimeNativeScale() ? "DLAA" : "DLSS";
+    const DlssQuality active = nativeDlssQualityActive();
+    if (active != DlssQuality::Custom) return active == DlssQuality::Dlaa ? "DLAA" : "DLSS";
     float quality = 0.0f;
     deviceHookHmdQuality(&quality);
     return temporalNvidiaLabel(quality);
@@ -1178,11 +1208,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
                 c.value = item;
                 c.label = item;
             }
-            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && c.value == "dlss") {
-                c.label = nvidiaLabel();
-            }
-            if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-                strcmp(d.key, "temporal_aa") == 0) {
+            if (runtimeFlatProfile() && isAntiAliasingRow(d)) {
                 if (c.value == "off") c.label = "Off";
                 else if (c.value == "on") c.label = "TAA";
                 else if (c.value == "dlss") c.label = nvidiaLabel();
@@ -2886,7 +2912,13 @@ void buildContent(MenuContent& c) {
             const bool capturingThis = (s.captureEntry == i);
             const bool hotkeyRow = d.kind == MenuKind::Hotkey;
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
-            const bool dlssRow = isDlssPresetRow(d);
+            const bool dlssModelRow = isDlssModelRow(d);
+            const bool dlssQualityRow = isDlssQualityRow(d);
+            const char* dlssInactive = dlssRowInactiveHint(d);
+            const bool dlssQualityDeclined = dlssQualityRow && !dlssInactive && !waiting &&
+                                             dlssQualityRatio(parseDlssQuality(r.value)) > 0.0 &&
+                                             nativeDlssQualityActive() == DlssQuality::Custom;
+            const char* const dlssQualityFallback = "DLSS quality could not apply. Using Elite's HMD Quality.";
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -2894,7 +2926,7 @@ void buildContent(MenuContent& c) {
             const bool doorsRow = isRoomsBehindDoorsRow(d);
             const bool xessFramesRow = isXessFgFramesRow(d);
             const bool xessToggleRow = isXessFgToggleRow(d);
-            const bool dim = (dlssRow && dlssPresetDisabled()) ||
+            const bool dim = dlssInactive ||
                              (xessFramesRow && xessFgFramesRowDisabled()) ||
                              (xessToggleRow && xessFgToggleRowDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
@@ -2904,13 +2936,11 @@ void buildContent(MenuContent& c) {
                              (windowDistanceRow && stationWindowDistanceRowDisabled());
             l.dim = dim;
             strncpy(l.left, d.label, sizeof(l.left) - 1);
-            if (dlssRow) {
-                const std::string mode = runtimeFlatProfile() ? Config::get().requestedTemporalMode()
-                                                              : Config::get().getString("fix.temporal_aa", "off");
-                snprintf(l.left, sizeof(l.left), "%s preset", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
+            if (dlssModelRow && !dlssInactive) {
+                const std::string& mode = shownValue("fix", "temporal_aa");
+                snprintf(l.left, sizeof(l.left), "%s model", _stricmp(mode.c_str(), "dlaa") == 0 ? "DLAA" : nvidiaLabel());
             }
-            if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
-                strcmp(d.key, "temporal_aa") == 0) {
+            if (runtimeFlatProfile() && isAntiAliasingRow(d)) {
                 strncpy(l.left, "Anti-aliasing", sizeof(l.left) - 1);
             }
             const bool openxrScaleRow = isOpenxrRenderScaleRow(d);
@@ -2932,10 +2962,17 @@ void buildContent(MenuContent& c) {
                 // timing cue as every other restart row, while keeping the
                 // per-eye dimensions readable. A conditional row (menu_restart.h)
                 // whose value is its launch value shows no arrow: only the badge.
-                if (!openxrScaleRow && r.value != r.snapshot) v = displayValue(d, r.snapshot) + " -> " + v;
+                if (dlssQualityRow) {
+                    const std::string active = displayValue(d, dlssQualityName(nativeDlssQualityActive()));
+                    if (active != v) v = active + " -> " + v;
+                } else if (!openxrScaleRow && r.value != r.snapshot) {
+                    v = displayValue(d, r.snapshot) + " -> " + v;
+                }
                 l.badge = kBadgePending;
             } else if (stopped) {
                 l.badge = kBadgeStopped;   // the value stays as set; the highlighted row's hint says why (xessFgRestartHint)
+            } else if (dlssQualityDeclined) {
+                v += " (not applied)";
             } else if (d.applies == 2) {
                 l.badge = kBadgeRestart;
             } else if (d.applies == 0) {
@@ -2951,7 +2988,8 @@ void buildContent(MenuContent& c) {
             }
             strncpy(l.right, v.c_str(), sizeof(l.right) - 1);
             l.reserveBadge = d.applies == 2 || d.applies == 0 ||
-                             (runtimeFlatProfile() && conditionalRestartFor(d.section, d.key) != nullptr) ||
+                             (conditionalRestartFor(d.section, d.key) != nullptr &&
+                              (runtimeFlatProfile() || nativeDlssQualityActive() != DlssQuality::Custom)) ||
                              r.clashCount > 0;
             // Anything with two states is a switch, drawn where the value
             // would be: a plain boolean, and a two-way choice where one
@@ -2976,7 +3014,13 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && dim && hudAaRow)
+            if (hi && dlssInactive)
+                snprintf(c.hint, sizeof(c.hint), "%s", dlssInactive);
+            else if (hi && dlssQualityDeclined)
+                snprintf(c.hint, sizeof(c.hint), "%s", dlssQualityFallback);
+            else if (hi && !runtimeFlatProfile() && waiting && isAntiAliasingRow(d))
+                snprintf(c.hint, sizeof(c.hint), "%s", "DLSS stays active at this quality until you restart the game.");
+            else if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && glassDirtRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", cockpitGlassDirtHint());
@@ -2988,10 +3032,8 @@ void buildContent(MenuContent& c) {
                 snprintf(c.hint, sizeof(c.hint), "%s", "Paused in exclusive fullscreen: choose Borderless or Windowed in Elite's display options.");
             else if (hi && (xessFramesRow || xessToggleRow) && xessFgNeedsRestart())
                 snprintf(c.hint, sizeof(c.hint), "%s", xessFgRestartHint());
-            else if (hi && dim && runtimeFlatProfile())
-                snprintf(c.hint, sizeof(c.hint), "%s",
-                         sharpenRow ? "Turn anti-aliasing on to sharpen."
-                                    : "Choose DLSS to change its model preset.");
+            else if (hi && dim && sharpenRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", "Turn anti-aliasing on to sharpen.");
             // The Star glow row, highlighted, in the VR menu: Elite's Bloom is off, so the setting changes nothing. The row keeps its style (no dim). The flat panel
             // says it as a note under the Visual tab's rows instead.
             if (const char* bloomHint = sgb::rowHint(runtimeFlatProfile(), hi && isStarGlowRow(d), s.starGlowBloom.percent(), s.starGlowBloom.state()))
@@ -3054,11 +3096,14 @@ void buildContent(MenuContent& c) {
                 }
                 if (!openxrScaleRow) {
                     body += std::string("Shipped ") + displayValue(d, d.shipped) + ".  " +
-                            (d.applies == 1   ? "Applies at once."
-                             : d.applies == 2 ? "Takes effect at the next launch."
+                            (d.applies == 2 || waiting ? "Takes effect at the next launch."
+                             : d.applies == 1 ? "Applies at once."
                                               : "When it applies is not documented.");
                 }
                 if (openxrScaleRow) body += "\n" + openxrResolutionTooltip(res);
+                if (dlssQualityDeclined) {
+                    body += std::string("\n") + dlssQualityFallback + " See the EDVR log for details.";
+                }
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
                                       : "\nEnter writes it, Escape leaves it alone.";
@@ -3085,8 +3130,10 @@ void buildContent(MenuContent& c) {
                         }
                         body += "\nPress R again to remove this headset's entry (back to " + fallback + ").";
                     }
+                } else if (dlssInactive) {
+                    body += std::string("\n") + dlssInactive;
                 } else if (dim) {
-                    body += "\nInactive: only DLSS and DLAA read this preset.";
+                    body += "\nThis setting is inactive.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
                 } else if (capturingThis) {
@@ -3512,8 +3559,8 @@ void drainWrites() {
 void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
     const std::string& cur = g_rows[defIndex].value;
-    if (isDlssPresetRow(d) && dlssPresetDisabled()) {
-        g_s.lastWrite = "DLSS preset is inactive: select DLSS or DLAA above first.";
+    if (const char* why = dlssRowInactiveHint(d)) {
+        g_s.lastWrite = why;
         g_s.contentDirty = true;
         return;
     }
@@ -4456,6 +4503,9 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                         } else {
                             applyResolutionChange(def, v, 0);
                         }
+                    } else if (const char* why = dlssRowInactiveHint(d)) {
+                        s.lastWrite = why;
+                        s.contentDirty = true;
                     } else if (isCockpitGlassDirtRow(d) && cockpitGlassDirtRowDisabled()) {
                         s.lastWrite = cockpitGlassDirtRefusal();
                         s.contentDirty = true;

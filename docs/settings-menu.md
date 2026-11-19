@@ -2,6 +2,8 @@
 
 ## Status
 
+- **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Headset validation pending.
+- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. The blue highlight distinguishes 2x2 and 4x4 zones. GPU and game validation pending; see the rendering notes below.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -311,7 +313,7 @@ its effect, and measure headset responsiveness separately from submission rates.
 
 ### XeSS Frame Generation rows (2026-11-12)
 
-Two flat-only rows (`menu flat_performance`, so none on VR's pages) on the Performance tab, under the DLSS preset
+Two flat-only rows (`menu flat_performance`, so none on VR's pages) on the Performance tab, under the DLSS model
 row (`docs/xess-frame-generation-2026-11-12.md`):
 
 - **XeSS Frame Generation** (`fix.xess_frame_generation`, on | off, default off). Live while the bridge exists. The
@@ -328,7 +330,7 @@ row (`docs/xess-frame-generation-2026-11-12.md`):
 
 Both rows are always on the page and dimmed unless the flat AA mode is XeSS (`xessFgToggleRowDim`,
 `xessFgFramesRowDim`); a dimmed row refuses a change and says why. Both rows read the AA mode and the toggle from the
-values the panel shows (`g_rows`, as the DLSS preset row does), not `Config`: an F8 change reaches `Config` only
+values the panel shows (`g_rows`, as the DLSS model row does), not `Config`: an F8 change reaches `Config` only
 with the reload after the write, so reading it dimmed (and before that, hid) the rows one change late (2026-11-12). The installer's window lists them in the
 flat view only. `flat_sharpen_test` holds the tables and the menu.cpp wiring.
 
@@ -941,6 +943,20 @@ region** beside **Frame generation**. The external Magic file controls and the
 separate VRS/Beyond page are removed. The native VRS configuration names remain
 `experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
 
+Material coverage no longer depends on two shader hash pairs. Original
+depth-tested scene materials, including cockpit and forward transparent
+materials, can use the current eye's map. The gate still requires a settled
+eye depth target, full matching viewport and valid gaze/frame ownership.
+HUD/menu draws, redirected or private reissues, screen-only passes, and
+unproven state remain full rate.
+
+The map uses 1x1 in the sharp centre, 2x2 in the middle ring and 4x4 outside.
+The [NVIDIA D3D11 shading-rate API](https://docs.nvidia.com/nvapi/nvapi_8h_source.html)
+does not expose an 8x8 rate. **VRS zone highlight** leaves the centre clear,
+uses light blue for 2x2 and stronger blue for 4x4. It shows the acknowledged
+zone map, not which draw produced every final pixel. Rasterized edges can
+stay sharp even when material pixel shading is coarse.
+
 Monitor adds a **GENERATED** tile with generated FPS and an **FG MODE** tile
 with the runtime mode and Auto selection (1x means native cadence). Full session totals and the Auto
 decision appear in the wrapping note below the gauges.
@@ -990,7 +1006,8 @@ they were there (flown 2026-09-07).
 
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`, in
    the ini's own order:
-   `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
+   `temporal_aa`, `dlss_quality`, `temporal_aa_model` (labelled **DLSS model**
+   or **DLAA model**, default K),
    `render_sharpness`, `foveation`,
    `ui_quality` (labelled **UI quality**, off / 100% / 125%, default 100:
    the interface panels' size and the UI layer, one row), and `render_scale`
@@ -998,11 +1015,21 @@ they were there (flown 2026-09-07).
    the temporal pass's own timing, NVIDIA's pass per eye, the sharpen's
    timestamp pair, the pixel fraction under scale. UI/smoke depth and
    station motion follow the AA mode automatically.
-   **DLSS preset** sits right under **Anti-aliasing** and stays on the page
-   under every mode; it dims and stops responding to Left/Right or Enter
-   whenever `temporal_aa` is not `dlss` or `dlaa` (the only two modes that
-   read it), rather than dropping out of the row list, which had read as
-   the setting vanishing on a mode change.
+   **DLSS quality** sits directly under **Anti-aliasing**. In native OpenXR,
+   select DLSS to enable it. **Custom** (the default) follows Elite's HMD
+   Quality. **DLAA**, **Quality**, **Balanced**, and **Performance** render
+   at 100%, about 67%, 58%, and 50% of the output width and height. OpenXR
+   resolution still controls the output. Restart the game to apply a
+   selection. While a named DLSS quality is running, changing anti-aliasing
+   to another mode also takes effect after restart.
+   Named modes require a readable active Custom graphics preset so the
+   renderer can compensate for Elite's saved HMD Quality. An unverifiable
+   preset leaves the existing render size in use and shows **not applied**.
+   Automatic texture mip bias follows the named ratio for samplers created
+   after native sizing is published; earlier immutable samplers retain
+   their creation bias. The startup log reports that boundary.
+   **DLSS model** stays on the page and dims whenever DLSS or DLAA is not
+   selected. Its K/L/M choice changes NVIDIA's reconstruction model live.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and

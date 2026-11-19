@@ -1,6 +1,7 @@
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/openxr_resolution_entries.h"
 #include "../../src/d3d11/native_render_labels.h"
+#include "../../src/d3d11/native_dlss_quality.h"
 #include "../../src/common/config.h"
 
 #include <cstdio>
@@ -210,6 +211,52 @@ int wmain(int argc,wchar_t** argv) {
 
     check(sizeof(EdvrNativeRenderSettings)==184,"settings POD ABI");
     check(sizeof(EdvrNativeRenderSizing)==80,"published sizing POD ABI");
+    {
+        using edvr::DlssQuality;
+        using edvr::dlssGameDimension;
+        check(edvr::parseDlssQuality("DLAA")==DlssQuality::Dlaa &&
+              edvr::parseDlssQuality("quality")==DlssQuality::Quality &&
+              edvr::parseDlssQuality("invalid")==DlssQuality::Invalid,
+              "parse named DLSS quality values case insensitively and reject unknown values");
+        check(dlssGameDimension(3000,DlssQuality::Quality,1.f)==2000 &&
+              dlssGameDimension(3000,DlssQuality::Balanced,1.f)==1740 &&
+              dlssGameDimension(3000,DlssQuality::Performance,1.f)==1500 &&
+              dlssGameDimension(3000,DlssQuality::Dlaa,1.f)==3000,
+              "named qualities request their standard render fractions");
+        check(dlssGameDimension(4032,DlssQuality::Quality,.5f)==5376 &&
+              dlssGameDimension(4032,DlssQuality::Performance,.5f)==4032,
+              "compensate for Elite's saved HMD multiplier, including larger recommendations");
+        check(dlssGameDimension(4857,DlssQuality::Performance,.5f)==4858 &&
+              dlssGameDimension(4858,DlssQuality::Performance,.65f)==3738,
+              "round upwards to an even recommendation without falling below the NGX floor");
+        check(dlssGameDimension(4032,DlssQuality::Custom,.5f)==0 &&
+              dlssGameDimension(4032,DlssQuality::Balanced,0.f)==0 &&
+              dlssGameDimension(16384,DlssQuality::Dlaa,.5f)==0 &&
+              dlssGameDimension(4032,DlssQuality::Performance,std::numeric_limits<float>::quiet_NaN())==0,
+              "keep the existing recommendation when no named legal input sizing exists");
+        check(dlssGameDimension(16384,DlssQuality::Dlaa,1.f)==16384 &&
+              dlssGameDimension(16384,DlssQuality::Performance,.5f)==16384 &&
+              dlssGameDimension(16385,DlssQuality::Performance,1.f)==0 &&
+              dlssGameDimension(16384,DlssQuality::Performance,.01f)==0,
+              "preserve valid output maxima; reject unsafe output or recommendations beyond the D3D11 cap");
+        auto& config=edvr::Config::get();
+        config.set("fix.dlss_quality","performance");
+        config.set("fix.temporal_aa","fsr");
+        EdvrNativeDlssQuality reply{};
+        check(edvrQueryNativeDlssQuality(EDVR_NATIVE_DLSS_QUALITY_VERSION_1,sizeof(reply),&reply)==TRUE &&
+              reply.quality==static_cast<uint32_t>(DlssQuality::Custom) && reply.eliteMultiplier==0.f,
+              "non-DLSS startup ignores a saved named quality");
+        config.set("fix.temporal_aa","dlss");
+        config.set("fix.dlss_quality","bad-quality");
+        check(edvrQueryNativeDlssQuality(EDVR_NATIVE_DLSS_QUALITY_VERSION_1,sizeof(reply),&reply)==TRUE &&
+              reply.quality==static_cast<uint32_t>(DlssQuality::Invalid),
+              "unknown configured quality returns a decline reason without reading Elite settings");
+        check(edvrQueryNativeDlssQuality(EDVR_NATIVE_DLSS_QUALITY_VERSION_1,sizeof(reply)-1,&reply)==FALSE &&
+              edvrQueryNativeDlssQuality(0,sizeof(reply),&reply)==FALSE,
+              "DLSS quality query rejects wrong version and size");
+        config.set("fix.temporal_aa","off");
+        config.set("fix.dlss_quality","custom");
+    }
     check(edvr::native_render::clampScale(.5f)==.5f,"ordinary scale preserved");
     check(edvr::native_render::clampScale(.1f)==.25f,"low scale clamps to minimum");
     check(edvr::native_render::clampScale(3.f)==2.f,"high scale clamps to maximum");
@@ -695,6 +742,34 @@ int wmain(int argc,wchar_t** argv) {
         "matching clear invalidates snapshot");
     check(!nativeRenderLabels(&labels) && labels.valid==0 && !labels.runtimeToken[0],
         "matching clear invalidates the labels on the same condition");
+    {
+        using edvr::DlssQuality;
+        constexpr auto version=EDVR_NATIVE_RENDER_SIZING_VERSION_2;
+        auto& config=edvr::Config::get();
+        EdvrNativeRenderSizingV2 publication{};
+        publication.sizing=snapshot(3,.75f);
+        publication.sizing.size=sizeof(publication);
+        publication.sizing.version=version;
+        publication.dlssQuality=static_cast<uint32_t>(DlssQuality::Performance);
+        check(edvrPublishNativeRenderSizing(version,sizeof(publication),&publication)==TRUE &&
+              edvr::nativeDlssQualityActive()==DlssQuality::Performance,
+              "publish active DLSS quality with the native host sizing snapshot");
+        auto expected=snapshot(3,.75f);
+        check(edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(observed),&observed)==TRUE &&
+              same(expected,observed),"v1 consumers still see the unmodified OpenXR output size");
+        config.set("fix.temporal_aa","xess");
+        check(config.getString("fix.temporal_aa","off")=="dlss" && config.configuredTemporalMode()=="xess",
+              "an incompatible saved engine switch stays pending while named sizing is active");
+        config.setRuntimeOverride("fix.temporal_aa","off");
+        check(config.getString("fix.temporal_aa","off")=="off",
+              "the runtime comparison can still turn AA off at the same render scale");
+        config.clearRuntimeOverride("fix.temporal_aa");
+        publication.sizing.valid=0;
+        check(edvrPublishNativeRenderSizing(version,sizeof(publication),&publication)==TRUE &&
+              edvr::nativeDlssQualityActive()==DlssQuality::Custom && config.getString("fix.temporal_aa","off")=="xess",
+              "retiring the host releases its AA latch");
+        config.set("fix.temporal_aa","off");
+    }
     check(edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,
         sizeof(observed)-1,&observed)==FALSE,"sizing query rejects short ABI");
     check(edvrQueryNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,

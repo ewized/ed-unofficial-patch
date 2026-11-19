@@ -7,6 +7,7 @@
 #include "../common/guard.h"
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_3.h>
 #include <wrl/client.h>
 #include <array>
 #include <atomic>
@@ -55,6 +56,7 @@ struct Shared {
     std::atomic<int32_t> lastDriver{0};
     std::atomic<uint64_t> ticks{0},polls{0},valid{0},invalid{0},stale{0};
     std::atomic<uint64_t> world{0},accepted{0},full{0},invalidations{0};
+    std::atomic<uint64_t> expandedAccepted[2]{};
     std::atomic<uint64_t> updates[2]{},bytes{0},rates{0},resources{0},errors{0};
     std::atomic<uint64_t> contextRefusals{0},frameRefusals{0},targetRefusals{0};
 };
@@ -81,6 +83,9 @@ struct State {
     float hq=.15f,mid=.45f;
     NativeGazeSample gaze{};
     native_vrs::VendorStateCache cache;
+    ComPtr<ID3D11DepthStencilState> depthState;
+    ComPtr<ID3D11RasterizerState> rasterState;
+    bool depthTestsScene=true,rasterCompatible=true;
     EyeMap eyes[2];
 };
 State& state(){static State* const value=new State;return *value;}
@@ -245,6 +250,42 @@ bool targetDimensions(State& s,EyeMap& map,ID3D11RenderTargetView* rtv,ID3D11Dep
     if(rdev.Get()!=s.device.Get()||ddev.Get()!=s.device.Get())return false;
     return native_vrs::mapShape(width,height).bytes!=0;
 }
+bool materialRasterCompatible(State& s) {
+    ComPtr<ID3D11DepthStencilState> depthState;
+    s.context->OMGetDepthStencilState(&depthState,nullptr);
+    if(depthState.Get()!=s.depthState.Get()){
+        s.depthTestsScene=true;
+        if(depthState){
+            D3D11_DEPTH_STENCIL_DESC depthDesc{};
+            depthState->GetDesc(&depthDesc);
+            s.depthTestsScene=depthDesc.DepthEnable&&depthDesc.DepthFunc!=D3D11_COMPARISON_ALWAYS&&
+                depthDesc.DepthFunc!=D3D11_COMPARISON_NEVER;
+        }
+        s.depthState=std::move(depthState);
+    }
+    if(!s.depthTestsScene)return false;
+    ComPtr<ID3D11RasterizerState> rasterizer;
+    s.context->RSGetState(&rasterizer);
+    if(rasterizer.Get()!=s.rasterState.Get()){
+        s.rasterCompatible=true;
+        if(rasterizer){
+            ComPtr<ID3D11RasterizerState2> rasterizer2;
+            ComPtr<ID3D11RasterizerState1> rasterizer1;
+            if(SUCCEEDED(rasterizer.As(&rasterizer2))){
+                D3D11_RASTERIZER_DESC2 rasterizerDesc{};
+                rasterizer2->GetDesc2(&rasterizerDesc);
+                s.rasterCompatible=!rasterizerDesc.ForcedSampleCount&&
+                    rasterizerDesc.ConservativeRaster==D3D11_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+            }else if(SUCCEEDED(rasterizer.As(&rasterizer1))){
+                D3D11_RASTERIZER_DESC1 rasterizerDesc{};
+                rasterizer1->GetDesc1(&rasterizerDesc);
+                s.rasterCompatible=!rasterizerDesc.ForcedSampleCount;
+            }
+        }
+        s.rasterState=std::move(rasterizer);
+    }
+    return s.rasterCompatible;
+}
 bool prepareMap(State& s,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection& projection) {
     auto& map=s.eyes[eye];unsigned width=0,height=0;
     // Classification shadows are not proof of the bindings after a private
@@ -252,6 +293,7 @@ bool prepareMap(State& s,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthSte
     ComPtr<ID3D11RenderTargetView> actualRtv;ComPtr<ID3D11DepthStencilView> actualDsv;
     s.context->OMGetRenderTargets(1,&actualRtv,&actualDsv);
     if(actualRtv.Get()!=rtv||actualDsv.Get()!=dsv)return false;
+    if(!materialRasterCompatible(s))return false;
     if(!targetDimensions(s,map,rtv,dsv,width,height))return false;
     // A target resize within a frame never causes a second eye upload or use
     // of a map normalized for the earlier dimensions.
@@ -261,7 +303,9 @@ bool prepareMap(State& s,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthSte
         bool same=map.projection.sequence==projection.sequence;
         for(unsigned i=0;i<4;++i)same=same&&map.projection.frustum[i]==projection.frustum[i];
         for(unsigned i=0;i<2;++i)same=same&&map.projection.shift[i]==projection.shift[i];
-        return same&&map.worldW==width&&map.worldH==height&&map.target.Get()==rtv&&map.depth.Get()==dsv&&map.view;
+        if(!same||map.worldW!=width||map.worldH!=height||map.depth.Get()!=dsv||!map.view)return false;
+        map.target=rtv;
+        return true;
     }
     const auto shape=native_vrs::mapShape(width,height);
     if(!map.texture||map.mapW!=shape.width||map.mapH!=shape.height){
@@ -391,7 +435,7 @@ void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allow
         else {++a.invalid;a.failure.store(NativeVrsFailure::GazeInvalid,std::memory_order_relaxed);}
     }catch(...){auto& s=state();refuse(s,NativeVrsFailure::DriverCall,kCallFault);fullRate(s);}
 }
-bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection* projection) noexcept {
+bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection* projection,bool expandedMaterial) noexcept {
     try {
         auto& a=shared();
         if(!a.enabled.load(std::memory_order_acquire)&&!a.driverReady.load(std::memory_order_acquire))return false;
@@ -414,6 +458,7 @@ bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11Render
         const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
         if(!activateMap(s,view))return false;
         if(a.highlight.load(std::memory_order_relaxed))s.eyes[eye].highlightFrame=s.frame;
+        if(expandedMaterial)++a.expandedAccepted[eye];
         ++a.accepted;return true;
     }catch(...){auto& s=state();refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
 }
@@ -462,6 +507,7 @@ NativeVrsStatus nativeVrsStatus() noexcept {
     out.sharpRadius=a.hq.load(std::memory_order_relaxed);out.transitionRadius=a.mid.load(std::memory_order_relaxed);
     out.ticks=a.ticks.load();out.providerPolls=a.polls.load();out.validPairs=a.valid.load();out.invalidPairs=a.invalid.load();out.staleRefusals=a.stale.load();
     out.worldCalls=a.world.load();out.worldAccepted=a.accepted.load();out.fullRateCalls=a.full.load();out.invalidations=a.invalidations.load();
+    for(unsigned eye=0;eye<2;++eye)out.expandedMaterialAccepted[eye]=a.expandedAccepted[eye].load();
     for(unsigned i=0;i<2;++i)out.mapUpdates[i]=a.updates[i].load();
     out.mapBytes=a.bytes.load();out.rateSets=a.rates.load();out.resourceSets=a.resources.load();out.driverErrors=a.errors.load();
     out.contextRefusals=a.contextRefusals.load();out.frameRefusals=a.frameRefusals.load();out.targetRefusals=a.targetRefusals.load();return out;

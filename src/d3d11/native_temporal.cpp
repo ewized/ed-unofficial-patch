@@ -214,7 +214,8 @@ Settings readConfig() {
   // fsr and xess take the same sizes dlss does (design doc 3.1): 1:1 at the
   // runtime's size, an upscale when the game renders smaller. "dlaa" stays
   // pinned to 1:1 on purpose (menu.cpp's "DLAA, even below HMD Quality 1").
-  s.upscale=_stricmp(mode.c_str(),"dlss")==0||_stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
+  s.upscale=(_stricmp(mode.c_str(),"dlss")==0&&c.nativeDlssQuality()!=edvr::DlssQuality::Dlaa)||
+      _stricmp(mode.c_str(),"fsr")==0||_stricmp(mode.c_str(),"xess")==0;
   // The shipped values: jitter on, blend .90, clamp 1.0, depth-derived motion, the jitter sign as is, no lag.
   s.jitter=true; s.blend=.90f; s.clamp=1.f; s.motion=3; s.signX=s.signY=1; s.lag=false; return s;
 }

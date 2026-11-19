@@ -96,7 +96,7 @@ struct Result {
     D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
     std::array<float,block*block> pixels{};
     unsigned repeatX=0,repeatY=0,equal2x2=0;
-    bool gradient=false;
+    bool gradient=false,centerFullRate=false,outerFourByFour=false;
 };
 void measurePixels(Result& result){
     bool finite=true;float low=INFINITY,high=-INFINITY;
@@ -154,14 +154,16 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     hr(device->CreateTexture2D(&td,nullptr,&target),"CreateTarget");hr(device->CreateRenderTargetView(target.Get(),nullptr,&rtv),"CreateRTV");
     td.Format=DXGI_FORMAT_D32_FLOAT;td.BindFlags=D3D11_BIND_DEPTH_STENCIL;
     hr(device->CreateTexture2D(&td,nullptr,&depthTarget),"CreateDepthTarget");hr(device->CreateDepthStencilView(depthTarget.Get(),nullptr,&dsv),"CreateDSV");
-    td.Width=td.Height=block;td.Format=DXGI_FORMAT_R32_FLOAT;td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    // Three disjoint patches preserve the original middle-ring observation
+    // and independently check the full-rate centre and 4x4 outer region.
+    td.Width=3*block;td.Height=block;td.Format=DXGI_FORMAT_R32_FLOAT;td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     std::array<Result,6> results;
     for(auto& result:results){hr(device->CreateTexture2D(&td,nullptr,&result.staging),"CreateReadback");
         D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS,0};hr(device->CreateQuery(&qd,&result.query),"CreateStatsQuery");
         qd.Query=D3D11_QUERY_EVENT;hr(device->CreateQuery(&qd,&result.done),"CreateEventQuery");}
     D3D11_RASTERIZER_DESC rs{};rs.FillMode=D3D11_FILL_SOLID;rs.CullMode=D3D11_CULL_NONE;rs.DepthClipEnable=TRUE;
     ComPtr<ID3D11RasterizerState> raster;hr(device->CreateRasterizerState(&rs,&raster),"CreateRasterState");
-    D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=FALSE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ds.DepthFunc=D3D11_COMPARISON_ALWAYS;
+    D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ds.DepthFunc=D3D11_COMPARISON_LESS;
     ComPtr<ID3D11DepthStencilState> depth;hr(device->CreateDepthStencilState(&ds,&depth),"CreateDepthState");
     D3D11_BLEND_DESC bs{};bs.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
     ComPtr<ID3D11BlendState> blend;hr(device->CreateBlendState(&bs,&blend),"CreateBlendState");
@@ -172,9 +174,15 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     context->VSSetShader(vs.Get(),nullptr,0);context->PSSetShader(ps.Get(),nullptr,0);
     auto submit=[&](Result& result){
         const float clear[4]{-100.f,0,0,0};context->ClearRenderTargetView(rtv.Get(),clear);
+        context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,1.f,0);
         context->Begin(result.query.Get());context->Draw(3,0);context->End(result.query.Get());
-        const D3D11_BOX box{readX,readY,0,readX+block,readY+block,1};
-        context->CopySubresourceRegion(result.staging.Get(),0,0,0,0,target.Get(),0,&box);context->End(result.done.Get());};
+        const UINT coordinates[3][2]{{readX,readY},{504,504},{48,880}};
+        for(UINT patch=0;patch<3;++patch){
+            const UINT x=coordinates[patch][0],y=coordinates[patch][1];
+            const D3D11_BOX box{x,y,0,x+block,y+block,1};
+            context->CopySubresourceRegion(result.staging.Get(),0,patch*block,0,0,target.Get(),0,&box);
+        }
+        context->End(result.done.Get());};
     // No waits between Tick and coarse submission: production receipt age applies.
     edvr::nativeVrsConfigure(true);edvr::nativeVrsTick(context.Get(),1);
     edvr::nativeVrsFullRate(context.Get());submit(results[0]);
@@ -197,21 +205,33 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
         D3D11_MAPPED_SUBRESOURCE mapped{};const ULONGLONG mapDeadline=GetTickCount64()+waitMs;
         for(;;){const HRESULT h=context->Map(result.staging.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
             if(h==S_OK)break;require(h==DXGI_ERROR_WAS_STILL_DRAWING,"readback Map");require(GetTickCount64()<mapDeadline,"Map timeout 3000ms");Sleep(1);}
-        require(mapped.pData&&mapped.RowPitch>=block*sizeof(float),"readback pitch");
-        for(UINT y=0;y<block;++y)std::memcpy(result.pixels.data()+y*block,static_cast<const uint8_t*>(mapped.pData)+y*mapped.RowPitch,block*sizeof(float));
-        context->Unmap(result.staging.Get(),0);measurePixels(result);
+        require(mapped.pData&&mapped.RowPitch>=3*block*sizeof(float),"readback pitch");
+        Result center{},outer{};
+        for(UINT y=0;y<block;++y){
+            const auto* row=static_cast<const uint8_t*>(mapped.pData)+y*mapped.RowPitch;
+            std::memcpy(result.pixels.data()+y*block,row,block*sizeof(float));
+            std::memcpy(center.pixels.data()+y*block,row+block*sizeof(float),block*sizeof(float));
+            std::memcpy(outer.pixels.data()+y*block,row+2*block*sizeof(float),block*sizeof(float));
+        }
+        context->Unmap(result.staging.Get(),0);measurePixels(result);measurePixels(center);measurePixels(outer);
+        result.centerFullRate=center.gradient&&!center.repeatX&&!center.repeatY&&!center.equal2x2;
+        result.outerFourByFour=outer.gradient&&outer.repeatX==192&&outer.repeatY==192&&outer.equal2x2==64;
+        std::printf("{\"case\":\"%s\",\"center_full_rate\":%s,\"outer_4x4\":%s,\"outer_repeat_x\":%u,\"outer_repeat_y\":%u}\n",names[i],result.centerFullRate?"true":"false",result.outerFourByFour?"true":"false",outer.repeatX,outer.repeatY);
         std::printf("{\"case\":\"%s\",\"PSInvocations\":%llu,\"IAVertices\":%llu,\"IAPrimitives\":%llu,\"VSInvocations\":%llu,\"CInvocations\":%llu,\"CPrimitives\":%llu,\"gradient_valid\":%s,\"repeat_x\":%u,\"repeat_y\":%u,\"equal_2x2_of_64\":%u}\n",names[i],result.stats.PSInvocations,result.stats.IAVertices,result.stats.IAPrimitives,result.stats.VSInvocations,result.stats.CInvocations,result.stats.CPrimitives,result.gradient?"true":"false",result.repeatX,result.repeatY,result.equal2x2);
     }
     const auto& full=results[0];const auto& coarse=results[1];bool topology=true;
     for(const auto& result:results)topology&=result.stats.IAVertices==3&&result.stats.IAPrimitives==1&&result.stats.VSInvocations==full.stats.VSInvocations&&result.stats.CInvocations==full.stats.CInvocations&&result.stats.CPrimitives==full.stats.CPrimitives;
     const bool replication=full.gradient&&!full.repeatX&&!full.repeatY&&!full.equal2x2&&coarse.gradient&&coarse.equal2x2>=60&&coarse.repeatX>=120&&coarse.repeatY>=120;
+    const bool ringFootprints=full.centerFullRate&&!full.outerFourByFour&&coarse.centerFullRate&&
+        coarse.repeatX==128&&coarse.repeatY==128&&coarse.outerFourByFour;
     bool restored=finalStatus.fullRateAcknowledged&&!finalStatus.coarseAcknowledged&&!finalStatus.configured;
     for(size_t i=4;i<results.size();++i)restored&=results[i].stats.PSInvocations==full.stats.PSInvocations&&results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2;
     bool distinctEyesAndMovement=eye1Accepted&&movedAccepted&&movedStatus.mapUpdates[0]==2&&movedStatus.mapUpdates[1]==1&&movedStatus.providerPolls==2;
     for(size_t i=2;i<4;++i)distinctEyesAndMovement&=results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2;
     const bool reduced=full.stats.PSInvocations>0&&coarse.stats.PSInvocations>0&&coarse.stats.PSInvocations<full.stats.PSInvocations;
     const bool owner=accepted&&coarseStatus.coarseAcknowledged&&coarseStatus.magicAbsent&&coarseStatus.mapUpdates[0]>0&&!finalStatus.driverErrors&&!finalStatus.refused;
-    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement;
+    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints;
+    std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");
     return success?0:3;

@@ -111,6 +111,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
 #include "glitch_frame.h"
+#include "native_dlss_quality.h"
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
@@ -329,8 +330,9 @@ struct State {
     int          samplerAniso = 0;
     float        samplerBias = 0.0f;
     char         samplerBiasWhy[220] = {};   // where the bias came from, for the log
-    bool         samplerBiasAuto = false;    // derived from Elite's own multiplier
+    bool         samplerBiasAuto = false;    // requested automatic bias for this device
     float        samplerBiasMult = 0.0f;     // ...and the multiplier it was derived from
+    bool         samplerDlssBiasNoted = false;
     bool         samplerForceNoted = false;
     // The shader-swap arc's dump mode: while armed, every vertex and pixel
     // shader blob the game creates is written to <logdir>\shaders by hash,
@@ -2718,12 +2720,21 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
         }
         // The overrides. Off by default, so the census costs the game a
         // comparison and nothing else.
-        if ((s.samplerAniso > 0 || s.samplerBias != 0.0f) && samplerIsOurs(filter)) {
+        const float dlssRatio = s.samplerBiasAuto && runtimeVrProfile()
+            ? static_cast<float>(dlssQualityRatio(nativeDlssQualityActive())) : 0.0f;
+        const float bias = dlssRatio > 0.0f ? log2f(dlssRatio) : s.samplerBias;
+        if (dlssRatio > 0.0f && !s.samplerDlssBiasNoted) {
+            s.samplerDlssBiasNoted = true;
+            Log::get().note("texture filtering: DLSS quality uses auto mip bias %+.2f for render scale %.3f. "
+                            "First sampler create with published DLSS sizing is #%u; earlier samplers retain their creation bias.",
+                            static_cast<double>(bias), static_cast<double>(dlssRatio), s.samplerCreates);
+        }
+        if ((s.samplerAniso > 0 || bias != 0.0f) && samplerIsOurs(filter)) {
             if (s.samplerAniso > 0) {
                 d.Filter = D3D11_FILTER_ANISOTROPIC;
                 d.MaxAnisotropy = static_cast<UINT>(s.samplerAniso);
             }
-            d.MipLODBias = desc->MipLODBias + s.samplerBias;
+            d.MipLODBias = desc->MipLODBias + bias;
             if (!s.samplerForceNoted) {
                 s.samplerForceNoted = true;
                 Log::get().note(
@@ -2732,8 +2743,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                     "(%s). Point, comparison, minimum and maximum filters are left alone. A "
                     "positive bias trades sharpness for quiet on distant repeating "
                     "detail; a negative one does the reverse.",
-                    s.samplerAniso, static_cast<double>(s.samplerBias),
-                    s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
+                    s.samplerAniso, static_cast<double>(bias),
+                    dlssRatio > 0.0f ? "auto: active DLSS quality"
+                        : s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
             }
         }
         // Once the creates have settled: a renderer makes its samplers up
@@ -2960,11 +2972,11 @@ void hookDevice(ID3D11Device* device) {
         const std::string biasKey = sentinelCfg.getString("advanced.texture_lod_bias", temporal ? "auto" : "0");
         float bias = 0.0f;
         if (_stricmp(biasKey.c_str(), "auto") == 0) {
+            s.samplerBiasAuto = true;
             float mult = 0.0f, ssaa = 0.0f;
             char file[80] = {};
             if (eliteHmdMultiplier(&mult, &ssaa, file, sizeof(file))) {
                 bias = log2f(mult);
-                s.samplerBiasAuto = true;
                 s.samplerBiasMult = mult;
                 snprintf(s.samplerBiasWhy, sizeof(s.samplerBiasWhy),
                          "auto: Elite renders at %.3f of the size the runtime recommends "
@@ -3508,8 +3520,11 @@ bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
     State& s = ensureState();
     if (!s.samplerBiasAuto) return false;
-    if (multiplier) *multiplier = s.samplerBiasMult;
-    if (bias) *bias = s.samplerBias;
+    const float dlssRatio = runtimeVrProfile()
+        ? static_cast<float>(dlssQualityRatio(nativeDlssQualityActive())) : 0.0f;
+    if (!(dlssRatio > 0.0f) && !(s.samplerBiasMult > 0.0f)) return false;
+    if (multiplier) *multiplier = dlssRatio > 0.0f ? dlssRatio : s.samplerBiasMult;
+    if (bias) *bias = dlssRatio > 0.0f ? log2f(dlssRatio) : s.samplerBias;
     return true;
 }
 

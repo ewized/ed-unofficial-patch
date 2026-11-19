@@ -585,6 +585,8 @@ std::string Config::getString(const char* key, const char* def) const {
                 const auto ov = m_impl->overrides.find(key);
                 if (ov != m_impl->overrides.end()) return ov->second;
             }
+            if (runtimeVrProfile() && nativeDlssQuality() != DlssQuality::Custom &&
+                std::strcmp(key, "fix.temporal_aa") == 0) return "dlss";
             const auto it = m_impl->values.find(key);
             if (it != m_impl->values.end()) return it->second;
         }
@@ -608,6 +610,12 @@ std::string Config::configuredTemporalMode() const {
     if (!m_impl) return "off";
     const auto it = m_impl->values.find("fix.temporal_aa");
     return it == m_impl->values.end() ? "off" : it->second;
+}
+
+void Config::setNativeDlssQuality(DlssQuality quality) noexcept {
+    if (m_nativeDlssQuality.exchange(quality, std::memory_order_acq_rel) == quality) return;
+    m_generation.fetch_add(1, std::memory_order_release);
+    m_overrideDirty.store(true, std::memory_order_release);
 }
 
 void Config::setRuntimeOverride(const char* key, const char* value) {

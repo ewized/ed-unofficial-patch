@@ -34,6 +34,8 @@ void policyCases() {
           "flat notices go to the screen corner, VR notices are toasts in the world");
     check(edvr::flatProfileReadsKey("menu.toasts"), "flat reads menu.toasts, so its notices follow it like VR's toasts");
     check(!edvr::flatProfileReadsKey("menu.toastz"), "the flat allow-list is exact: a misspelt toasts key is not read");
+    check(!edvr::flatPageHasRow("fix", "dlss_quality") && !edvr::flatProfileReadsKey("fix.dlss_quality"),
+          "DLSS quality is unavailable in the flat profile");
     check(flat.keyboardAlwaysPrivate && !vr.keyboardAlwaysPrivate, "flat always takes the keyboard; VR reads menu.keyboard");
     check(!flat.fade && vr.fade, "only the VR panel fades");
     check(!flat.headAim && vr.headAim, "only the VR panel aims with the head");
@@ -433,11 +435,18 @@ void restartCases() {
     check(st(in, kToggle) == S::Stopped && st(in, kAa) == S::NotPending, "a problem outranks the bridge and an AA change");
     in = base(); in.problemPresent = true; in.fgOn = false;
     check(st(in, kToggle) == S::NotPending && st(in, kFrames) == S::NotPending, "a problem with FG off says nothing");
-    // VR: no XeSS Frame Generation.
+    // VR: no XeSS Frame Generation. Leaving a named launch DLSS mode
+    // requires a restart even with no XeSS bridge or failure.
     in = base(); in.flatProfile = false; in.aaChangedSinceLaunch = true;
-    check(st(in, kToggle) == S::NotPending && st(in, kFrames) == S::NotPending && st(in, kAa) == S::NotPending, "VR: the rules never apply");
+    check(st(in, kToggle) == S::NotPending && st(in, kFrames) == S::NotPending && st(in, kAa) == S::NotPending, "VR: no restart rule without named DLSS quality");
     in.problemPresent = true;
     check(st(in, kToggle) == S::NotPending, "VR: not even Stopped");
+    in.vrDlssQualityActive = true;
+    check(st(in, kAa) == S::PendingRestart, "VR: leaving a named DLSS quality waits for restart");
+    in.aaIsDlss = true;
+    check(st(in, kAa) == S::NotPending, "VR: choosing DLSS again clears its restart state");
+    in.flatProfile = true; in.fgOn = false; in.aaIsDlss = false;
+    check(st(in, kAa) == S::NotPending, "flat: the VR DLSS sizing rule does not apply");
     // A row outside the table.
     in = base(); in.aaChangedSinceLaunch = true;
     check(conditionalRestartState(in, "fix", "ui_quality") == S::NotPending, "a row outside the table is never judged here");

@@ -7,6 +7,7 @@
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "native_vrs.h"
 #include "vrs_coverage.h"     // default-off, sampled original-world NVAPI evidence
+#include "native_vrs_draw_policy.h"
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
 #include "concourse_pane.h"   // TEMPORARY concourse panes (diag.concourse_pane_mode): one relaxed load per real draw while nothing is armed
@@ -1048,6 +1049,7 @@ State* g_state = nullptr;
 struct NativeWorldDecision {
     ID3D11DeviceContext* context=nullptr;unsigned eye=2;
     ID3D11RenderTargetView* rtv=nullptr;ID3D11DepthStencilView* dsv=nullptr;
+    bool expandedMaterial=false;
 };
 thread_local const NativeWorldDecision* g_nativeWorldDecision=nullptr;
 template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,Draw draw) {
@@ -1073,7 +1075,9 @@ void nativeBeforeOriginal(ID3D11DeviceContext* context) {
             p.valid=sequence&&parallel&&nativeTemporalEyeGeometry(d->eye,&p.value.sequence,p.value.frustum,p.value.shift)&&
                 p.value.sequence==sequence&&nativeTemporalFrameSequence()==sequence;
         }
-        if(p.valid&&nativeTemporalFrameSequence()==sequence){nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value);return;}
+        if(p.valid&&nativeTemporalFrameSequence()==sequence){
+            nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);return;
+        }
     }
     nativeVrsFullRate(context);
 }
@@ -4409,6 +4413,42 @@ bool uiLayerVerdictForwards(DrawVerdict v) {
     }
 }
 
+NativeWorldDecision nativeSceneMaterialDecision(ID3D11DeviceContext* context, bool originalIssue,
+                                               bool classifiedUi, char kind, UINT count, UINT instances) {
+    NativeWorldDecision result{context};
+    if (!nativeVrsLive() || !nativeVrsCoarseRequested() || context != g_state->ownerCtx ||
+        !originalIssue || classifiedUi || uiLayerRedirecting())
+        return result;
+    auto* rtv = static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0));
+    auto* dsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+    native_vrs::SceneMaterialDraw candidate{};
+    if (!rtv || !dsv || !depthProbeCurrentSceneEyeOf(dsv, &candidate.eye, nullptr))
+        return result;
+    candidate.targetKind = uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0));
+    const auto vs = bindingShaderHash(BindSlot::Vs);
+    const auto ps = bindingShaderHash(BindSlot::Ps);
+    candidate.shadersTracked = vs && ps && bindingGet(BindSlot::Ps);
+    candidate.originalIssue = originalIssue;
+    if (!native_vrs::sceneMaterialCandidate(candidate))
+        return result;
+    candidate.interfaceDraw = native_vrs::protectsInterfaceShader(vs, ps, mapui::systemOpen(),
+        kind, count, instances, uiDepthSampledSurfaceSlot() >= 0);
+    if (!native_vrs::sceneMaterialCandidate(candidate))
+        return result;
+    return {context, unsigned(candidate.eye), rtv, dsv, !vrs_coverage::knownWorldFamily(vs, ps)};
+}
+
+template<class Draw>
+void nativeUncountedMaterialIssue(ID3D11DeviceContext* context, char kind, Draw draw) {
+    if (!nativeVrsLive()) { draw(); return; }
+    const auto decision = nativeSceneMaterialDecision(context, true, false, kind, 0, 0);
+    nativeWorldIssue(decision, [&]{
+        nativeBeforeOriginal(context);
+        draw();
+        return true;
+    });
+}
+
 // The Galaxy Map's probe issues its one point through this: the arrow's draw as a single index, with the same start index, base vertex and start instance, below every hook.
 struct MapPointDraw {
     ID3D11DeviceContext* self;
@@ -4677,8 +4717,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
         if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place
         VrsCoverageDraw vrsDraw{};
         uint64_t vrsVs=0,vrsPs=0;bool vrsEye=false,vrsNotUi=false,vrsClass=false;int vrsEyeId=-1;
-        const bool native=nativeVrsLive();NativeWorldDecision nativeDecision{self};
-        if (vrsCoverageEnabled()||(native&&nativeVrsCoarseRequested())) {
+        const bool native=nativeVrsLive();
+        const auto nativeDecision = native ? nativeSceneMaterialDecision(self,
+            altered.cls != AlteredDrawClass::UiLayer && (v == DrawVerdict::kNone ||
+            v == DrawVerdict::kNightVision || v == DrawVerdict::kParticle ||
+            v == DrawVerdict::kGlareSteady || v == DrawVerdict::kGlareClamp),
+            uiDepthScope.composite || flags.holoDepth || flags.worldScreenPending ||
+            mapSwapScope.on || worldReissue.on,
+            kind, count, instances) : NativeWorldDecision{self};
+        if (vrsCoverageEnabled()) {
             int eye=-1,target=-1;
             vrsVs=bindingShaderHash(BindSlot::Vs);
             if(vrsVs==vrs_coverage::kWorldVs)vrsPs=bindingShaderHash(BindSlot::Ps);
@@ -4687,11 +4734,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
             const bool world=owner && vrsEye && vrsNotUi && vrsClass && vrs_coverage::knownWorldFamily(vrsVs,vrsPs);
             if(world) depthProbeCurrentSceneEyeOf(static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),&eye,&target);
             vrsEyeId=eye;
-            // Every original issue enters the order guard, including unknown
-            // families. Only the explicit PBR/depth/eye subset can qualify.
-            nativeDecision={self,world&&eye>=0&&eye<2?unsigned(eye):2u,
-                static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0))};
-            if(vrsCoverageEnabled())vrsDraw=vrsCoverageBeforeDraw(self,world&&eye>=0&&eye<2?unsigned(eye):2u,
+            vrsDraw=vrsCoverageBeforeDraw(self,world&&eye>=0&&eye<2?unsigned(eye):2u,
                 static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),
                 static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),altered.cls==AlteredDrawClass::PoolFamily,
                 {vrsVs,vrsPs,count,instances,args.start,args.startInstance,args.base,kind});
@@ -5209,7 +5252,6 @@ static const ConcoursePaneCalls kConcoursePaneCalls = {&stationMaskSetBlend, &co
 // and args= names the buffer. Kind 'Z' indexed, 'Y' not.
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
-    nativeBeforeReissue(self);
     mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         nativeBeforeReissue(self);
@@ -5244,7 +5286,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     }
     {
         ConcoursePaneScope pane(self, 0, 0, 0, 'Z', kConcoursePaneCalls);   // withheld like a direct draw; no mirror (the counts are on the GPU)
-        if (!pane.withheld()) g_state->realDrawIndexedInstancedIndirect(self, args, off);
+        if (!pane.withheld()) nativeUncountedMaterialIssue(self, 'Z',
+            [&]{g_state->realDrawIndexedInstancedIndirect(self, args, off);});
     }
     // Indirect: the GPU-side argument buffer means count/instances are not
     // knowable here, the same reason drawCensusDrawDirect above logs 0,0.
@@ -5253,7 +5296,6 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
-    nativeBeforeReissue(self);
     mapRunBeforeIndirectDraw(self);
     if (runtimeFlatProfile()) {
         nativeBeforeReissue(self);
@@ -5288,7 +5330,8 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     }
     {
         ConcoursePaneScope pane(self, 0, 0, 0, 'Y', kConcoursePaneCalls);   // withheld like a direct draw; no mirror (the counts are on the GPU)
-        if (!pane.withheld()) g_state->realDrawInstancedIndirect(self, args, off);
+        if (!pane.withheld()) nativeUncountedMaterialIssue(self, 'Y',
+            [&]{g_state->realDrawInstancedIndirect(self, args, off);});
     }
     if (!foreignContext(self) && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, 0, 0, true);
 }
@@ -5719,7 +5762,6 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (self == g_state->ownerCtx && pixelProbeLive(g_state)) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
-    nativeBeforeReissue(self);
     mapRunBeforeDraw(self);
     if (gpuPassProfileCapturing()) gpuPassProfileNoteDraw(self, 'A', 0, 1);
     if (runtimeFlatProfile()) {
@@ -5744,7 +5786,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     {
         ConcoursePaneScope pane(self, 0, 0, 0, 'A', kConcoursePaneCalls);   // withheld like a direct draw; no mirror (the count is on the GPU)
-        if (!pane.withheld()) g_state->realDrawAuto(self);
+        if (!pane.withheld()) nativeUncountedMaterialIssue(self, 'A', [&]{g_state->realDrawAuto(self);});
     }
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
@@ -7019,7 +7061,9 @@ void vScreenFrameBoundary() {
             Log::get().noteReserved("native VRS focus: sharp_radius=%.3f transition_radius=%.3f core_width_percent=%.1f transition_width_percent=%.1f angular_calibration_verified=0",
                 double(n.sharpRadius),double(n.transitionRadius),double(n.sharpRadius*200.f),double(n.transitionRadius*200.f));
             Log::get().noteReserved("native world VRS: configured=%u driver_ready=%u refused=%u magic_absent=%u vendor_known=%u full_rate_ack=%u coarse_ack=%u failure=%u driver_status=%d ticks=%llu provider_polls=%llu valid_pairs=%llu invalid_pairs=%llu stale=%llu world_calls=%llu world_accepted=%llu full_rate_calls=%llu invalidations=%llu updates=%llu,%llu map_bytes=%llu rate_sets=%llu resource_sets=%llu driver_errors=%llu context_refused=%llu frame_refused=%llu target_refused=%llu world_ps_reduction_verified=0 gpu_benefit_verified=0 sensor_timestamp_unavailable=1 projection_mapping_verified=0 physical_calibration_verified=0 coordinates_logged=0",
-                n.configured?1u:0u,n.driverReady?1u:0u,n.refused?1u:0u,n.magicAbsent?1u:0u,n.vendorStateKnown?1u:0u,n.fullRateAcknowledged?1u:0u,n.coarseAcknowledged?1u:0u,unsigned(n.failure),n.lastDriverStatus,n.ticks,n.providerPolls,n.validPairs,n.invalidPairs,n.staleRefusals,n.worldCalls,n.worldAccepted,n.fullRateCalls,n.invalidations,n.mapUpdates[0],n.mapUpdates[1],n.mapBytes,n.rateSets,n.resourceSets,n.driverErrors,n.contextRefusals,n.frameRefusals,n.targetRefusals);}
+                n.configured?1u:0u,n.driverReady?1u:0u,n.refused?1u:0u,n.magicAbsent?1u:0u,n.vendorStateKnown?1u:0u,n.fullRateAcknowledged?1u:0u,n.coarseAcknowledged?1u:0u,unsigned(n.failure),n.lastDriverStatus,n.ticks,n.providerPolls,n.validPairs,n.invalidPairs,n.staleRefusals,n.worldCalls,n.worldAccepted,n.fullRateCalls,n.invalidations,n.mapUpdates[0],n.mapUpdates[1],n.mapBytes,n.rateSets,n.resourceSets,n.driverErrors,n.contextRefusals,n.frameRefusals,n.targetRefusals);
+            Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu",
+                n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1]);}
     }
     if (g_state && g_state->ownerCtx) vrsCoverageTick(g_state->ownerCtx);
     // The AA-off path's skipped shadows (2026-10-13): once engine velocity is read again, VsSrv33 and Blend hold

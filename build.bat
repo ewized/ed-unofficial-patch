@@ -472,6 +472,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export "edvrNativeStartupRouting DATA" ^
     --extra-export edvrQueryOculusRouting ^
     --extra-export edvrQueryNativeRenderSettings ^
+    --extra-export edvrQueryNativeDlssQuality ^
     --extra-export edvrPublishNativeRenderSizing ^
     --extra-export edvrQueryNativeRenderSizing ^
     --extra-export edvrGpuFrameEvent ^

@@ -1,4 +1,5 @@
 #pragma once
+#include "vrs_coverage_policy.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <array>
@@ -80,13 +81,14 @@ class Recorder {
         const uint64_t expected=uint64_t(c.key.count)*c.key.instances;
         sample.valid=sample.valid&&stats.IAVertices==expected&&stats.IAPrimitives==expected/3;
         char row[2048]{};
-        std::snprintf(row,sizeof(row),"native vrs ps sample: schema=1 id=%llu candidate=%u candidate_instance=%llu phase=%u control=%s eye=%u frame=%llu sequence=%llu config=%llu gaze_epoch=%llu invalidation=%llu map=%llx valid=%u query_hr=0x%08x vs=%016llx ps=%016llx state=%016llx kind=%c count=%u instances=%u start=%u base=%d start_instance=%u size=%ux%u useful_full_floor=%llu PSInvocations=%llu IAVertices=%llu IAPrimitives=%llu VSInvocations=%llu GSInvocations=%llu GSPrimitives=%llu CInvocations=%llu CPrimitives=%llu scope=first_forwarded_opaque_world_draw hud_excluded=1 diagnostic_only=1",
+        std::snprintf(row,sizeof(row),"native vrs ps sample: schema=1 id=%llu candidate=%u candidate_instance=%llu phase=%u control=%s eye=%u frame=%llu sequence=%llu config=%llu gaze_epoch=%llu invalidation=%llu map=%llx valid=%u query_hr=0x%08x vs=%016llx ps=%016llx state=%016llx kind=%c count=%u instances=%u start=%u base=%d start_instance=%u size=%ux%u useful_full_floor=%llu PSInvocations=%llu IAVertices=%llu IAPrimitives=%llu VSInvocations=%llu GSInvocations=%llu GSPrimitives=%llu CInvocations=%llu CPrimitives=%llu scope=forwarded_scene_material hud_excluded=1 diagnostic_only=1 outside_old_shader_list=%u",
             (unsigned long long)s.plan.id,s.plan.candidate,(unsigned long long)c.identity,s.plan.phase,s.plan.full?"full":"native_map",s.before.eye,
             (unsigned long long)s.before.frame,(unsigned long long)s.before.sequence,(unsigned long long)s.before.config,
             (unsigned long long)s.before.gazeEpoch,(unsigned long long)s.before.invalidation,(unsigned long long)s.before.map,
             unsigned(sample.valid),unsigned(result),(unsigned long long)c.key.vs,(unsigned long long)c.key.ps,(unsigned long long)c.key.state,c.key.kind,c.key.count,c.key.instances,c.key.start,c.key.base,c.key.startInstance,c.key.width,c.key.height,(unsigned long long)kUsefulFullPs,
             (unsigned long long)stats.PSInvocations,(unsigned long long)stats.IAVertices,(unsigned long long)stats.IAPrimitives,
-            (unsigned long long)stats.VSInvocations,(unsigned long long)stats.GSInvocations,(unsigned long long)stats.GSPrimitives,(unsigned long long)stats.CInvocations,(unsigned long long)stats.CPrimitives);
+            (unsigned long long)stats.VSInvocations,(unsigned long long)stats.GSInvocations,(unsigned long long)stats.GSPrimitives,(unsigned long long)stats.CInvocations,(unsigned long long)stats.CPrimitives,
+            unsigned(!vrs_coverage::knownWorldFamily(c.key.vs,c.key.ps)));
         line(row);
         if(!sample.valid||!stats.PSInvocations||(s.plan.phase==0&&stats.PSInvocations<kUsefulFullPs)){c.rejected=true;}
         else if(s.plan.phase==0){c.useful=true;++c.phase;}

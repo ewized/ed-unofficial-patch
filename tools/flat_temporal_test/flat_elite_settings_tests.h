@@ -66,13 +66,13 @@ inline std::string settingsXml(const char* preset) {
            "</PresetName>\r\n  <Fullscreen>1</Fullscreen>\r\n</Root>\r\n";
 }
 // One tag per line inside <Root>, as Elite writes them.
-inline std::string fxcfg(int aa, int bloom, int dof) {
+inline std::string fxcfg(int aa, int bloom, int dof, const char* hmd = "1.0") {
     char text[512];
     std::snprintf(text, sizeof(text),
         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\r\n<Root>\r\n  <BlurEnabled>false</BlurEnabled>\r\n"
         "  <AAMode>%d</AAMode>\r\n  <AOQuality>3</AOQuality>\r\n  <BloomQuality>%d</BloomQuality>\r\n"
-        "  <DOFEnabled>%d</DOFEnabled>\r\n  <HMDRenderTargetMultiplier>1.0</HMDRenderTargetMultiplier>\r\n</Root>\r\n",
-        aa, bloom, dof);
+        "  <DOFEnabled>%d</DOFEnabled>\r\n  <HMDRenderTargetMultiplier>%s</HMDRenderTargetMultiplier>\r\n</Root>\r\n",
+        aa, bloom, dof, hmd);
     return text;
 }
 // The panel's ruler, a fixed 20 px a character.
@@ -699,7 +699,7 @@ inline int flatEliteSettingsTests() {
         Folder dir;
         dir.write("Settings.xml", elite_settings_test::settingsXml("Custom"), 10);
         // Custom 4.0 through 4.4 side by side, the OLD one written last (user 3): the game reads 4.4.
-        dir.write("Custom.4.4.fxcfg", elite_settings_test::fxcfg(0, 0, 0), 20);
+        dir.write("Custom.4.4.fxcfg", elite_settings_test::fxcfg(0, 0, 0, "0.58"), 20);
         dir.write("Custom.4.3.fxcfg", elite_settings_test::fxcfg(2, 2, 2), 30);
         dir.write("Custom.4.0.fxcfg", elite_settings_test::fxcfg(4, 4, 4), 90);
         dir.write("Custom.4.4.fxcfg.baseline-bak-20260921", elite_settings_test::fxcfg(4, 4, 4), 95);
@@ -712,6 +712,8 @@ inline int flatEliteSettingsTests() {
                std::strcmp(g.preset, "Custom") == 0 && std::strcmp(g.file, "Custom.4.4.fxcfg") == 0 &&
                g.aaMode == 0 && g.bloomQuality == 0 && g.dofEnabled == 0 && !g.anyOn(),
                "the highest Custom version is read: Custom.4.4.fxcfg, all three off");
+        expect(g.hmdMultiplier == .58f,
+               "HMD Quality comes from the active version even when unrelated files are newer");
         char line[512];
         flatFormatEliteSettings(line, sizeof(line), g);
         expect(std::string(line) == "flat settings: Elite graphics preset=Custom file=Custom.4.4.fxcfg AAMode=0 "
@@ -733,14 +735,15 @@ inline int flatEliteSettingsTests() {
                watcher.settings().dofEnabled == 2 && watcher.settings().anyOn(),
                "a rewritten file is read again at the next check");
         // A newer game version writes a higher file: it becomes the one read.
-        dir.write("Custom.4.5.fxcfg", elite_settings_test::fxcfg(0, 0, 0), 210);
+        dir.write("Custom.4.5.fxcfg", elite_settings_test::fxcfg(0, 0, 0, "0.58junk"), 210);
         expect(watcher.poll(6000, true) && watcher.reads() == 3 &&
                std::strcmp(watcher.settings().file, "Custom.4.5.fxcfg") == 0 && !watcher.settings().anyOn(),
                "a new higher version is picked up, forced");
+        expect(watcher.settings().hmdMultiplier == 0.f, "malformed HMD Quality is unknown");
         // The preset changes to one that is not Custom.
         dir.write("Settings.xml", elite_settings_test::settingsXml("High"), 220);
         expect(watcher.poll(9000, false) && watcher.reads() == 4 && watcher.settings().presetKnown &&
-               !watcher.settings().custom && !watcher.settings().fileRead &&
+               !watcher.settings().custom && !watcher.settings().fileRead && watcher.settings().hmdMultiplier == 0.f &&
                std::strcmp(watcher.settings().preset, "High") == 0,
                "a preset other than Custom is read as such and no .fxcfg is read for it");
         flatFormatEliteSettings(line, sizeof(line), watcher.settings());

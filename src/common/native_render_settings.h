@@ -64,11 +64,30 @@ typedef struct EdvrNativeRenderSizing {
     uint32_t reserved;
 } EdvrNativeRenderSizing;
 
+#define EDVR_NATIVE_RENDER_SIZING_VERSION_2 2u
+
+typedef struct EdvrNativeRenderSizingV2 {
+    EdvrNativeRenderSizing sizing;
+    uint32_t dlssQuality;
+    uint32_t reserved;
+} EdvrNativeRenderSizingV2;
+
+#define EDVR_NATIVE_DLSS_QUALITY_VERSION_1 1u
+
+typedef struct EdvrNativeDlssQuality {
+    uint32_t size;
+    uint32_t version;
+    uint32_t quality;
+    float eliteMultiplier;
+} EdvrNativeDlssQuality;
+
 typedef BOOL(WINAPI *EdvrQueryNativeRenderSettings)(
     uint32_t version, uint32_t size, void* output);
 typedef BOOL(WINAPI *EdvrPublishNativeRenderSizing)(
     uint32_t version, uint32_t size, const void* input);
 typedef BOOL(WINAPI *EdvrQueryNativeRenderSizing)(
+    uint32_t version, uint32_t size, void* output);
+typedef BOOL(WINAPI *EdvrQueryNativeDlssQuality)(
     uint32_t version, uint32_t size, void* output);
 
 BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version, uint32_t size,
@@ -77,6 +96,8 @@ BOOL WINAPI edvrQueryNativeRenderSizing(uint32_t version, uint32_t size,
                                         void* output);
 BOOL WINAPI edvrQueryNativeRenderSettings(uint32_t version, uint32_t size,
                                           void* output);
+BOOL WINAPI edvrQueryNativeDlssQuality(uint32_t version, uint32_t size,
+                                       void* output);
 
 #ifdef __cplusplus
 }
@@ -85,6 +106,10 @@ static_assert(sizeof(EdvrNativeRenderSettings) == 184,
               "native render settings ABI");
 static_assert(sizeof(EdvrNativeRenderSizing) == 80,
               "native render sizing ABI");
+static_assert(sizeof(EdvrNativeRenderSizingV2) == 88,
+              "native render sizing v2 ABI");
+static_assert(sizeof(EdvrNativeDlssQuality) == 16,
+              "native DLSS quality ABI");
 
 namespace edvr::native_render {
 

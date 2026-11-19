@@ -102,6 +102,7 @@
 #include "render_thread_dispatcher.h"
 #include "present_work_queue.h"
 #include "../common/native_render_settings.h"
+#include "../common/dlss_quality.h"
 #include "../common/openxr_resolution_entries.h"
 
 namespace edvr::openxr {
@@ -617,6 +618,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrViewConfigurationView sizes[2]{};
   float requestedRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
   float effectiveRenderScale=EDVR_NATIVE_RENDER_SCALE_DEFAULT;
+  DlssQuality activeDlssQuality=DlssQuality::Custom;
+  float eliteHmdMultiplier=0.f;
   // The headset's identity for fix.openxr_resolution: the runtime and system
   // names as the v2 settings ABI carries them (63 bytes plus NUL). The token
   // traced as headset_key is computed from these copies, so it is byte-equal
@@ -888,12 +891,71 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           edvr::native_render::megapixels(sizes[eye].recommendedImageRectWidth,sizes[eye].recommendedImageRectHeight));
     }
   }
+  // Scale only what the game is asked for. Geometry, temporal output sizes
+  // and OpenXR swapchains continue to use their own recommendations.
+  bool dlssGameRecommendation(const uint32_t (&width)[2],const uint32_t (&height)[2],
+      uint32_t (&askedWidth)[2],uint32_t (&askedHeight)[2]) const noexcept {
+    if(activeDlssQuality==DlssQuality::Custom)return false;
+    for(unsigned eye=0;eye<2;++eye) {
+      askedWidth[eye]=dlssGameDimension(width[eye],activeDlssQuality,eliteHmdMultiplier);
+      askedHeight[eye]=dlssGameDimension(height[eye],activeDlssQuality,eliteHmdMultiplier);
+      if(!askedWidth[eye]||!askedHeight[eye])return false;
+    }
+    return true;
+  }
+  // This capability is optional for an older graphics provider. A refusal
+  // leaves the original recommendation in place and never prevents VR startup.
+  void captureDlssQuality() {
+    if(!graphicsProxy)return;
+    const auto query=reinterpret_cast<EdvrQueryNativeDlssQuality>(
+        GetProcAddress(graphicsProxy,"edvrQueryNativeDlssQuality"));
+    if(!query) {
+      nativeTracePrintf("native_dlss_quality,active=custom,reason=provider_unavailable\n");
+      return;
+    }
+    constexpr auto version=EDVR_NATIVE_DLSS_QUALITY_VERSION_1;
+    EdvrNativeDlssQuality settings{};
+    BOOL answered=FALSE;
+    if(!graphicsCalls.invoke([&]{answered=query(version,sizeof(settings),&settings);})||
+        !answered||settings.size!=sizeof(settings)||settings.version!=version||
+        settings.quality>static_cast<uint32_t>(DlssQuality::Invalid)) {
+      nativeTracePrintf("native_dlss_quality,active=custom,reason=invalid_provider_reply\n");
+      return;
+    }
+    const auto requested=static_cast<DlssQuality>(settings.quality);
+    if(requested==DlssQuality::Custom)return;
+    const char* reason=nullptr;
+    if(requested==DlssQuality::Invalid)reason="invalid_quality";
+    else if(!dlssEliteMultiplierKnown(settings.eliteMultiplier))reason="unknown_elite_hmd_quality";
+    if(!reason) {
+      activeDlssQuality=requested;
+      eliteHmdMultiplier=settings.eliteMultiplier;
+      uint32_t width[2],height[2],askedWidth[2],askedHeight[2];
+      for(unsigned eye=0;eye<2;++eye) {
+        width[eye]=gameFacingDimension(sizes[eye].recommendedImageRectWidth);
+        height[eye]=gameFacingDimension(sizes[eye].recommendedImageRectHeight);
+      }
+      if(!dlssGameRecommendation(width,height,askedWidth,askedHeight))reason="impossible_recommendation";
+      else nativeTracePrintf("native_dlss_quality,active=%s,ratio=%.6f,elite=%.6f,asked=%ux%u/%ux%u,output=%ux%u/%ux%u\n",
+          dlssQualityName(activeDlssQuality),dlssQualityRatio(activeDlssQuality),eliteHmdMultiplier,
+          askedWidth[0],askedHeight[0],askedWidth[1],askedHeight[1],width[0],height[0],width[1],height[1]);
+    }
+    if(reason) {
+      activeDlssQuality=DlssQuality::Custom;
+      nativeTracePrintf("native_dlss_quality,active=custom,requested=%s,reason=%s\n",dlssQualityName(requested),reason);
+    }
+  }
   bool publishRenderSizing(bool valid) {
     if(!graphicsProxy) return true;
     const auto publish=reinterpret_cast<EdvrPublishNativeRenderSizing>(
         GetProcAddress(graphicsProxy,"edvrPublishNativeRenderSizing"));
     if(!publish) return !valid;
-    EdvrNativeRenderSizing sizing{sizeof(sizing),EDVR_NATIVE_RENDER_SIZING_VERSION_1,renderSizingGeneration};
+    const bool withQuality=activeDlssQuality!=DlssQuality::Custom;
+    EdvrNativeRenderSizingV2 publication{};
+    publication.dlssQuality=static_cast<uint32_t>(activeDlssQuality);
+    auto& sizing=publication.sizing;
+    sizing={static_cast<uint32_t>(withQuality?sizeof(publication):sizeof(sizing)),
+      withQuality?EDVR_NATIVE_RENDER_SIZING_VERSION_2:EDVR_NATIVE_RENDER_SIZING_VERSION_1,renderSizingGeneration};
     if(valid) {
       for(unsigned eye=0;eye<2;++eye) {
         sizing.eyes[eye]=renderBounds[eye];
@@ -904,15 +966,21 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       sizing.effectiveScale=effectiveRenderScale;
       sizing.valid=1;
     }
-    // Snapshot publication is thread-safe and CPU-only. Shutdown needs no
-    // producer callback or Config access, even after graphics admission ends.
-    if(!valid) return publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing)!=FALSE;
+    // Snapshot publication is CPU-only. Withdrawal needs no producer
+    // callback, even after graphics admission ends.
+    const void* payload=withQuality?static_cast<const void*>(&publication):&sizing;
+    if(!valid) return publish(sizing.version,sizing.size,payload)!=FALSE;
     BOOL published=FALSE;
     const bool dispatched=graphicsCalls.invoke([&]{
-      published=publish(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(sizing),&sizing);
+      published=publish(sizing.version,sizing.size,payload);
     });
     if(!dispatched || !published) {
-      if(valid) nativeTracePrintf("openxr_render_sizing,published=0\n");
+      if(dispatched && withQuality) {
+        activeDlssQuality=DlssQuality::Custom;
+        nativeTracePrintf("native_dlss_quality,active=custom,reason=publication_rejected\n");
+        return publishRenderSizing(true);
+      }
+      nativeTracePrintf("openxr_render_sizing,published=0\n");
       return false;
     }
     return true;
@@ -1796,7 +1864,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(!(features.acquired()&&locatedValid))noteScopeZoomAbsent();
     gameGeometry.worldScalePercent=worldScale;
     if(locatedValid)noteWorldScale(worldScale,located,gameGeometry);
-    if(locatedValid) geometry.recommend(gameGeometry.width,gameGeometry.height);
+    uint32_t dlssWidth[2],dlssHeight[2];
+    const bool dlssSized=locatedValid&&dlssGameRecommendation(gameGeometry.width,gameGeometry.height,dlssWidth,dlssHeight);
+    const auto& askedWidth=dlssSized?dlssWidth:gameGeometry.width;
+    const auto& askedHeight=dlssSized?dlssHeight:gameGeometry.height;
+    if(locatedValid) geometry.recommend(askedWidth,askedHeight);
     // The temporal pass is sized by what the frame it is handed was rendered
     // for, which while a rebuild is awaited is the previous ask and not the
     // one the game is told now (NativeFovTrim::treatedFor). The frusta are
@@ -1824,7 +1896,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       // ...and the true display frustum (the located views, before a
       // trim), which the engine-side panel sizing takes k_out from.
       const auto begun=temporal.begin(treatedGeometry,poses.read().originGeneration,frameTangentShift,&render.pose.mDeviceToAbsoluteTracking,
-          (std::max)(gameGeometry.width[0],gameGeometry.width[1]),(std::max)(gameGeometry.height[0],gameGeometry.height[1]),
+          (std::max)(askedWidth[0],askedWidth[1]),(std::max)(askedHeight[0],askedHeight[1]),
           std::fabs(temporalGeometry.raw[0].top),std::fabs(temporalGeometry.raw[0].bottom),zoomApplied?&zoomPreRaw:nullptr);
       if(begun!=S_OK){boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);}
       ++temporalFrames;
@@ -4618,6 +4690,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     applyRenderScale();
     if(!validSize(sizes[0]) || !validSize(sizes[1]))
       return result("scaled_stereo_sizes",XR_ERROR_VALIDATION_FAILURE);
+    captureDlssQuality();
     if(!publishRenderSizing(true)) return result("native_render_sizing_publish",XR_ERROR_RUNTIME_FAILURE);
     startupSteps.device=stepMs(step);step=StepClock::now();
     const BindingDispatch bindingApi{api.requirements,api.createSession,api.destroySession,api.spaces,api.createSpace,api.destroySpace};
@@ -4637,6 +4710,15 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       requestedType==XR_REFERENCE_SPACE_TYPE_STAGE?"steamvr_stage_unavailable":"default");
     SystemRead metadata{};metadata.connected=true;
     for(unsigned eye=0;eye<2;++eye){metadata.recommendedWidth[eye]=sizes[eye].recommendedImageRectWidth;metadata.recommendedHeight[eye]=sizes[eye].recommendedImageRectHeight;}
+    uint32_t initialWidth[2],initialHeight[2],dlssWidth[2],dlssHeight[2];
+    for(unsigned eye=0;eye<2;++eye) {
+      initialWidth[eye]=gameFacingDimension(metadata.recommendedWidth[eye]);
+      initialHeight[eye]=gameFacingDimension(metadata.recommendedHeight[eye]);
+    }
+    if(dlssGameRecommendation(initialWidth,initialHeight,dlssWidth,dlssHeight)) {
+      std::memcpy(metadata.recommendedWidth,dlssWidth,sizeof(dlssWidth));
+      std::memcpy(metadata.recommendedHeight,dlssHeight,sizeof(dlssHeight));
+    }
     std::memcpy(metadata.runtimeName,ip.runtimeName,sizeof(metadata.runtimeName));
     std::memcpy(metadata.systemName,properties.systemName,sizeof(metadata.systemName));
     // The index is resolved from the validated adapter, not from an HMD EDID.

@@ -155,7 +155,7 @@ ID3D11Texture2D* nativeVrsHighlightEye(uint64_t sequence,unsigned eye,
             vScreenExecuteCommandListRaw(playback, commands.Get(), 1);
             if (!target.noted) {
                 target.noted = true;
-                Log::get().note("VRS zone highlight: eye %u, input %ux%u, output %ux%u, blue reduced-rate tiles.",
+                Log::get().note("VRS zone highlight: eye %u, input %ux%u, output %ux%u, light blue 2x2 and stronger blue 4x4 tiles.",
                     eye, geometry.inputSize[0], geometry.inputSize[1], desc.Width, desc.Height);
             }
             output = target.output.Get();

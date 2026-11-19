@@ -19,6 +19,7 @@
 
 #include "ini_name.h"
 #include "runtime_profile.h"
+#include "dlss_quality.h"
 
 namespace edvr {
 
@@ -77,6 +78,13 @@ public:
     std::string requestedTemporalMode() const;
     // The same read with the runtime override ignored: what the settings FILE says (what a restore goes back to).
     std::string configuredTemporalMode() const;
+
+    // Native VR advertises its DLSS input size at startup. Keep the saved
+    // Anti-aliasing selection pending until that host releases its sizing.
+    void setNativeDlssQuality(DlssQuality quality) noexcept;
+    DlssQuality nativeDlssQuality() const noexcept {
+        return m_nativeDlssQuality.load(std::memory_order_acquire);
+    }
 
     // A runtime-only override of one key (aa_compare.h: the AA comparison key). It lives in memory beside the parsed file and
     // NEVER reaches it: no ini is written, a reload of the file leaves it in place, and getString / requestedTemporalMode answer
@@ -183,6 +191,7 @@ private:
 
     // A runtime override was set or cleared since reloadIfChanged() last said so.
     std::atomic<bool> m_overrideDirty{false};
+    std::atomic<DlssQuality> m_nativeDlssQuality{DlssQuality::Custom};
 };
 
 // Directory containing the given loaded module, without trailing slash.

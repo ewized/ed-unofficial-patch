@@ -1,4 +1,5 @@
 #include "../../src/d3d11/vrs_coverage_policy.h"
+#include "../../src/d3d11/native_vrs_draw_policy.h"
 #include "callback_dependency_tests.h"
 #include "work_reference_tests.h"
 #include <cstdio>
@@ -71,6 +72,35 @@ int main(int argc,char** argv){
  const auto before=state.epoch;state.invalidate();check(!state.active()&&state.epoch!=before,"clear/execute invalidation forces fresh evidence");
  check(knownWorldFamily(kWorldVs,kWorldPs)&&!knownWorldFamily(kWorldVs,kWorldPs+1)&&!knownWorldFamily(kWorldVs+1,kWorldPs),"both exact original opaque-world shader hashes required");
  check(knownWorldFamily(kWorldVs,kWorldPsE46)&&!knownWorldFamily(kWorldVs+1,kWorldPsE46)&&!knownWorldFamily(kWorldVs,kWorldPsE46+1),"observed E46 stock world pair is exact; VS-only and adjacent PS IDs remain refused");
+ using edvr::native_vrs::protectsInterfaceShader;
+ using edvr::native_vrs::sceneMaterialCandidate;
+ using edvr::native_vrs::SceneMaterialDraw;
+ const auto eligible=[&](uint64_t vs,uint64_t ps,SceneMaterialDraw material,bool sampledUi=false,char kind='X',unsigned count=288){
+     material.shadersTracked=vs&&ps;
+     material.interfaceDraw=protectsInterfaceShader(vs,ps,false,kind,count,1,sampledUi);
+     return sceneMaterialCandidate(material);
+ };
+ const SceneMaterialDraw leftMaterial{0,1,true,false,true},rightMaterial{1,1,true,false,true};
+ constexpr uint64_t otherStockPs=0xCB429E043DBB2506ull;
+ check(!knownWorldFamily(kWorldVs,otherStockPs)&&eligible(kWorldVs,otherStockPs,leftMaterial),
+       "production admits a third stock material in the same G-buffer family");
+ check(!knownWorldFamily(edvr::kUiVsLegacyGlass,edvr::kUiPsLegacyGlass)&&
+       eligible(edvr::kUiVsLegacyGlass,edvr::kUiPsLegacyGlass,rightMaterial),
+       "nonredirected forward canopy material can qualify for the right eye");
+ check(!eligible(kWorldVs,otherStockPs,{-1,1,true,false,true})&&
+       !eligible(kWorldVs,otherStockPs,{0,2,true,false,true})&&
+       !eligible(kWorldVs,otherStockPs,{0,1,true,false,false})&&
+       !eligible(kWorldVs,0,leftMaterial),
+       "unresolved depth eye, post-tonemap target, reissue and untracked pixel shader stay full rate");
+ check(!eligible(edvr::kUiVsFlightHud,otherStockPs,leftMaterial)&&
+       !eligible(edvr::kUiVsGuiText,otherStockPs,leftMaterial)&&
+       !eligible(edvr::kUiVsMapSprite,edvr::kUiPsMapSpriteC,leftMaterial)&&
+       !eligible(edvr::kScreenMotionRecognizePair.vs,edvr::kScreenMotionRecognizePair.ps,leftMaterial)&&
+       !eligible(kWorldVs,otherStockPs,leftMaterial,true),
+       "HUD, direct GUI, map icons, screen composites and learned UI sources stay full rate inside the scene target");
+ check(!eligible(edvr::kUiVsScopeMark,edvr::kUiPsScopeMark,leftMaterial,false,'X',6)&&
+       eligible(edvr::kUiVsScopeMark,edvr::kUiPsScopeMark,leftMaterial),
+       "the scope reticle stays full rate while the shared weapon material qualifies");
  GateCounts gates;gates.note(kWorldVs,kWorldPsE46,true,true,true,true,0,true,true);
  check(gates.knownVs==1&&gates.psE46==1&&gates.exactFamily==1&&gates.depthLeft==1&&gates.familyDepthIssued==1,"E46 positive passes complete original-issue funnel for left eye");
  gates.note(kWorldVs,kWorldPs,true,true,true,true,1,true,true);
@@ -137,8 +167,13 @@ int main(int argc,char** argv){
  check(has(ini,"eye_tracked_foveation = 0")&&has(draw,"nativeVrsConfigureFocus(cfg.getBool(\"experimental.eye_tracked_foveation\",false),")&&
        has(draw,"cfg.getString(\"experimental.foveation_focus\",\"normal\").c_str()"),"native producer is explicitly default off with the original focus default");
  check(has(present,"tkNativeVrsClock.run([] { vScreenNativeFrameBoundary(g_state->frameCounter); });")&&has(present,"EDVR_BOUNDARY_TICK(tkNativeVrsClock, \"native_vrs_clock\")")&&!has(draw,"g_nativeVrsOrdinal"),"native recovery uses sole Present ordinal under its own fault budget before graphics standdown");
- check(has(draw,"nativeDecision={self,world&&eye>=0&&eye<2?unsigned(eye):2u")&&has(draw,"nativeBeforeOriginal(self);"),"native activation needs exact original PBR and resolved DSV eye at primary issue");
+ check(has(draw,"nativeSceneMaterialDecision(self,")&&has(draw,"nativeBeforeOriginal(self);")&&
+       has(draw,"depthProbeCurrentSceneEyeOf(dsv, &candidate.eye, nullptr)"),
+       "native production uses broad original scene-material classification and a settled depth eye at issue");
  check(has(native,"OMGetRenderTargets(1,&actualRtv,&actualDsv)")&&has(native,"actualRtv.Get()!=rtv||actualDsv.Get()!=dsv")&&has(native,"RSGetViewports"),"actual native target and full viewport are conservatively verified");
+ check(has(native,"OMGetDepthStencilState(&depthState,nullptr)")&&has(native,"rasterizerDesc.ForcedSampleCount")&&
+       has(native,"map.worldW!=width||map.worldH!=height||map.depth.Get()!=dsv||!map.view"),
+       "new color targets share only stable same-size scene maps with live depth and compatible raster state");
  check(has(draw,"nativeTemporalEyeGeometry(d->eye")&&has(draw,"nativeTemporalFrameSequence()==sequence")&&has(native,"map.projection.sequence==projection.sequence")&&has(gaze,"GetProjectionMatrix("),"source projection remap uses current game geometry and refuses same-ordinal geometry change");
  check(has(draw,"NativeMutationScope")&&has(draw,"NativeMutationScope nativeMutation(self)")&&has(ui,"nativeVrsFullRate(ctx)"),"raw mutation and UI boundaries cannot trust coarse cached state");
  check(has(native,"GetModuleHandleW(L\"LibMagicD3D1164.dll\")")&&has(native,"NativeVrsFailure::MagicPresent"),"external Magic producer is excluded before native ownership");

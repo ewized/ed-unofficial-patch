@@ -101,3 +101,5 @@ into `d3d11.dll`; its notice ships as `FIDELITYFX-SDK-DX11-LICENSE.txt`.
 
 Not affiliated with, endorsed by, or supported by Frontier Developments plc or
 Valve Corporation. Elite Dangerous is a trademark of Frontier Developments plc.
+
+**AI agents:** Read [AGENTS.md](AGENTS.md) for project instructions.

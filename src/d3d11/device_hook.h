@@ -105,14 +105,13 @@ void hookFactoryForDevice(ID3D11Device* device);
 void deviceHookNoteCleanExit();
 
 // The render fraction advanced.texture_lod_bias = auto derived its bias
-// from, read out of Elite's graphics preset before any sampler existed.
-// False when auto was not used, or the preset gave nothing.
+// from: the active native DLSS ratio, or Elite's own multiplier read before
+// sampler creation. False when auto was not used or the preset gave nothing.
 //
 // Worth checking against the fraction the frame turns out to have. A mip
 // bias is baked into every sampler at creation and cannot be changed
-// after, so if the commander moves HMD Quality mid-session -- or if that
-// multiplier ever stops meaning what it means today -- the mips are wrong
-// for the rest of the session and nothing else would say so.
+// after. Samplers created before native sizing was published retain the
+// earlier bias. Moving HMD Quality mid-session can also change the fraction.
 bool deviceHookAutoBiasSource(float* multiplier, float* bias);
 
 // Current saved HMD Quality for menu labels, independent of mip overrides.
