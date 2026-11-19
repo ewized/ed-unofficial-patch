@@ -75,9 +75,9 @@ int main(int argc,char** argv){
  using edvr::native_vrs::protectsInterfaceShader;
  using edvr::native_vrs::sceneMaterialCandidate;
  using edvr::native_vrs::SceneMaterialDraw;
- const auto eligible=[&](uint64_t vs,uint64_t ps,SceneMaterialDraw material,bool sampledUi=false,char kind='X',unsigned count=288){
+ const auto eligible=[&](uint64_t vs,uint64_t ps,SceneMaterialDraw material,bool sampledUi=false,char kind='X',unsigned count=288,unsigned instances=1){
      material.shadersTracked=vs&&ps;
-     material.interfaceDraw=protectsInterfaceShader(vs,ps,false,kind,count,1,sampledUi);
+     material.interfaceDraw=protectsInterfaceShader(vs,ps,false,kind,count,instances,sampledUi);
      return sceneMaterialCandidate(material);
  };
  const SceneMaterialDraw leftMaterial{0,1,true,false,true},rightMaterial{1,1,true,false,true};
@@ -101,6 +101,21 @@ int main(int argc,char** argv){
  check(!eligible(edvr::kUiVsScopeMark,edvr::kUiPsScopeMark,leftMaterial,false,'X',6)&&
        eligible(edvr::kUiVsScopeMark,edvr::kUiPsScopeMark,leftMaterial),
        "the scope reticle stays full rate while the shared weapon material qualifies");
+ constexpr uint64_t lateMenuPs=0x25D5F73A4616093Bull;
+ check(!eligible(edvr::srv_turret::kGunnerSheetVs,lateMenuPs,leftMaterial,false,'X',360)&&
+       !eligible(edvr::srv_turret::kGunnerSheetVs,lateMenuPs,leftMaterial,false,'I',6)&&
+       eligible(edvr::srv_turret::kGunnerSheetVs,otherStockPs,leftMaterial,false,'X',360),
+       "the late menu pair stays full rate regardless of direct shape without excluding other pairs");
+ for(char uncountedKind:{'Z','Y','A'}){
+     check(!eligible(edvr::srv_turret::kGunnerSheetVs,lateMenuPs,leftMaterial,false,uncountedKind,0,0)&&
+           !eligible(edvr::srv_turret::kGunnerSheetVs,otherStockPs,leftMaterial,false,uncountedKind,0,0)&&
+           !eligible(edvr::srv_turret::kGunnerCardsVs,otherStockPs,leftMaterial,false,uncountedKind,0,0)&&
+           !eligible(edvr::kUiVsScopeMark,edvr::kUiPsScopeMark,leftMaterial,false,uncountedKind,0,0),
+           "an unknown shape keeps potential gunner and scope UI full rate");
+     check(eligible(kWorldVs,otherStockPs,leftMaterial,false,uncountedKind,0,0)&&
+           eligible(edvr::kUiVsScopeMark,otherStockPs,leftMaterial,false,uncountedKind,0,0),
+           "an unknown shape still admits unambiguous world and nearby shader pairs");
+ }
  GateCounts gates;gates.note(kWorldVs,kWorldPsE46,true,true,true,true,0,true,true);
  check(gates.knownVs==1&&gates.psE46==1&&gates.exactFamily==1&&gates.depthLeft==1&&gates.familyDepthIssued==1,"E46 positive passes complete original-issue funnel for left eye");
  gates.note(kWorldVs,kWorldPs,true,true,true,true,1,true,true);

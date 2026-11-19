@@ -5,6 +5,8 @@
 
 namespace edvr::native_vrs {
 
+inline constexpr ScreenMotionPair kLateMenuUiPair{srv_turret::kGunnerSheetVs, 0x25D5F73A4616093Bull};
+
 inline bool protectsInterfaceShader(uint64_t vs, uint64_t ps, bool systemMap, char kind,
                                     unsigned count, unsigned instances, bool sampledUi) noexcept {
     if (sampledUi || uiVsIsHoloPanel(vs) || vs == kUiVsFlightHud || vs == kUiVsSprite ||
@@ -12,16 +14,20 @@ inline bool protectsInterfaceShader(uint64_t vs, uint64_t ps, bool systemMap, ch
         vs == kUiVsGuiIcons || vs == kHoloTargetSphere || vs == kHoloWorldMarkerReticle ||
         uiHoloGenericHash(vs) || uiOnFootHudMatch(vs, ps) ||
         screenMotionUiPair(vs, ps) ||
-        (vs == kScreenMotionRecognizePair.vs && ps == kScreenMotionRecognizePair.ps) ||
+        screenMotionRecognizePair(vs, ps) ||
+        (vs == kLateMenuUiPair.vs && ps == kLateMenuUiPair.ps) ||
         uiLayerMapFamilyOf(vs, ps) != UiLayerFamily::kNone)
         return true;
     if (systemMap && ((vs == kUiVsMapPlane && ps == kUiPsMapPlane) ||
                       ((vs == kUiVsMapLinesA || vs == kUiVsMapLinesB) && ps == kUiPsMapLines)))
         return true;
+    const bool shapeUnknown = kind == 'Z' || kind == 'Y' || kind == 'A';
+    const bool scopeMarkPair = vs == kUiVsScopeMark && ps == kUiPsScopeMark;
+    const bool gunnerPanelVs = vs == srv_turret::kGunnerSheetVs || vs == srv_turret::kGunnerCardsVs;
     return srv_turret::familyOf(vs, ps) >= 0 ||
            srv_turret::gunnerSignature(vs, kind, count) >= 0 ||
-           (vs == kUiVsScopeMark && ps == kUiPsScopeMark &&
-            uiScopeMarkShape(kind, count, instances));
+           (scopeMarkPair && uiScopeMarkShape(kind, count, instances)) ||
+           (shapeUnknown && (gunnerPanelVs || scopeMarkPair));
 }
 
 struct SceneMaterialDraw {
