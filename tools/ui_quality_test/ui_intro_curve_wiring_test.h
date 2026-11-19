@@ -47,21 +47,10 @@ const char* const kStripCall =
     "if(stripToward!=0&&!uiLayerIssueBlocked()){stripIssued=panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
-const char* const kLambda =
+const char* const kLambdaEntry =
     "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){objectProbeCandidateDrawIssued(self,false);returnfalse;}"
-    "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}VrsCoverageDrawvrsDraw{};"
-    "uint64_tvrsVs=0,vrsPs=0;boolvrsEye=false,vrsNotUi=false,vrsClass=false;intvrsEyeId=-1;"
-    "constboolnative=nativeVrsLive();NativeWorldDecisionnativeDecision{self};if(vrsCoverageEnabled()||(native&&nativeVrsCoarseRequested())){"
-    "inteye=-1,target=-1;vrsVs=bindingShaderHash(BindSlot::Vs);if(vrsVs==vrs_coverage::kWorldVs)vrsPs=bindingShaderHash(BindSlot::Ps);"
-    "vrsEye=g_state->rtv0Eye;vrsNotUi=!uiLayerRedirecting();vrsClass=altered.cls==AlteredDrawClass::None||altered.cls==AlteredDrawClass::PoolFamily;"
-    "constboolworld=owner&&vrsEye&&vrsNotUi&&vrsClass&&vrs_coverage::knownWorldFamily(vrsVs,vrsPs);"
-    "if(world)depthProbeCurrentSceneEyeOf(static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),&eye,&target);"
-    "vrsEyeId=eye;"
-    "nativeDecision={self,world&&eye>=0&&eye<2?unsigned(eye):2u,"
-    "static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0))};"
-    "if(vrsCoverageEnabled())vrsDraw=vrsCoverageBeforeDraw(self,world&&eye>=0&&eye<2?unsigned(eye):2u,"
-    "static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0)),"
-    "static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0)),altered.cls==AlteredDrawClass::PoolFamily,{vrsVs,vrsPs,count,instances,args.start,args.startInstance,args.base,kind});}"
+    "if(stripIssued){objectProbeCandidateDrawIssued(self,false);returntrue;}";
+const char* const kLambdaIssue =
     "constboolissued=native?nativeWorldIssue(nativeDecision,[&]{returndraw(altered);}):draw(altered);if(vrsDraw.active)vrsCoverageAfterDraw(self,vrsDraw,issued);"
     "if(vrsVs==vrs_coverage::kWorldVs)vrsCoverageNoteGate(vrsVs,vrsPs,owner,vrsEye,vrsNotUi,vrsClass,vrsEyeId,vrsDraw.active,issued);"
     "objectProbeCandidateDrawIssued(self,issued);"
@@ -140,9 +129,19 @@ std::vector<WirePin> wiringPins(const std::string& text) {
                     "intro curve wiring [strip-site]: the strip is drawn after forwardVerdictBegin (kBackdrop's slot swap is in place) and the layer's Begin, before the game's own "
                     "issue and the layer's End, and the splash dim draws it again (the same arguments, the u direction included) before forwardVerdictEnd; "
                     "panelCurveSurfaceDraw has two call sites, and the u direction starts false"});
-    // The unarmed path is today's text: the game's own issue, the lambda it goes through (one early return added), and the dim's own draw.
+    const auto observerBegin = fwd.find("autoobservedDraw=[&](AlteredDrawaltered){");
+    const auto observerEnd = observerBegin == std::string::npos ? std::string::npos :
+        afterui::closingBrace(fwd, fwd.find('{', observerBegin));
+    const auto observer = observerEnd == std::string::npos ? std::string() :
+        fwd.substr(observerBegin, observerEnd - observerBegin + 2);
+    const auto nativeIssue = quietBody(text, "bool nativeWorldIssue(const NativeWorldDecision& decision,Draw draw)");
+    // Pin both branches of the issue and their result, without coupling the strip to VRS eligibility.
     pins.push_back({"unarmed-text",
-                    has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim),
+                    has(fwd, kObserved) && observer.find(kLambdaEntry) == 0 && has(observer, kLambdaIssue) &&
+                        countOf(observer, "return") == 4 && countOf(observer, "draw(altered)") == 2 &&
+                        countOf(observer, "objectProbeCandidateDrawIssued(") == 3 &&
+                        has(nativeIssue, "if(decision.eye>=2)nativeVrsFullRate(decision.context);returndraw();}") &&
+                        countOf(nativeIssue, "draw()") == 1 && has(fwd, kDim),
                     "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` remains the game's issue result; the refusal precedes the strip replacement return, "
                     "observer calls report false for refused/replaced draws and the actual issued result otherwise, and the dim retains the game's fallback"});
     // The candidate test: two cheap tests first (the verdict, the flag), the cross-TU question last, so an ordinary draw pays nothing.
@@ -302,6 +301,10 @@ void testIntroCurveControls(const std::string& text) {
         {"originalIssued is no longer observedDraw's answer",
          {{"const bool originalIssued=observedDraw(alteredClass", "const bool originalIssued = stripIssued || observedDraw(alteredClass"}}, "unarmed-text"},
         {"the strip's early return answers false", {{"if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }", "if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return false; }"}}, "unarmed-text"},
+        {"the native issue wrapper drops the draw result",
+         {{"    return draw();\n}\nvoid nativeBeforeOriginal", "    draw(); return true;\n}\nvoid nativeBeforeOriginal"}}, "unarmed-text"},
+        {"the candidate observer reports a withheld draw as issued",
+         {{"objectProbeCandidateDrawIssued(self,issued);", "objectProbeCandidateDrawIssued(self,true);"}}, "unarmed-text"},
         // ---- candidate
         {"the cross-TU question is asked first",
          {{"if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {",
