@@ -259,11 +259,18 @@ int main(int argc,char** argv){
  check(has(draw,"nativeSceneMaterialDecision(self,")&&has(draw,"nativeBeforeOriginal(self);")&&
        has(draw,"depthProbeCurrentSceneEyeOf(dsv, &candidate.eye, nullptr)"),
        "native production uses broad original scene-material classification and a settled depth eye at issue");
- check(has(native,"OMGetRenderTargets(1,&actualRtv,&actualDsv)")&&has(native,"actualRtv.Get()!=rtv||actualDsv.Get()!=dsv")&&has(native,"RSGetViewports"),"actual native target and full viewport are conservatively verified");
+ check(has(native,"OMGetRenderTargets(1,&actualRtv,&actualDsv)")&&
+       has(native,"return rtv && dsv && actualRtv.Get()==rtv && actualDsv.Get()==dsv;")&&
+       has(native,"if(!sceneTargetsBound(s,rtv,dsv))return false;")&&has(native,"RSGetViewports"),
+       "actual native target and full viewport are conservatively verified");
  check(has(native,"OMGetDepthStencilState(&depthState,nullptr)")&&has(native,"rasterizerDesc.ForcedSampleCount")&&
        has(native,"map.worldW!=width||map.worldH!=height||map.depth.Get()!=dsv||!map.view"),
        "new color targets share only stable same-size scene maps with live depth and compatible raster state");
- check(has(draw,"nativeTemporalEyeGeometry(d->eye")&&has(draw,"nativeTemporalFrameSequence()==sequence")&&has(native,"map.projection.sequence==projection.sequence")&&has(gaze,"GetProjectionMatrix("),"source projection remap uses current game geometry and refuses same-ordinal geometry change");
+ check(has(draw,"nativeTemporalEyeGeometry(eyeId,")&&has(draw,"witnessProjection(d->eye,value)")&&
+       has(draw,"nativeTemporalFrameSequence()==sequence")&&has(native,"if(a.sequence!=b.sequence)return false;")&&
+       has(native,"if(a.frustum[i]!=b.frustum[i])return false;")&&has(native,"if(a.shift[i]!=b.shift[i])return false;")&&
+       has(native,"if(!sameProjection(map.projection,projection)||")&&has(gaze,"GetProjectionMatrix("),
+       "source projection remap uses current game geometry and refuses same-ordinal geometry change");
  check(has(draw,"NativeMutationScope")&&has(draw,"NativeMutationScope nativeMutation(self)")&&has(ui,"nativeVrsFullRate(ctx)"),"raw mutation and UI boundaries cannot trust coarse cached state");
  check(has(native,"GetModuleHandleW(L\"LibMagicD3D1164.dll\")")&&has(native,"NativeVrsFailure::MagicPresent"),"external Magic producer is excluded before native ownership");
  std::printf("%s vrs_coverage_checks=%u gpu_calls=0 nvapi_calls=0 runtime_calls=0\n",good?"PASS":"FAIL",checks);return good?0:1;
