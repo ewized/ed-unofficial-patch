@@ -9,6 +9,16 @@ namespace edvr::openxr::fghandoff {
 enum class Import { NotNeeded, RetirementWait, ProviderNoBatch, Future, FenceWait, Imported, Rejected };
 enum class Images { None, Generated, Endpoint, WrongEpoch, BehindWatermark, PreviousMismatch, Late, NativeOnly, OutsideWindow };
 enum class Slot { Empty, Generated, Native, Repeat, RefusedCredit };
+// First decision that stops a trial, or the ready path that took its slot.
+enum class Handoff : uint8_t {
+    None, GeneratedReady, CommittedEndpoint, NoPendingNative, NativeEndpointReady,
+    Scene, PollRejected, SourceIdentity, FallbackCoverage, NoSynthesisProof,
+    ColdTrialSpent, AttemptAlreadySpent, Time, Deferred
+};
+inline bool recordHandoff(Handoff* observation,Handoff decision) noexcept {
+    if(observation)*observation=decision;
+    return decision==Handoff::Deferred;
+}
 
 struct Poll {
     Import result=Import::NotNeeded;
@@ -29,6 +39,8 @@ struct Sample {
     Images images=Images::None;
     Slot slot=Slot::Empty;
     unsigned phase=0,multiplier=0;
+    uint8_t importedGenerated=0,importedPhaseMask=0;
+    Handoff handoff=Handoff::None;
 };
 
 // Owner-only fixed storage. Keep the first bounded block after the opt-in,

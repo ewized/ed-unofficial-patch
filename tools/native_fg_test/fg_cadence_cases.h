@@ -91,6 +91,30 @@ template<class Check> void runFgCadenceCases(Check check) {
     return policy.deferNative(displayed,queued,exported,10*period,12*period,period,period,2);
   };
 
+  // The native decision is identical with and without a trace sink. A
+  // consumed trial and a missing synthesis proof need distinct diagnostics.
+  using Handoff=fghandoff::Handoff;
+  Handoff observedDecision=Handoff::None;
+  Bootstrap diagnostic;diagnostic.sync(epoch);diagnostic.displayNative(1);diagnostic.displayNative(2);
+  diagnostic.completeNative(3);
+  const auto observeDecision=[&](uint64_t queued,int64_t displayTime) {
+    return diagnostic.deferNative(2,queued,2,10*period,displayTime,period,period,2,&observedDecision);
+  };
+  check(!observeDecision(3,12*period)&&observedDecision==Handoff::NoSynthesisProof,
+    "FG diagnostic distinguishes missing synthesis proof");
+  diagnostic.observeBehind(proof,true);
+  check(!observeDecision(2,12*period)&&observedDecision==Handoff::SourceIdentity,
+    "FG diagnostic identifies a mismatched queued source");
+  check(!observeDecision(3,12*period+1)&&observedDecision==Handoff::Time,
+    "FG diagnostic identifies a source past its forecast horizon");
+  check(observeDecision(3,12*period)&&observedDecision==Handoff::Deferred,
+    "FG diagnostic records the actual charged trial");
+  check(!observeDecision(3,12*period)&&observedDecision==Handoff::AttemptAlreadySpent,
+    "FG diagnostic identifies the same source's already charged slot");
+  diagnostic.abandonNativeAttempt();diagnostic.displayNative(3);diagnostic.completeNative(4);
+  check(!diagnostic.deferNative(3,4,3,10*period,12*period,period,period,2,&observedDecision)&&
+        observedDecision==Handoff::ColdTrialSpent,"FG diagnostic distinguishes exhausted cold recovery");
+
   // Cold or unavailable generation always leaves the game on native cadence.
   Bootstrap cold;cold.sync(epoch);
   uint64_t nextCredit=0;

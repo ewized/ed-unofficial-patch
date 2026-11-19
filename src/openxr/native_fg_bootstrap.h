@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/native_fg_multiplier.h"
+#include "native_fg_handoff_trace.h"
 #include "native_fg_timeline.h"
 #include <cstdint>
 #include <limits>
@@ -89,14 +90,22 @@ public:
   // Replacing B with another completion cannot renew this attempt.
   bool deferNative(uint64_t displayed,uint64_t latestQueued,uint64_t latestExported,
                    int64_t sourceTime,int64_t displayTime,int64_t nextPeriod,int64_t admissionPeriod,
-                   unsigned multiplier) {
-    if(attempted_||!displayed||(!generated_&&(trialSpent_||bootstrapEndpoint_!=displayed))||
-       completed_<=displayed||completed_-displayed!=1||
-       firstPending_!=completed_||latestQueued!=completed_||latestExported>=completed_||
-       nextPeriod<=0||!phaseFits(displayTime,sourceTime,admissionPeriod,multiplier,1,nextPeriod))return false;
+                   unsigned multiplier,fghandoff::Handoff* observation=nullptr) {
+    using fghandoff::Handoff;
+    using fghandoff::recordHandoff;
+    if(attempted_)return recordHandoff(observation,Handoff::AttemptAlreadySpent);
+    if(!displayed)return recordHandoff(observation,Handoff::SourceIdentity);
+    if(!generated_) {
+      if(trialSpent_)return recordHandoff(observation,Handoff::ColdTrialSpent);
+      if(bootstrapEndpoint_!=displayed)return recordHandoff(observation,Handoff::NoSynthesisProof);
+    }
+    if(completed_<=displayed||completed_-displayed!=1||firstPending_!=completed_||
+       latestQueued!=completed_||latestExported>=completed_)return recordHandoff(observation,Handoff::SourceIdentity);
+    if(nextPeriod<=0||!phaseFits(displayTime,sourceTime,admissionPeriod,multiplier,1,nextPeriod))
+      return recordHandoff(observation,Handoff::Time);
     attempted_=true;
     trialSpent_=true;
-    return true;
+    return recordHandoff(observation,Handoff::Deferred);
   }
   void miss(){generated_=false;bootstrapEndpoint_=0;}
   void abandonNativeAttempt(){if(attempted_)miss();}

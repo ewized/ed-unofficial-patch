@@ -4,7 +4,8 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** guarded batching is active in `460f7b84`. A 30-second ON sample measured 13.619 ms GPU against adjacent completed OFF windows of 10.251 and 10.371 ms; the ON drain was interrupted, so the completed-only comparison is incomplete. VRS still regresses. A read-only original-depth route is implemented for native and game checks; it preserves the private mirror for writers.
+- **VRS performance investigation:** `249e7c9a` completed 30-second OFF/ON/OFF windows at 10.768 / 13.182 / 10.320 ms GPU. The read-only original-depth route ran in production, but VRS still regresses. The combined VRS/2x-FG capture delivered no generated frames; diagnosis remains open. See the dated measurements below.
+- **F8 opening view:** `249e7c9a` displayed DLSS quality, experimental frame generation, NVIDIA low latency, VRS and its sharp region together in the native VR Performance page. Physical headset validation remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1190,7 +1191,42 @@ writes, including an `EQUAL` comparison with writes enabled, retain the
 mirror. A read-only run can extend an already-matched mirror receipt;
 it cannot establish one. The native differential checks actual view
 identity, copy and transition counts, and exact pixels through writable,
-read-only, mutation and refusal transitions. Game benefit remains unmeasured.
+read-only, mutation and refusal transitions.
+
+At `249e7c9a`, the native WARP and RTX differential checks passed, including
+actual original-DSV identity and exact output through state transitions.
+The stationary Surface Operation scene then completed all three 30-second
+windows with the full 2,000 ms drain and no invalid or missing samples:
+
+| Setting | GPU median | CPU median | Valid CPU/GPU samples |
+| --- | --- | --- | --- |
+| Off, window 6 | 10.768 ms | 7.380 ms | 2,593 |
+| On, window 9 | 13.182 ms | 10.072 ms | 1,888 |
+| Off, window 11 | 10.320 ms | 6.589 ms | 2,693 |
+
+Both eyes used 3840 by 2160 input and output, DLAA model K, and a simulated
+90 Hz SteamVR/OpenXR headset on an RTX 5090. Counters confirmed over 2.6
+million original-depth material draws among 5.9 million paired draws, with
+no state, shader, query, rate or cohort refusals. VRS still added 2.414 to
+2.862 ms GPU against the adjacent Off windows. The historical difference
+from `460f7b84` does not isolate this depth change. Ruled out: avoiding
+read-only private-depth switches alone resolves the VRS regression, because
+the route ran and the completed comparison still slowed down.
+
+A separate four-second capture with VRS and 2x frame generation both On
+recorded 330 successful XR slots: 163 native, 167 repeats and no generated
+frames. All 164 imported batches were already behind the native watermark;
+the trace had no dropped rows or integrity errors. The earlier VRS-Off FG
+capture at `460f7b84` delivered 180 generated and 180 native frames. These
+are different load conditions, not an isolated scheduling comparison.
+The surrounding lifecycle log recorded 71 generated presentations early
+in combined mode, then no further generated presentations while backend
+synthesis continued in the same history. The bounded handoff trace now
+also records imported phase count/mask and the first handoff decision,
+including missing synthesis proof and a spent recovery trial. These are
+observations only; the diagnostic does not change pacing or add waits.
+Combined delivery needs further diagnosis. Neither capture establishes
+physical headset scanout or active-combat performance.
 
 ### Simulator validation (2026-11-19)
 
