@@ -176,6 +176,21 @@ int main(int argc,char** argv) {
   // ask the baseline was rendered for.
   const auto q=[](NativeTrimDimensions d){return NativeTrimDimensions{uint32_t(std::lround(d.width*.65f)),uint32_t(std::lround(d.height*.65f))};};
   const auto pair=[](NativeFovTrim& g,NativeTrimDimensions d){g.noteSubmittedSize(0,d.width,d.height);g.noteSubmittedSize(1,d.width,d.height);};
+  {
+    constexpr auto quality=edvr::DlssQuality::Performance;
+    NativeFovTrim trimmed;NativeTrimSettings settings{};settings.trimOuterDeg=10;settings.trimVerticalDeg=10;
+    const auto advance=[&](bool asked=true){return trimmed.beginFrame(settings,crystal,crystalDims,1,asked,quality,1.f);};
+    const auto gameAsk=[&]{const auto output=trimmed.recommended(0);return NativeTrimDimensions{
+      edvr::dlssGameDimension(output.width,quality,1.f),edvr::dlssGameDimension(output.height,quality,1.f)};};
+    CHECK(advance(false)==NativeTrimStage::Adopting);pair(trimmed,gameAsk());CHECK(advance()==NativeTrimStage::Live);
+    for(float outerTrim : {5.f,10.f,5.f}) {
+      const auto oldAsk=gameAsk();const auto oldOutput=trimmed.treatedFor(0);
+      settings.trimOuterDeg=outerTrim;CHECK(advance()==NativeTrimStage::Adopting);
+      const auto newAsk=gameAsk();CHECK(trimmed.nudge()==NativeTrimNudge::Started && newAsk.height<oldAsk.height);
+      CHECK(trimmed.treatedFor(0).height==oldOutput.height);pair(trimmed,oldAsk);CHECK(advance()==NativeTrimStage::Adopting);
+      pair(trimmed,newAsk);CHECK(advance()==NativeTrimStage::Live && trimmed.treatedFor(0).height==trimmed.recommended(0).height);
+    }
+  }
   const auto true65=q({3964,3914});
   CHECK(true65.width==2577&&true65.height==2544);
   NativeTrimSettings flight{}; flight.trimOuterDeg=10; flight.trimVerticalDeg=10;

@@ -68,53 +68,59 @@ static void machineCells() {
     // The ordinary run: off, then restored.
     {
         Machine m;
-        check(m.press("dlss") == Press::WentOff && m.off && m.saved == "dlss", "a press with AA on goes off and remembers the mode");
-        check(m.press("dlss") == Press::Restored && !m.off && m.saved.empty(), "the next press restores");
-        check(m.press("dlss") == Press::WentOff, "and the one after goes off again");
+        check(m.press("dlss", "dlss") == Press::WentOff && m.off && m.saved == "dlss", "a press with AA on goes off and remembers the mode");
+        check(m.press("dlss", "dlss") == Press::Restored && !m.off && m.saved.empty(), "the next press restores");
+        check(m.press("dlss", "dlss") == Press::WentOff, "and the one after goes off again");
     }
     // Every mode EDVR has goes off; off itself has nothing to compare.
     for (const char* mode : {"on", "dlaa", "dlss", "fsr", "xess", "DLSS", "Xess"}) {
         Machine m;
-        check(m.press(mode) == Press::WentOff, "every temporal mode can be compared");
+        check(m.press(mode, mode) == Press::WentOff, "every temporal mode can be compared");
     }
     for (const char* mode : {"off", "", "banana", "0"}) {
         Machine m;
-        check(m.press(mode) == Press::NothingToCompare && !m.off, "a configured mode that is not a temporal mode has nothing to compare");
-        check(m.press(mode) == Press::NothingToCompare, "and it stays that way press after press");
+        check(m.press(mode, mode) == Press::NothingToCompare && !m.off, "a configured mode that is not a temporal mode has nothing to compare");
+        check(m.press(mode, mode) == Press::NothingToCompare, "and it stays that way press after press");
+    }
+    for (const char* queued : {"off", "xess"}) {
+        Machine m;
+        check(m.press("dlss", queued) == Press::WentOff && m.saved == queued, "F7 compares the running engine and remembers the saved choice");
+        check(m.observe(queued, true, 100) == Seen::Nothing, "a queued choice is not mistaken for a new edit");
+        check(m.observe("fsr", true, 101) == Seen::EndedByChange, "an actual edit still ends a latched DLSS comparison");
     }
     // Restoring returns whatever the settings say at that moment, not what was remembered.
     {
         Machine m;
-        m.press("dlss");
-        check(m.press("fsr") == Press::Restored && !m.off, "a press while off restores, whatever the file says now");
+        m.press("dlss", "dlss");
+        check(m.press("fsr", "fsr") == Press::Restored && !m.off, "a press while off restores, whatever the file says now");
     }
     // The player changes AA while it is off: their choice wins.
     {
         Machine m;
-        m.press("dlss");
+        m.press("dlss", "dlss");
         check(m.observe("dlss", true, 10) == Seen::Nothing && m.off, "nothing changed: the comparison stands");
         check(m.observe("DLSS", true, 20) == Seen::Nothing && m.off, "the mode compares without case");
         check(m.observe("fsr", true, 30) == Seen::EndedByChange && !m.off, "the file's AA changed: the comparison ends");
         check(m.observe("fsr", true, 40) == Seen::Nothing, "and ends once");
-        check(m.press("fsr") == Press::WentOff && m.saved == "fsr", "the next press is a fresh off from the new mode");
+        check(m.press("fsr", "fsr") == Press::WentOff && m.saved == "fsr", "the next press is a fresh off from the new mode");
     }
     {
         Machine m;
-        m.press("dlss");
+        m.press("dlss", "dlss");
         check(m.observe("off", true, 5) == Seen::EndedByChange && !m.off, "a hand edit to off ends it too (AA is off for real)");
-        check(m.press("off") == Press::NothingToCompare, "...and then there is nothing to compare");
+        check(m.press("off", "off") == Press::NothingToCompare, "...and then there is nothing to compare");
     }
     // An F8 pick that lands on the remembered mode: ended once the write has had time to land.
     {
         Machine m;
-        m.press("dlss");
+        m.press("dlss", "dlss");
         m.noteMenuEdit(1000);
         check(m.observe("dlss", true, 1000 + kMenuEditSettleMs - 1) == Seen::Nothing && m.off, "a pick still being written does not end it early");
         check(m.observe("dlss", true, 1000 + kMenuEditSettleMs) == Seen::EndedBySameValue && !m.off, "a pick that landed on the same mode ends it");
     }
     {
         Machine m;
-        m.press("dlss");
+        m.press("dlss", "dlss");
         m.noteMenuEdit(1000);
         check(m.observe("xess", true, 1100) == Seen::EndedByChange, "a pick that changed the file ends it at once, before the settle time");
     }
@@ -122,15 +128,15 @@ static void machineCells() {
         Machine m;
         m.noteMenuEdit(1);   // a pick with no comparison running is nobody's business
         check(!m.menuEdit && m.observe("dlss", true, 99999) == Seen::Nothing, "a menu edit with the comparison on ends nothing");
-        m.press("dlss");
+        m.press("dlss", "dlss");
         check(!m.menuEdit && m.observe("dlss", true, 99999) == Seen::Nothing, "and does not leak into the next comparison");
     }
     // The override went away under it (a profile switch): the comparison is over, the machine is clean.
     {
         Machine m;
-        m.press("dlss");
+        m.press("dlss", "dlss");
         check(m.observe("dlss", false, 1) == Seen::EndedByProfile && !m.off && m.saved.empty(), "a lost override ends the comparison");
-        check(m.press("on") == Press::WentOff, "and the key works at once in the new profile");
+        check(m.press("on", "on") == Press::WentOff, "and the key works at once in the new profile");
     }
     {
         Machine m;
@@ -235,6 +241,25 @@ static void configCells(const std::wstring& dir) {
     cfg.clearRuntimeOverride("fix.temporal_aa");
     check(cfg.generation() == gen1 && !cfg.reloadIfChanged(), "clearing what is not set changes nothing");
 
+    cfg.setNativeDlssQuality(DlssQuality::Balanced);
+    for (const char* queued : {"off", "xess"}) {
+        cfg.set("fix.temporal_aa", queued);
+        Machine compare;
+        check(compare.press(cfg.getString("fix.temporal_aa", "off"), cfg.configuredTemporalMode()) == Press::WentOff,
+              "a saved mode waiting for restart does not prevent comparing the running DLSS engine");
+        cfg.setRuntimeOverride("fix.temporal_aa", "off");
+        check(cfg.requestedTemporalMode() == "off" && cfg.getString("fix.temporal_aa", "x") == "off" &&
+              compare.observe(cfg.configuredTemporalMode(), true, 0) == Seen::Nothing,
+              "F8 and the renderer see comparison Off while edit detection keeps the queued selection");
+        check(compare.press(cfg.getString("fix.temporal_aa", "off"), cfg.configuredTemporalMode()) == Press::Restored,
+              "a second press releases comparison Off");
+        cfg.clearRuntimeOverride("fix.temporal_aa");
+        check(noticeText(Press::Restored, cfg.getString("fix.temporal_aa", "off"), "F7") == "AA restored: DLSS" &&
+              cfg.configuredTemporalMode() == queued, "restoration reports DLSS and preserves the queued selection");
+    }
+    cfg.setNativeDlssQuality(DlssQuality::Custom);
+    cfg.set("fix.temporal_aa", "fsr");
+
     // The flat gate reads the mode around the allow-list; the override must follow it there.
     const RuntimeProfile saved = g_runtimeProfile;
     g_runtimeProfile = RuntimeProfile::Flat;
@@ -327,6 +352,11 @@ static void sourcePins(const std::string& root) {
     check(has(menu, "void menuRequestConfigPoll() { g_s.pollRequest = true; }") && has(mod, "menuRequestConfigPoll();"),
           "the toggle asks for the config poll through the menu's own request, which the frame boundary already honours");
     check(has(menu, "aaCompareNoteMenuEdit();") && has(menu, "\"fix.temporal_aa\""), "an F8 write of fix.temporal_aa tells the comparison");
+    check(has(menu, "if (isAntiAliasingRow(d)) return Config::get().requestedTemporalMode();"),
+          "the F8 selection shows the F7 override without substituting the latched native engine");
+    check(has(mod, "g_machine.press(running, cfg.configuredTemporalMode())") &&
+          has(mod, "cfg.clearRuntimeOverride(kKey);\n            running = runningMode(cfg);"),
+          "the hotkey tests the running mode, observes the saved setting, and reads the restored engine after clearing F7");
     check(has(menu, "void menuShowNotice(") && has(menu, "void menuNoteOwnChange("), "the menu has the notice and the own-change calls");
     check(has(menu, "s.flatNotice.show(text);") && has(menu, "s.flatNotice.take(s.open)"),
           "the flat menu raises and starts its notice through the queue, which holds it while the menu is open");

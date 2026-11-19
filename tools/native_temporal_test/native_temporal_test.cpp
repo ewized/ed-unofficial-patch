@@ -17,6 +17,7 @@
 #include "../../src/common/temporal_mode.h"   // the map gate's pass verdict bits and flag (temporalMapStillBits, kTemporalFlagMapKeep)
 #include "../../src/d3d11/temporal_pass.h"
 #include "../../src/d3d11/native_gaze_readiness.h"
+#include "../../src/d3d11/native_dlss_evidence.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_surfaces.h"
 #include "../../src/d3d11/vr_camera_census.h"
@@ -50,6 +51,7 @@ struct Call {
   float previousEyes[2][12]{},currentEyes[2][12]{};
 };
 Call note;std::vector<Call> calls;bool passSucceeds=true;
+bool ngxEvaluated=false;
 // P1-1 (review 2026-09-23): the pass runs INSIDE treat(), which holds the
 // channel's mutex, and makes its targets through the device's
 // CreateTexture2D -- where fix.ui_quality's surfaces ask for the
@@ -93,6 +95,10 @@ extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* n
   c.outW=outW;c.outH=outH;c.flags=flags;c.motion=delta&&translation;
   if(delta)std::memcpy(c.delta,delta,36);if(translation)std::memcpy(c.translation,translation,12);
   if(swapped)std::memcpy(c.swapped,swapped,12);std::memcpy(c.tanNow,now,16);std::memcpy(c.tanPrev,previous,16);
+  if(ngxEvaluated&&passSucceeds){
+    D3D11_TEXTURE2D_DESC d{};static_cast<ID3D11Texture2D*>(source)->GetDesc(&d);
+    edvr::nativeDlssEvaluation={eye,"quality",d.Width,d.Height,outW?outW:d.Width,outH?outH:d.Height};
+  }
   calls.push_back(c);return passSucceeds?source:nullptr; // borrowed; provider AddRefs
 }
 extern "C" void edvrEyeCaptureUntreated(void*,int,const float*){++dumps;}
@@ -542,18 +548,26 @@ void run(){
   check(treat(fresh,5,1,source.Get())==S_FALSE&&offAaDepthNotes==depth0+1&&closeFloat(offAaDepthNear,.025f),"F202: a frame the game made no matrix query in hands the depth step the last near plane, so the lens is not left without one");
   check(fresh.close(fresh.context)==S_OK,"fresh close");
   check(!edvr::nativeTemporalGazeEpoch(),"AA-Off pass-through never publishes gaze readiness");
+  edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Quality);
+  edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Quality,1.f);ngxEvaluated=true;
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);
   const unsigned tan1=eyeTanNotes,offs1=offsetOnlyNotes,sized1=submittedSizedNotes;
   check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");
+  check(edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,"one NGX eye cannot confirm a stereo quality preset");
   check(eyeTanNotes==tan1&&offsetOnlyNotes==offs1,"F198: with the mode on, treat's AA-off branch publishes nothing (the pass's own notes are what they were)");
   check(submittedSizedNotes==sized1+1,"F198: the submitted size is noted with the mode on too");
   check(offAaDepthNotes==depth0+1,"F202: with a mode on the AA-off depth step is never called (the pass makes the depth view itself): the AA-on path is what it was");
   c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
   check(treat(dlss,1,1,source.Get())==S_OK&&edvr::nativeTemporalGazeEpoch(),"successful DLSS pair establishes readiness before the refusal regression");
-  f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
+  check(edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Applied,"matching evaluated features and measured dimensions confirm the stereo preset");
+  ngxEvaluated=false;f=frame(13,2);begin(dlss,f);
+  check(treat(dlss,2,0,source.Get())==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Unavailable,
+        "an own-pass fallback can return pixels but cannot reuse the last NGX evaluation as evidence");
+  f=frame(13,3);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,3,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   check(!edvr::nativeTemporalGazeEpoch(),"refused temporal output never admits gaze");
-  f=frame(13,3);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
+  f=frame(13,4);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
+  edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Custom);edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Custom,0.f);
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
   { // World scale (common/world_scale.h) moves the eye origins Elite is given: history made at one separation is not history at the next, whatever moved it.
     auto scaled=acquire(d,16);

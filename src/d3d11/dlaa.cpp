@@ -1,4 +1,5 @@
 #include "dlaa.h"
+#include "native_dlss_evidence.h"
 #include "dlss_floor.h"  // dlssModeRanges, defined below beside dlaaAvailable
 #include "hdr_backend_flags.h"  // the HDR route's creation flags, pure (section 81)
 
@@ -93,6 +94,7 @@ bool                 g_optimalFailNoted = false;
 
 struct EyeFeature {
     NVSDK_NGX_Handle* handle = nullptr;
+    const char* modeName = "none";
     uint32_t          w = 0, h = 0;
     uint32_t          outW = 0, outH = 0;
     uint64_t          presetGen = 0;   // the preset generation the feature was created under
@@ -339,6 +341,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         // the runtime will not say (it did not, for two flights: the query
         // was made on the wrong parameter block; the review's F2).
         NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_DLAA;
+        const char* modeName = "dlaa";
         unsigned optW = 0, optH = 0, maxW = 0, maxH = 0, minW = 0, minH = 0;
         float sharpness = 0.0f;
         bool optKnown = false;
@@ -380,6 +383,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
             DlssModeRange chosenRange;
             if (dlssChooseMode(modes, w, h, outW, &picked, &fromRange, &chosenRange)) {
                 quality = kNgxLadder[static_cast<int>(picked)];
+                modeName = kDlssModeNames[static_cast<int>(picked)];
                 if (fromRange) {
                     optW = chosenRange.optW; optH = chosenRange.optH;
                     minW = chosenRange.minW; minH = chosenRange.minH;
@@ -460,6 +464,7 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
         f.outW = outW;
         f.outH = outH;
         f.presetGen = g_presetGen;
+        f.modeName = modeName;
         f.hdr = hdr;
         if (hdr)
             Log::get().note("dlss: the feature for %s was created for the flat HDR route: HDR input, exposure %s; the "
@@ -770,6 +775,7 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         return false;
     }
     ++g_evaluations;
+    nativeDlssEvaluation = {eye, f.modeName, w, h, outW, outH};
     if (reset) ++g_resets;
     return true;
 #endif

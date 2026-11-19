@@ -1,5 +1,6 @@
 #include "../../src/d3d11/vrs_coverage_policy.h"
 #include "../../src/d3d11/native_vrs_draw_policy.h"
+#include "../../src/d3d11/native_vrs_material.h"
 #include "callback_dependency_tests.h"
 #include "work_reference_tests.h"
 #include <cstdio>
@@ -12,11 +13,31 @@ unsigned checks=0;bool good=true;
 void check(bool value,const char* label){++checks;if(!value){good=false;std::printf("FAIL: %s\n",label);}}
 std::string read(const std::string& name){std::ifstream f(name);return {std::istreambuf_iterator<char>(f),{}};}
 bool has(const std::string& a,const char* b){return a.find(b)!=std::string::npos;}
+namespace uncounted {
+struct ID3D11DeviceContext {};
+struct {ID3D11DeviceContext* ownerCtx;} state;
+auto* g_state=&state;
+bool nativeVrsLive(){return true;}
+unsigned classifications=0,scopes=0,preparations=0;
+int nativeSceneMaterialDecision(ID3D11DeviceContext*,bool,bool,char,unsigned,unsigned){++classifications;return 0;}
+template<class Draw> bool nativeWorldIssue(int,Draw draw){++scopes;return draw();}
+void nativeBeforeOriginal(ID3D11DeviceContext*){++preparations;}
+#include "../../src/d3d11/native_vrs_uncounted_issue.h"
+void test(){
+    ID3D11DeviceContext owner{},deferred{};state.ownerCtx=&owner;
+    unsigned draws=0;
+    for(char kind:{'Z','Y','A'})nativeUncountedMaterialIssue(&deferred,kind,[&]{++draws;});
+    check(draws==3&&!classifications&&!scopes&&!preparations,"deferred indirect and auto recording issue once without entering either VRS mutation boundary");
+    nativeUncountedMaterialIssue(&owner,'Z',[&]{++draws;});
+    check(draws==4&&classifications==1&&scopes==1&&preparations==1,"owner indirect issue still classifies, enters the scope and prepares its original draw");
+}
+}
 int main(int argc,char** argv){
  if(argc==2&&std::strcmp(argv[1],"--dry-run")==0){std::puts("CPU-only accepted-state/rate-map/direction evidence; no NVAPI, runtime, GPU or input calls");return 0;}
  if(argc!=2)return 2;
  callbackDependencyTests(check);
  workReferenceTests(check);
+ uncounted::test();
  PipelineQueryProgress pipeline;
  check(!pipeline.pending()&&!pipeline.pollable()&&!pipeline.end(),"idle pipeline cannot End or poll");
  check(pipeline.begin()&&pipeline.pending()&&!pipeline.pollable()&&!pipeline.begin(),"one Begin creates one pending query");
@@ -78,18 +99,40 @@ int main(int argc,char** argv){
  const auto eligible=[&](uint64_t vs,uint64_t ps,SceneMaterialDraw material,bool sampledUi=false,char kind='X',unsigned count=288,unsigned instances=1){
      material.shadersTracked=vs&&ps;
      material.interfaceDraw=protectsInterfaceShader(vs,ps,false,kind,count,instances,sampledUi);
-     return sceneMaterialCandidate(material);
+     return sceneMaterialCandidate(material,vs,ps);
  };
- const SceneMaterialDraw leftMaterial{0,1,true,false,true},rightMaterial{1,1,true,false,true};
+ const SceneMaterialDraw leftMaterial{0,1,true,false,true,true,false,24},rightMaterial{1,1,true,false,true,true,false,26};
+ const auto capturedMaterial=[&](const char* file){
+     std::ifstream stream(std::string(argv[1])+"/tools/flat_temporal_test/fixtures/"+file,std::ios::binary);
+     const std::string bytes{std::istreambuf_iterator<char>(stream),{}};
+     check(!bytes.empty(),"retail DXBC fixture present");
+     return edvr::native_vrs::materialPixelShader(bytes.data(),bytes.size());
+ };
+ check(capturedMaterial("ps_4E4FF61E8A08FC7E.dxbc")&&capturedMaterial("ps_B7D50283329322C3.dxbc")&&
+       capturedMaterial("ps_76849D64AC657DB9.dxbc"),"stock forward canopy, station material and planet-surface creation bytes earn material receipts");
+ check(!capturedMaterial("ps_7EAC71963E66C5FE.dxbc")&&!capturedMaterial("ps_81812EF97FB4A361.dxbc")&&
+       !capturedMaterial("ps_F0BAE053476F8730.dxbc")&&!capturedMaterial("ps_0DF03E64DF9DBEF1.dxbc"),
+       "screen shadow, light volume, screen filter and discard material cannot earn receipts");
+ check(!eligible(0x53211E8C072CD02Eull,0x7EAC71963E66C5FEull,leftMaterial,false,'N',3)&&
+       !eligible(0x7E38A6AA1269C901ull,0x7CECABDE34FFBE9Eull,rightMaterial,false,'N',4)&&
+       !eligible(0x963B52C73B4143ACull,0x50364C9D994141D5ull,leftMaterial,false,'X',84,25),
+       "census 054801 F1 rows 124,126,128: shared scene DSV and full-eye target do not certify resolve, deferred sun or indexed light volumes");
+ auto unknown=leftMaterial;unknown.materialShader=false;
+ auto witness=leftMaterial;witness.motionWitness=true;
+ check(!eligible(kWorldVs,kWorldPs,unknown)&&!eligible(kWorldVs,kWorldPs,witness)&&
+       !eligible(0x889A5279E68F0672ull,0x2F924695596C8195ull,leftMaterial)&&
+       !eligible(0x889A5279E68F0672ull,0xEBA95E15B0A66102ull,leftMaterial),
+       "unknown shaders, active velocity exports, self-marking shaders and in-world terminals stay full rate");
  constexpr uint64_t otherStockPs=0xCB429E043DBB2506ull;
  check(!knownWorldFamily(kWorldVs,otherStockPs)&&eligible(kWorldVs,otherStockPs,leftMaterial),
        "production admits a third stock material in the same G-buffer family");
  check(!knownWorldFamily(edvr::kUiVsLegacyGlass,edvr::kUiPsLegacyGlass)&&
        eligible(edvr::kUiVsLegacyGlass,edvr::kUiPsLegacyGlass,rightMaterial),
        "nonredirected forward canopy material can qualify for the right eye");
- check(!eligible(kWorldVs,otherStockPs,{-1,1,true,false,true})&&
-       !eligible(kWorldVs,otherStockPs,{0,2,true,false,true})&&
-       !eligible(kWorldVs,otherStockPs,{0,1,true,false,false})&&
+ check(!eligible(kWorldVs,otherStockPs,{-1,1,true,false,true,true,false,24})&&
+       !eligible(kWorldVs,otherStockPs,{0,2,true,false,true,true,false,26})&&
+       !eligible(kWorldVs,otherStockPs,{0,1,true,false,false,true,false,26})&&
+       !eligible(kWorldVs,otherStockPs,{0,1,true,false,true,true,false,61})&&
        !eligible(kWorldVs,0,leftMaterial),
        "unresolved depth eye, post-tonemap target, reissue and untracked pixel shader stay full rate");
  check(!eligible(edvr::kUiVsFlightHud,otherStockPs,leftMaterial)&&
@@ -179,6 +222,11 @@ int main(int argc,char** argv){
  const auto begin=draw.find("vrsDraw=vrsCoverageBeforeDraw"),issue=draw.find("const bool issued = native ? nativeWorldIssue",begin),end=draw.find("vrsCoverageAfterDraw",issue);
  check(begin<issue&&issue<end,"evidence brackets actual original issue after redirects, not a reissue");
  const auto native=read(root+"/src/d3d11/native_vrs.cpp"),gaze=read(root+"/src/d3d11/native_gaze.cpp"),present=read(root+"/src/d3d11/device_hook.cpp"),ui=read(root+"/src/d3d11/ui_layer.cpp");
+ check(has(present,"native_vrs::rememberMaterialPs(static_cast<ID3D11PixelShader*>(*out)")&&
+       has(draw,"candidate.materialShader = native_vrs::hasMaterialPsReceipt(pixel, ps)")&&
+       has(draw,"candidate.motionWitness = engineVelocityDrawSubstituted()")&&
+       has(draw,"actualVs==d->vs && actualPs==d->ps"),
+       "material receipts originate at PS creation and only original bound shaders without a motion witness may be issued coarse");
  check(has(ini,"eye_tracked_foveation = 0")&&has(draw,"nativeVrsConfigureFocus(cfg.getBool(\"experimental.eye_tracked_foveation\",false),")&&
        has(draw,"cfg.getString(\"experimental.foveation_focus\",\"normal\").c_str()"),"native producer is explicitly default off with the original focus default");
  check(has(present,"tkNativeVrsClock.run([] { vScreenNativeFrameBoundary(g_state->frameCounter); });")&&has(present,"EDVR_BOUNDARY_TICK(tkNativeVrsClock, \"native_vrs_clock\")")&&!has(draw,"g_nativeVrsOrdinal"),"native recovery uses sole Present ordinal under its own fault budget before graphics standdown");

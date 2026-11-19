@@ -17,9 +17,9 @@
 // carries a version. For any other preset the warning names the preset and says it
 // may turn the effects on; there is no preset parser.
 //
-// The tags are plain (`<AAMode>4</AAMode>`, one per line inside <Root>), so a
-// tag search does the reading, the same way device_hook.cpp reads
-// <HMDRenderTargetMultiplier>. Everything here fails soft: no folder, no file, no
+// The diagnostic fields are plain tags (`<AAMode>4</AAMode>`); the preset and
+// HMD multiplier used for sizing require a complete, unambiguous XML document.
+// Everything here fails soft: no folder, no file, no
 // field leaves the value unknown, and the warning then asks for the logs.
 //
 // Header-only: the parsing and the text are pure (tools\flat_temporal_test drives
@@ -31,9 +31,15 @@
 #include "flat_mono_frame.h"
 
 #include <windows.h>
+#include <shlwapi.h>
+#include <wrl/client.h>
+#include <xmllite.h>
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "xmllite.lib")
 
 #include <algorithm>
 #include <cstdint>
+#include <cwchar>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -87,11 +93,54 @@ inline bool flatXmlInt(const std::string& xml, const char* tag, int* out) {
     return true;
 }
 
+// Sizing needs one unambiguous direct child of the settings root and a
+// well-formed document through EOF. XmlLite keeps comments, attributes and
+// markup that merely resembles the setting out of the decision.
+inline bool flatXmlSetting(const std::string& xml, const wchar_t* tag, std::string* out) {
+    if (!out || xml.empty() || xml.size() > (1u << 20)) return false;
+    Microsoft::WRL::ComPtr<IStream> stream;
+    stream.Attach(SHCreateMemStream(reinterpret_cast<const BYTE*>(xml.data()), static_cast<UINT>(xml.size())));
+    Microsoft::WRL::ComPtr<IXmlReader> reader;
+    if (!stream || FAILED(CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void**>(reader.GetAddressOf()), nullptr)) ||
+        FAILED(reader->SetProperty(XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit)) ||
+        FAILED(reader->SetInput(stream.Get()))) return false;
+    std::wstring value;
+    bool inside = false, found = false;
+    XmlNodeType node{};
+    HRESULT hr;
+    while ((hr = reader->Read(&node)) == S_OK) {
+        if (node == XmlNodeType_Element) {
+            if (inside) return false;
+            UINT depth = 0;
+            const wchar_t* name = nullptr;
+            if (FAILED(reader->GetDepth(&depth)) || FAILED(reader->GetQualifiedName(&name, nullptr))) return false;
+            if (depth == 1 && std::wcscmp(name, tag) == 0) {
+                if (found || reader->IsEmptyElement()) return false;
+                found = inside = true;
+            }
+        } else if (inside && node == XmlNodeType_EndElement) {
+            inside = false;
+        } else if (inside && (node == XmlNodeType_Text || node == XmlNodeType_Whitespace || node == XmlNodeType_CDATA)) {
+            const wchar_t* text = nullptr; UINT length = 0;
+            if (FAILED(reader->GetValue(&text, &length))) return false;
+            value.append(text, length);
+        }
+    }
+    if (hr != S_FALSE || !found || inside) return false;
+    const auto first = value.find_first_not_of(L" \r\n\t"), last = value.find_last_not_of(L" \r\n\t");
+    if (first == std::wstring::npos) return false;
+    const int length = static_cast<int>(last - first + 1);
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, value.data() + first, length, nullptr, 0, nullptr, nullptr);
+    if (!bytes) return false;
+    out->resize(bytes);
+    return WideCharToMultiByte(CP_UTF8, 0, value.data() + first, length, out->data(), bytes, nullptr, nullptr) == bytes;
+}
+
 // Missing, malformed and nonphysical values cannot size the game's eye
 // textures. Unlike the legacy diagnostic, reject values with trailing junk.
 inline float flatXmlHmdMultiplier(const std::string& xml) {
     std::string value;
-    if (!flatXmlText(xml, "HMDRenderTargetMultiplier", &value) || value.empty()) return 0.f;
+    if (!flatXmlSetting(xml, L"HMDRenderTargetMultiplier", &value)) return 0.f;
     char* end = nullptr;
     const float multiplier = std::strtof(value.c_str(), &end);
     return end == value.c_str() + value.size() && dlssEliteMultiplierKnown(multiplier) ? multiplier : 0.f;
@@ -240,7 +289,7 @@ inline EliteGraphics flatReadEliteGraphics(const std::wstring& folder, const Eli
     std::string xml;
     if (listing.settings && flatReadSmallFile(folder + L"\\Settings.xml", &xml)) {
         std::string preset;
-        if (flatXmlText(xml, "PresetName", &preset) && !preset.empty()) {
+        if (flatXmlSetting(xml, L"PresetName", &preset)) {
             g.presetKnown = true;
             flatCopyName(g.preset, sizeof(g.preset), preset);
             g.custom = _stricmp(preset.c_str(), "Custom") == 0;
@@ -262,8 +311,7 @@ inline EliteGraphics flatReadEliteGraphics(const std::wstring& folder, const Eli
     }
     return g;
 }
-// %LOCALAPPDATA% the way device_hook.cpp's eliteHmdMultiplier resolves it: the DLL links no
-// shell library.
+// Use the same %LOCALAPPDATA% lookup as device_hook.cpp's eliteHmdMultiplier.
 inline std::wstring flatEliteGraphicsFolder() {
     wchar_t appdata[MAX_PATH] = {};
     const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);

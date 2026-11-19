@@ -16,6 +16,7 @@
 // Performance's, which match the field exactly (see the CHECKs just
 // after buildLadder).
 #include "../../src/d3d11/dlaa.h"
+#include "../../src/d3d11/native_dlss_evidence.h"
 #include "../../src/d3d11/dlss_floor.h"  // the served floor's rule, SDK-free the same way
 
 #include <cstdio>
@@ -73,6 +74,32 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (std::strcmp(argv[1], "--self-test")) return 2;
+
+    {
+        NativeDlssEvidence evidence;
+        using Status = NativeDlssQualityStatus;
+        constexpr auto selected = DlssQuality::Performance;
+        evidence.publish(selected, .5f);
+        const auto ask = dlssGameDimension(3000, selected, .5f);
+        CHECK(ask == 3000 && evidence.status() == Status::Pending);
+        const auto submit = [&](unsigned eye, float elite, const char* mode, uint32_t output) {
+            const auto input = static_cast<uint32_t>(float(ask) * elite);
+            evidence.observe(eye, selected, input, input, 3000, 3000,
+                             {static_cast<int>(eye), mode, input, input, output, output});
+        };
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending);
+        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied);
+        submit(0, 1.f, "dlaa", 3000); CHECK(evidence.status() == Status::Stale);
+        submit(0, .5f, "balanced", 3000); CHECK(evidence.status() == Status::Unavailable);
+        submit(0, .5f, "balanced", 2750); CHECK(evidence.status() == Status::Stale);
+        submit(0, .5f, "performance", 2750); CHECK(evidence.status() == Status::Stale);
+        evidence.observe(0, selected, 1500, 1500, 3000, 3000, {}); CHECK(evidence.status() == Status::Unavailable);
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied);
+        evidence.observe(0, selected, 1500, 1500, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Pending);
+        evidence.observe(0, selected, 3000, 3000, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Stale);
+        evidence.publish(DlssQuality::Custom, 0.f, true); CHECK(evidence.status() == Status::Unavailable);
+        evidence.publish(DlssQuality::Custom, 0.f); CHECK(evidence.status() == Status::Custom);
+    }
 
     // --- dlssModeByRatio: build point 4 -- the one ratio rule, shared by
     // ensureFeature's range-unknown fallback and evaluateCrop. ---

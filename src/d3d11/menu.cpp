@@ -288,6 +288,7 @@ struct State {
     // can preview a restart value without constructing a runtime of its own.
     EdvrNativeRenderSizing renderSizing{};
     bool renderSizingAvailable = false;
+    NativeDlssQualityStatus dlssQualityStatus = NativeDlssQualityStatus::Custom;
 
     KeyRepeat keys[12];
     bool shiftHeld = false;
@@ -444,10 +445,7 @@ bool isAntiAliasingRow(const MenuRowDef& d) {
 }
 
 std::string rowValue(const MenuRowDef& d) {
-    if (isAntiAliasingRow(d)) {
-        return runtimeFlatProfile() ? Config::get().requestedTemporalMode()
-                                    : Config::get().configuredTemporalMode();
-    }
+    if (isAntiAliasingRow(d)) return Config::get().requestedTemporalMode();
     return Config::get().getString(dottedOf(d).c_str(), d.shipped);
 }
 
@@ -563,6 +561,11 @@ bool dlssSelected() {
     return _stricmp(shownValue("fix", "temporal_aa").c_str(), "dlss") == 0;
 }
 
+// During F7 the displayed Off is temporary. Otherwise use the shown choice so an F8 write is reflected before the worker's reload.
+std::string savedAaSelection() {
+    return Config::get().hasRuntimeOverride("fix.temporal_aa") ? Config::get().configuredTemporalMode() : shownValue("fix", "temporal_aa");
+}
+
 const char* dlssRowInactiveHint(const MenuRowDef& row) {
     if (isDlssQualityRow(row)) {
         if (!nativeMenuActive()) return "DLSS quality requires native OpenXR.";
@@ -629,7 +632,7 @@ RestartState rowConditionalState(int def) {
     in.flatProfile = runtimeFlatProfile();
     if (!in.flatProfile) {
         in.vrDlssQualityActive = nativeDlssQualityActive() != DlssQuality::Custom;
-        in.aaIsDlss = dlssSelected();
+        in.aaIsDlss = _stricmp(savedAaSelection().c_str(), "dlss") == 0;
         return conditionalRestartState(in, d.section, d.key);
     }
     in.aaIsXess = flatAntiAliasingIsXess();
@@ -638,30 +641,32 @@ RestartState rowConditionalState(int def) {
     in.problemPresent = xessFgProblem() != nullptr;
     for (int i = 0; i < kRowDefCount; ++i) {
         if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, "temporal_aa") == 0) {
-            in.aaChangedSinceLaunch = g_rows[i].value != g_rows[i].snapshot;
+            in.aaChangedSinceLaunch = savedAaSelection() != g_rows[i].snapshot;
             break;
         }
     }
     return conditionalRestartState(in, d.section, d.key);
 }
 
-// A saved, unchanged quality can still wait for restart when DLSS itself was
-// selected after launch. A quality rejected during startup needs a log diagnosis.
-bool rowWaiting(int def) {
-    const MenuRowDef& row = kMenuRows[def];
-    if (!isDlssQualityRow(row)) {
-        return g_rows[def].pending || rowConditionalState(def) == RestartState::PendingRestart;
-    }
-    if (dlssRowInactiveHint(row)) return false;
-    if (g_rows[def].pending) return true;
-    const DlssQuality requested = parseDlssQuality(g_rows[def].value);
-    if (requested == DlssQuality::Invalid || requested == nativeDlssQualityActive()) return false;
+bool readNativeRenderSizing(EdvrNativeRenderSizing* out);
+
+MenuDlssQualityState dlssQualityRowState(int def) {
+    if (!nativeMenuActive() || _stricmp(savedAaSelection().c_str(), "dlss") != 0) return MenuDlssQualityState::Idle;
+    bool launchDlss = false;
     for (int i = 0; i < kRowDefCount; ++i) {
         if (isAntiAliasingRow(kMenuRows[i])) {
-            return _stricmp(g_rows[i].snapshot.c_str(), "dlss") != 0;
+            launchDlss = _stricmp(g_rows[i].snapshot.c_str(), "dlss") == 0;
+            break;
         }
     }
-    return false;
+    EdvrNativeRenderSizing sizing{};
+    return menuDlssQualityState(parseDlssQuality(g_rows[def].value), nativeDlssQualityActive(), nativeDlssQualityStatus(),
+                                readNativeRenderSizing(&sizing), launchDlss, parseDlssQuality(g_rows[def].snapshot));
+}
+
+bool rowWaiting(int def) {
+    if (isDlssQualityRow(kMenuRows[def])) return menuDlssQualityWaiting(dlssQualityRowState(def));
+    return g_rows[def].pending || rowConditionalState(def) == RestartState::PendingRestart;
 }
 
 
@@ -1169,6 +1174,7 @@ constexpr const char* kNoRuntimeToken = "not written: the runtime's name yields 
 // rewrite of the list, changes nothing here and must badge nothing.
 bool rowPending(const MenuRowDef& d, const std::string& value, const std::string& snapshot) {
     if (isOpenxrRenderScaleRow(d)) return renderScaleRowPending(value);
+    if (isDlssQualityRow(d)) return false;  // rowWaiting reads current host sizing and NGX status.
     return value != snapshot;
 }
 
@@ -2104,7 +2110,8 @@ void takeSnapshot() {
     for (int i = 0; i < kRowDefCount; ++i) {
         const MenuRowDef& d = kMenuRows[i];
         // A row of the conditional-restart table needs its launch value too (menu_restart.h).
-        if (d.applies == 2 || conditionalRestartFor(d.section, d.key)) g_rows[i].snapshot = g_rows[i].value;
+        if (d.applies == 2 || conditionalRestartFor(d.section, d.key))
+            g_rows[i].snapshot = isAntiAliasingRow(d) ? Config::get().configuredTemporalMode() : g_rows[i].value;
         g_rows[i].pending = false;
     }
     g_s.snapshotTaken = true;
@@ -2906,19 +2913,17 @@ void buildContent(MenuContent& c) {
             }
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
-            const bool waiting = rowWaiting(e.def);
+            const bool dlssQualityRow = isDlssQualityRow(d);
+            const auto qualityState = dlssQualityRow ? dlssQualityRowState(e.def) : MenuDlssQualityState::Idle;
+            const char* qualityHint = dlssQualityRow ? menuDlssQualityHint(qualityState, nativeDlssQualityActive()) : nullptr;
+            const bool waiting = dlssQualityRow ? menuDlssQualityWaiting(qualityState) : rowWaiting(e.def);
             const bool stopped = !waiting && rowConditionalState(e.def) == RestartState::Stopped;
             const bool editingThis = (s.editEntry == i);
             const bool capturingThis = (s.captureEntry == i);
             const bool hotkeyRow = d.kind == MenuKind::Hotkey;
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssModelRow = isDlssModelRow(d);
-            const bool dlssQualityRow = isDlssQualityRow(d);
             const char* dlssInactive = dlssRowInactiveHint(d);
-            const bool dlssQualityDeclined = dlssQualityRow && !dlssInactive && !waiting &&
-                                             dlssQualityRatio(parseDlssQuality(r.value)) > 0.0 &&
-                                             nativeDlssQualityActive() == DlssQuality::Custom;
-            const char* const dlssQualityFallback = "DLSS quality could not apply. Using Elite's HMD Quality.";
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -2965,14 +2970,18 @@ void buildContent(MenuContent& c) {
                 if (dlssQualityRow) {
                     const std::string active = displayValue(d, dlssQualityName(nativeDlssQualityActive()));
                     if (active != v) v = active + " -> " + v;
-                } else if (!openxrScaleRow && r.value != r.snapshot) {
+                    if (qualityState == MenuDlssQualityState::Stale) v += " (not applied)";
+                } else if (!openxrScaleRow && r.value != r.snapshot &&
+                           !(isAntiAliasingRow(d) && Config::get().hasRuntimeOverride("fix.temporal_aa"))) {
                     v = displayValue(d, r.snapshot) + " -> " + v;
                 }
                 l.badge = kBadgePending;
             } else if (stopped) {
                 l.badge = kBadgeStopped;   // the value stays as set; the highlighted row's hint says why (xessFgRestartHint)
-            } else if (dlssQualityDeclined) {
+            } else if (qualityState == MenuDlssQualityState::Unavailable) {
                 v += " (not applied)";
+            } else if (qualityState == MenuDlssQualityState::Checking) {
+                v += " (waiting for runtime)";
             } else if (d.applies == 2) {
                 l.badge = kBadgeRestart;
             } else if (d.applies == 0) {
@@ -3016,10 +3025,10 @@ void buildContent(MenuContent& c) {
                                   : kMenuRow;
             if (hi && dlssInactive)
                 snprintf(c.hint, sizeof(c.hint), "%s", dlssInactive);
-            else if (hi && dlssQualityDeclined)
-                snprintf(c.hint, sizeof(c.hint), "%s", dlssQualityFallback);
+            else if (hi && qualityHint)
+                snprintf(c.hint, sizeof(c.hint), "%s", qualityHint);
             else if (hi && !runtimeFlatProfile() && waiting && isAntiAliasingRow(d))
-                snprintf(c.hint, sizeof(c.hint), "%s", "DLSS stays active at this quality until you restart the game.");
+                snprintf(c.hint, sizeof(c.hint), "%s", "Restart the game to apply the saved anti-aliasing choice to the native render size.");
             else if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && glassDirtRow)
@@ -3101,8 +3110,8 @@ void buildContent(MenuContent& c) {
                                               : "When it applies is not documented.");
                 }
                 if (openxrScaleRow) body += "\n" + openxrResolutionTooltip(res);
-                if (dlssQualityDeclined) {
-                    body += std::string("\n") + dlssQualityFallback + " See the EDVR log for details.";
+                if (qualityHint) {
+                    body += std::string("\n") + qualityHint + " See the EDVR log for details.";
                 }
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
@@ -5492,6 +5501,11 @@ void menuNoteConfigReloaded() {
                     snprintf(text, sizeof(text), "OpenXR res.: list changed (after restart)");
                 }
                 changed.push_back(text);
+            } else if (!byMenu && isDlssQualityRow(d)) {
+                const auto state = dlssQualityRowState(i);
+                changed.push_back(std::string(d.label) + ": " + displayValue(d, v) +
+                                  (menuDlssQualityWaiting(state) ? " (restart needed)" :
+                                   state == MenuDlssQualityState::Unavailable ? " (not applied)" : ""));
             } else if (!byMenu) {
                 changed.push_back(std::string(d.label) + ": " + displayValue(d, v) +
                                  (d.applies == 2 ? " (at next launch)" : ""));
@@ -5513,6 +5527,13 @@ void menuNoteConfigReloaded() {
                                 percentText(edvr::native_render::widthToScale(
                                     view.sizing.activeWidth[0], view.sizing.eyes[0].originalWidth)).c_str());
             }
+        } else if (isDlssQualityRow(d) && s.snapshotTaken) {
+            const bool waiting = menuDlssQualityWaiting(dlssQualityRowState(i));
+            if (waiting && !r.auditNoted) {
+                Log::get().note("%s: %s = %s on disk; native host sizing = %s. Restart the game to apply the saved quality.",
+                                Config::get().iniName(), dotted.c_str(), v.c_str(), dlssQualityName(nativeDlssQualityActive()));
+            }
+            r.auditNoted = waiting;
         } else if (d.applies == 2 && s.snapshotTaken) {
             r.pending = rowPending(d, v, r.snapshot);
             if (r.pending && !r.auditNoted) {
@@ -5824,6 +5845,11 @@ void menuTick(ID3D11Device* dev) {
         // visible. Comparing the whole POD also notices a stop/restart that
         // happened while the menu was hidden, without opening an XR session.
         if (pol.sizing == MenuSizing::HeadsetPpd && s.open) {
+            const auto qualityStatus = nativeDlssQualityStatus();
+            if (s.dlssQualityStatus != qualityStatus) {
+                s.dlssQualityStatus = qualityStatus;
+                s.contentDirty = true;
+            }
             EdvrNativeRenderSizing latest{};
             const bool available = readNativeRenderSizing(&latest);
             const bool changed = available != s.renderSizingAvailable ||

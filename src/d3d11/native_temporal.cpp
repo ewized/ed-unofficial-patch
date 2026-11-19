@@ -19,6 +19,7 @@
 #include "light_grid_cache_hook.h"     // the light grid cache's jitter probe: begin() tells it this frame's jitter, and whether eye 0 is zoomed
 #include "scope_zoom_b3.h"             // B3: the reset edge's rule (b3ResetEdge)
 #include "../common/config.h"
+#include "native_dlss_evidence.h"
 #include "../common/frame_flag.h"
 #include "../common/temporal_math.h"
 #include "../common/temporal_mode.h"
@@ -522,6 +523,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   uint32_t region[4]{}; bool fu=false,fv=false;
   if(!edvr::supersampleRegionFromBounds(d.Width,d.Height,box,region,&fu,&fv))return E_INVALIDARG;
   const uint32_t w=region[2]-region[0],h=region[3]-region[1];if(!w||!h)return E_INVALIDARG;
+  const auto namedQuality=edvr::Config::get().nativeDlssQuality();
+  const auto noteDlss=[&](const edvr::NativeDlssEvaluation& proof,bool attempted){
+    if(namedQuality!=edvr::DlssQuality::Custom&&edvr::nativeDlssEvidence.observe(eye,namedQuality,w,h,s->recW,s->recH,proof,attempted))
+      edvr::Log::get().note("DLSS quality: eye %u requested=%s NGX=%s input=%ux%u output=%ux%u recommended=%ux%u.",
+        eye,edvr::dlssQualityName(namedQuality),attempted?proof.feature:"skipped",w,h,proof.outputWidth,proof.outputHeight,s->recW,s->recH);
+  };
   if (s->flipped[eye] != (flipU||flipV)) { s->history[eye]={}; s->flipped[eye]=(flipU||flipV); }
   s->vrsInputSequence[eye]=0;
   s->width[eye]=w;s->height[eye]=h;s->pendingSettings=readConfig();
@@ -552,8 +559,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     // F202: and the eye's scene depth for the scope lens (the right eye's, while a press of the sights is open): the near plane is this frame's matrix query's when the game made one, else the last one's.
     edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]);
   }
-  if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
+  if(!s->currentSettings.on||s->standDown||flipU||flipV){noteDlss({},s->standDown);edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){
+    noteDlss({},false);
     if(s->missingProjections++<4)edvr::Log::get().note("native temporal: eye %u sequence %llu has no matrix query for this frame; history invalidated.",eye,(unsigned long long)seq);
     s->treated[eye]=true;s->history[eye]={};
     // A cached game projection is not evidence that the newly advertised
@@ -572,7 +580,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // exactly the size the pass would have handed on (the served floor's cut included) and the layer never re-sizes
   // between the two routes. Everything the pass would have updated for this eye -- its history, its continuity -- is
   // left alone; the next eye-route frame finds the continuity broken and resets.
-  if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){s->treated[eye]=true;return S_OK;}
+  if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){noteDlss({},false);s->treated[eye]=true;return S_OK;}
   if(s->verdictPending[eye]) {
     const uint32_t verdict=edvr::jumpVerdictPacked();
     if(verdict!=s->verdictSeen[eye] || ++s->verdictWaits[eye]>=4) {
@@ -631,7 +639,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvrTemporalAaNoteHead(int(eye),pd?s->history[eye].head:nullptr,pd?s->head:nullptr,pd?eyeOffset:nullptr);
   edvr::temporalPassNoteEyes(int(eye),pd?previousEyes:nullptr,pd?s->eyes:nullptr);
   edvr::nativeFgBeforeTemporalEye(seq,eye,source);
+  if(namedQuality!=edvr::DlssQuality::Custom)edvr::nativeDlssEvaluation={};
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
+  if(namedQuality!=edvr::DlssQuality::Custom)noteDlss(raw?edvr::nativeDlssEvaluation:edvr::NativeDlssEvaluation{},true);
   s->treated[eye]=true;
   if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;gazeReadyEpoch.store(0,std::memory_order_release);edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;

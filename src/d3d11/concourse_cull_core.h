@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include "engine_velocity_families.h"
+#include "scene_light_pixels.h"
 #include "journal_station.h"
 
 namespace edvr::concourse {
@@ -636,8 +637,6 @@ inline const char* camTestModeName(uint32_t m) noexcept {
 // on. Flight 32 left out the sun's quad and each light volume in turn and none was it; these are the rest of a census of the room from the sun on, what is drawn before the glass first. The
 // last step, kLightTestAllLights, leaves out all the lights together, to say whether the look is in them at all. Step 0 leaves nothing out.
 constexpr uint64_t kLightTestAllLights = ~0ull;
-constexpr uint64_t kLightTestLights[] = {0x7CECABDE34FFBE9Eull, 0xC6E6E419DA9F6FADull, 0x50364C9D994141D5ull, 0x3D8442D2FC1DCADDull, 0xAC3CE66FBAF0FA9Aull, 0x81812EF97FB4A361ull,
-                                         0x70E6FCA6CF692D2Aull, 0x2DB678B6B558B604ull, 0xB98B140FC83B4448ull, 0x1F64463B15189104ull, 0x37649F54AD53319Cull};
 constexpr uint64_t kLightTestShaders[] = {0x2519C9050946D545ull, 0x92FF8499ED345759ull, 0x095030F27D2C362Aull, 0xC5A5C7E8216CB9AFull, 0x8DEF46452FA459F5ull, 0x98337732C955AD01ull,
                                           0x098C0764D28FC42Cull, 0x84965D3C050FB01Bull, 0x06332CA168B6DA63ull, 0x87EF79B19297B8C4ull, 0xFCFAD73924BF45B9ull, 0x057F8E2778A5AAEDull,
                                           0x7AA0441EE0E88667ull, 0x1AE6AB9A94C0456Eull, 0x66B08F89E4926C01ull, 0xAFED1D4B087E18A9ull, 0xB2DE0A41A4C2B4F5ull, 0x067CBE05E7EF7F32ull,
@@ -648,9 +647,7 @@ inline uint32_t lightTestNext(uint32_t step) noexcept { return (step + 1) % kLig
 inline uint64_t lightTestShaderAt(uint32_t step) noexcept { return step == 0 || step >= kLightTestSteps ? 0ull : kLightTestShaders[step - 1]; }
 inline bool lightTestLeavesOut(uint64_t test, uint64_t ps) noexcept {
     if (test != kLightTestAllLights) return test != 0 && test == ps;
-    for (uint64_t light : kLightTestLights)
-        if (light == ps) return true;
-    return false;
+    return sceneLightingPixelShader(ps);
 }
 
 // The bake's plan (TEMPORARY): one tick a frame, each aiming at the next direction not yet captured, going round until every one has reached the resolve. A write takes about 4 frames to

@@ -7,6 +7,7 @@
 #include "../common/config.h"
 #include "../common/hotkey.h"
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 #include "../common/timing.h"
 #include "elite_binds.h"
 #include "menu.h"
@@ -94,30 +95,33 @@ void applied() {
     menuRequestConfigPoll();
 }
 
+std::string runningMode(Config& cfg) {
+    return runtimeFlatProfile() ? cfg.requestedTemporalMode() : cfg.getString(kKey, "off");
+}
+
 void onPress(Config& cfg) {
-    const std::string configured = cfg.configuredTemporalMode();
-    const aacmp::Press p = g_machine.press(configured);
+    std::string running = runningMode(cfg);
+    const aacmp::Press p = g_machine.press(running, cfg.configuredTemporalMode());
     switch (p) {
         case aacmp::Press::WentOff:
             cfg.setRuntimeOverride(kKey, "off");
             applied();
-            Log::get().note("aa compare: AA OFF for comparison (configured %s). Runtime only, no ini written; %s restores it. The "
+            Log::get().note("aa compare: AA OFF for comparison (was running %s). Runtime only, no ini written; %s restores it. The "
                             "configure sweep that follows is the same one choosing off in the F8 menu runs, so fix.ui_quality "
                             "follows it (live only with AA on).",
-                            configured.c_str(), g_keyText.c_str());
+                            running.c_str(), g_keyText.c_str());
             break;
         case aacmp::Press::Restored:
             cfg.clearRuntimeOverride(kKey);
+            running = runningMode(cfg);
             applied();
-            Log::get().note("aa compare: AA RESTORED to %s, what the settings say. Runtime only, no ini written.",
-                            configured.c_str());
+            Log::get().note("aa compare: AA RESTORED to %s. Runtime only, no ini written.", running.c_str());
             break;
         case aacmp::Press::NothingToCompare:
-            Log::get().note("aa compare: %s pressed with AA off in the settings (fix.temporal_aa = %s): nothing to compare, nothing "
-                            "changed.", g_keyText.c_str(), configured.empty() ? "(unset)" : configured.c_str());
+            Log::get().note("aa compare: %s pressed without a running AA mode: nothing to compare, nothing changed.", g_keyText.c_str());
             break;
     }
-    menuShowNotice(aacmp::noticeText(p, configured, g_keyText).c_str());
+    menuShowNotice(aacmp::noticeText(p, running, g_keyText).c_str());
 }
 
 }  // namespace
@@ -133,18 +137,18 @@ void aaCompareTick() {
             case aacmp::Seen::EndedByChange:
                 cfg.clearRuntimeOverride(kKey);
                 applied();
-                Log::get().note("aa compare: ended -- fix.temporal_aa changed under the comparison (now %s); your choice applies.",
-                                cfg.configuredTemporalMode().c_str());
+                Log::get().note("aa compare: ended -- fix.temporal_aa changed to %s during comparison; running %s.",
+                                cfg.configuredTemporalMode().c_str(), runningMode(cfg).c_str());
                 break;
             case aacmp::Seen::EndedBySameValue:
                 cfg.clearRuntimeOverride(kKey);
                 applied();
-                Log::get().note("aa compare: ended -- an F8 pick left AA at %s; the comparison is over and AA is that mode.",
-                                cfg.configuredTemporalMode().c_str());
+                Log::get().note("aa compare: ended -- an F8 pick left the saved AA mode at %s; running %s.",
+                                cfg.configuredTemporalMode().c_str(), runningMode(cfg).c_str());
                 break;
             case aacmp::Seen::EndedByProfile:
                 Log::get().note("aa compare: ended -- the profile switched, which drops the runtime override; AA is %s from the "
-                                "new profile's settings.", cfg.configuredTemporalMode().c_str());
+                                "new profile.", runningMode(cfg).c_str());
                 break;
         }
     }

@@ -2,6 +2,10 @@
 #include "ui_layer_math.h"
 #include "srv_turret_math.h"
 #include "motion_vs.h"
+#include "engine_velocity_families.h"
+#include "flat_deferred_camera.h"
+#include "flat_inert_pairs.h"
+#include "scene_light_pixels.h"
 
 namespace edvr::native_vrs {
 
@@ -36,11 +40,18 @@ struct SceneMaterialDraw {
     bool shadersTracked = false;
     bool interfaceDraw = false;
     bool originalIssue = false;
+    bool materialShader = false;
+    bool motionWitness = false;
+    uint32_t colorFormat = 0;
 };
 
-inline bool sceneMaterialCandidate(const SceneMaterialDraw& draw) noexcept {
+inline bool sceneMaterialCandidate(const SceneMaterialDraw& draw, uint64_t vs, uint64_t ps) noexcept {
     return draw.originalIssue && draw.eye >= 0 && draw.eye < 2 && draw.targetKind == 1 &&
-           draw.shadersTracked && !draw.interfaceDraw;
+           (draw.colorFormat == 24 || draw.colorFormat == 26) && // Odyssey's 10:10:10:2 G-buffer or 11:11:10 HDR view
+           draw.shadersTracked && draw.materialShader && !draw.interfaceDraw && !draw.motionWitness &&
+           !engine_velocity_family::selfMarkingPs(ps) && !flatProjectionB1Unread(vs, ps) &&
+           vs != kFlatDeferredHdrVs && !sceneLightingPixelShader(ps) &&
+           !(vs == 0x889A5279E68F0672ull && ps == 0xEBA95E15B0A66102ull); // world_screen_coverage.h: emissive terminal UI
 }
 
 } // namespace edvr::native_vrs

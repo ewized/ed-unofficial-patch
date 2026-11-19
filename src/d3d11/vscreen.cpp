@@ -8,6 +8,7 @@
 #include "native_vrs.h"
 #include "vrs_coverage.h"     // default-off, sampled original-world NVAPI evidence
 #include "native_vrs_draw_policy.h"
+#include "native_vrs_material_receipt.h"
 #include "gpu_pass_profile.h" // TEMPORARY GPU pass profiler (hotkey.gpu_pass_profile): one bool read per hook unarmed
 #include "blend_probe.h"      // TEMPORARY blend probe (hotkey.blend_probe): one relaxed load per eye draw unarmed
 #include "concourse_pane.h"   // TEMPORARY concourse panes (diag.concourse_pane_mode): one relaxed load per real draw while nothing is armed
@@ -1050,6 +1051,8 @@ struct NativeWorldDecision {
     ID3D11DeviceContext* context=nullptr;unsigned eye=2;
     ID3D11RenderTargetView* rtv=nullptr;ID3D11DepthStencilView* dsv=nullptr;
     bool expandedMaterial=false;
+    ID3D11VertexShader* vs=nullptr;
+    ID3D11PixelShader* ps=nullptr;
 };
 thread_local const NativeWorldDecision* g_nativeWorldDecision=nullptr;
 template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,Draw draw) {
@@ -1058,7 +1061,7 @@ template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,D
     return draw();
 }
 void nativeBeforeOriginal(ID3D11DeviceContext* context) {
-    if(!nativeVrsLive())return;
+    if(!nativeVrsLive() || context!=g_state->ownerCtx)return;
     const auto* d=g_nativeWorldDecision;
     if(d&&d->context==context&&d->eye<2&&nativeVrsCoarseRequested()){
         struct ProjectionCache {NativeVrsProjection value{};bool valid=false;};
@@ -1076,7 +1079,14 @@ void nativeBeforeOriginal(ID3D11DeviceContext* context) {
                 p.value.sequence==sequence&&nativeTemporalFrameSequence()==sequence;
         }
         if(p.valid&&nativeTemporalFrameSequence()==sequence){
-            nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);return;
+            ID3D11VertexShader* actualVs=nullptr;
+            ID3D11PixelShader* actualPs=nullptr;
+            context->VSGetShader(&actualVs,nullptr,nullptr);
+            context->PSGetShader(&actualPs,nullptr,nullptr);
+            const bool original=actualVs==d->vs && actualPs==d->ps;
+            if(actualVs)actualVs->Release();
+            if(actualPs)actualPs->Release();
+            if(original){nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);return;}
         }
     }
     nativeVrsFullRate(context);
@@ -4427,27 +4437,26 @@ NativeWorldDecision nativeSceneMaterialDecision(ID3D11DeviceContext* context, bo
     candidate.targetKind = uiLayerTargetKindAt(bindingGeneration(BindSlot::Rtv0));
     const auto vs = bindingShaderHash(BindSlot::Vs);
     const auto ps = bindingShaderHash(BindSlot::Ps);
-    candidate.shadersTracked = vs && ps && bindingGet(BindSlot::Ps);
+    auto* vertex = static_cast<ID3D11VertexShader*>(bindingGet(BindSlot::Vs));
+    auto* pixel = static_cast<ID3D11PixelShader*>(bindingGet(BindSlot::Ps));
+    candidate.shadersTracked = vs && vertex && ps && pixel;
     candidate.originalIssue = originalIssue;
-    if (!native_vrs::sceneMaterialCandidate(candidate))
+    candidate.motionWitness = engineVelocityDrawSubstituted();
+    if (candidate.targetKind != 1 || !candidate.shadersTracked || candidate.motionWitness)
         return result;
+    D3D11_RENDER_TARGET_VIEW_DESC colorDesc{};
+    rtv->GetDesc(&colorDesc);
+    candidate.colorFormat = colorDesc.Format;
+    candidate.materialShader = native_vrs::hasMaterialPsReceipt(pixel, ps);
+    if (!candidate.materialShader) return result;
     candidate.interfaceDraw = native_vrs::protectsInterfaceShader(vs, ps, mapui::systemOpen(),
         kind, count, instances, uiDepthSampledSurfaceSlot() >= 0);
-    if (!native_vrs::sceneMaterialCandidate(candidate))
+    if (!native_vrs::sceneMaterialCandidate(candidate, vs, ps))
         return result;
-    return {context, unsigned(candidate.eye), rtv, dsv, !vrs_coverage::knownWorldFamily(vs, ps)};
+    return {context, unsigned(candidate.eye), rtv, dsv, !vrs_coverage::knownWorldFamily(vs, ps), vertex, pixel};
 }
 
-template<class Draw>
-void nativeUncountedMaterialIssue(ID3D11DeviceContext* context, char kind, Draw draw) {
-    if (!nativeVrsLive()) { draw(); return; }
-    const auto decision = nativeSceneMaterialDecision(context, true, false, kind, 0, 0);
-    nativeWorldIssue(decision, [&]{
-        nativeBeforeOriginal(context);
-        draw();
-        return true;
-    });
-}
+#include "native_vrs_uncounted_issue.h"
 
 // The Galaxy Map's probe issues its one point through this: the arrow's draw as a single index, with the same start index, base vertex and start instance, below every hook.
 struct MapPointDraw {
@@ -4717,7 +4726,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v, const DrawCall
         if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place
         VrsCoverageDraw vrsDraw{};
         uint64_t vrsVs=0,vrsPs=0;bool vrsEye=false,vrsNotUi=false,vrsClass=false;int vrsEyeId=-1;
-        const bool native=nativeVrsLive();
+        const bool native=owner && nativeVrsLive();
         const auto nativeDecision = native ? nativeSceneMaterialDecision(self,
             altered.cls != AlteredDrawClass::UiLayer && (v == DrawVerdict::kNone ||
             v == DrawVerdict::kNightVision || v == DrawVerdict::kParticle ||

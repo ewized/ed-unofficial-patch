@@ -85,6 +85,8 @@ struct State {
     native_vrs::VendorStateCache cache;
     ComPtr<ID3D11DepthStencilState> depthState;
     ComPtr<ID3D11RasterizerState> rasterState;
+    ComPtr<ID3D11BlendState> materialBlend;
+    bool materialBlendCompatible=true;
     bool depthTestsScene=true,rasterCompatible=true;
     EyeMap eyes[2];
 };
@@ -264,6 +266,18 @@ bool materialRasterCompatible(State& s) {
         s.depthState=std::move(depthState);
     }
     if(!s.depthTestsScene)return false;
+    ComPtr<ID3D11BlendState> blend;
+    s.context->OMGetBlendState(&blend,nullptr,nullptr);
+    if(blend.Get()!=s.materialBlend.Get()){
+        s.materialBlendCompatible=true;
+        if(blend){
+            D3D11_BLEND_DESC desc{};
+            blend->GetDesc(&desc);
+            s.materialBlendCompatible=!desc.AlphaToCoverageEnable && (desc.RenderTarget[0].RenderTargetWriteMask & 7)!=0;
+        }
+        s.materialBlend=std::move(blend);
+    }
+    if(!s.materialBlendCompatible)return false;
     ComPtr<ID3D11RasterizerState> rasterizer;
     s.context->RSGetState(&rasterizer);
     if(rasterizer.Get()!=s.rasterState.Get()){

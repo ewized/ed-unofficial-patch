@@ -157,7 +157,7 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     // Three disjoint patches preserve the original middle-ring observation
     // and independently check the full-rate centre and 4x4 outer region.
     td.Width=3*block;td.Height=block;td.Format=DXGI_FORMAT_R32_FLOAT;td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    std::array<Result,6> results;
+    std::array<Result,7> results;
     for(auto& result:results){hr(device->CreateTexture2D(&td,nullptr,&result.staging),"CreateReadback");
         D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS,0};hr(device->CreateQuery(&qd,&result.query),"CreateStatsQuery");
         qd.Query=D3D11_QUERY_EVENT;hr(device->CreateQuery(&qd,&result.done),"CreateEventQuery");}
@@ -195,11 +195,13 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const bool movedAccepted=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
     submit(results[3]);const auto movedStatus=edvr::nativeVrsStatus();
     edvr::nativeVrsFullRate(context.Get());submit(results[4]);
-    edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),3);submit(results[5]);
+    const bool rearmed=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
+    submit(results[5]);const auto preOff=edvr::nativeVrsStatus();
+    edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),3);submit(results[6]);
     const auto finalStatus=edvr::nativeVrsStatus();context->Flush();
     printStatus("after_off_tick");
     std::printf("{\"coarse_accepted\":%s,\"coarse_acknowledged\":%s,\"coarse_mapUpdates\":[%llu,%llu]}\n",accepted?"true":"false",coarseStatus.coarseAcknowledged?"true":"false",static_cast<unsigned long long>(coarseStatus.mapUpdates[0]),static_cast<unsigned long long>(coarseStatus.mapUpdates[1]));
-    const char* names[]={"full_baseline","eye0_center_patch_coarse","eye1_patch_fine","eye0_moved_patch_fine","full_after","off_after"};
+    const char* names[]={"full_baseline","eye0_center_patch_coarse","eye1_patch_fine","eye0_moved_patch_fine","full_after","coarse_before_off","off_after"};
     for(size_t i=0;i<results.size();++i){auto& result=results[i];waitQuery(context.Get(),result.query.Get(),result.stats);
         BOOL completed=FALSE;waitQuery(context.Get(),result.done.Get(),completed);require(completed!=FALSE,"event completed");
         D3D11_MAPPED_SUBRESOURCE mapped{};const ULONGLONG mapDeadline=GetTickCount64()+waitMs;
@@ -225,7 +227,8 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const bool ringFootprints=full.centerFullRate&&!full.outerFourByFour&&coarse.centerFullRate&&
         coarse.repeatX==128&&coarse.repeatY==128&&coarse.outerFourByFour;
     bool restored=finalStatus.fullRateAcknowledged&&!finalStatus.coarseAcknowledged&&!finalStatus.configured;
-    for(size_t i=4;i<results.size();++i)restored&=results[i].stats.PSInvocations==full.stats.PSInvocations&&results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2;
+    restored&=rearmed&&preOff.coarseAcknowledged&&results[5].outerFourByFour&&results[5].stats.PSInvocations<full.stats.PSInvocations;
+    for(unsigned i:{4u,6u})restored&=results[i].stats.PSInvocations==full.stats.PSInvocations&&results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2&&!results[i].outerFourByFour;
     bool distinctEyesAndMovement=eye1Accepted&&movedAccepted&&movedStatus.mapUpdates[0]==2&&movedStatus.mapUpdates[1]==1&&movedStatus.providerPolls==2;
     for(size_t i=2;i<4;++i)distinctEyesAndMovement&=results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2;
     const bool reduced=full.stats.PSInvocations>0&&coarse.stats.PSInvocations>0&&coarse.stats.PSInvocations<full.stats.PSInvocations;

@@ -320,6 +320,13 @@ inline int flatEliteSettingsTests() {
         std::string preset;
         expect(flatXmlText(elite_settings_test::settingsXml("Custom"), "PresetName", &preset) && preset == "Custom",
                "Settings.xml's PresetName");
+        expect(flatXmlSetting("<Root><!--<PresetName>High</PresetName>--><PresetName>Custom</PresetName></Root>", L"PresetName", &preset) && preset == "Custom" &&
+               !flatXmlSetting("<Root><PresetName>Custom</Root>", L"PresetName", &preset), "only a complete active preset identifies the file");
+        const std::string hmd = "<HMDRenderTargetMultiplier>1.0</HMDRenderTargetMultiplier>";
+        expect(flatXmlHmdMultiplier("<Root><!--<HMDRenderTargetMultiplier>0.5</HMDRenderTargetMultiplier>-->" + hmd + "</Root>") == 1.f &&
+               flatXmlHmdMultiplier("<Root><HMDRenderTargetMultiplier>0.5</Root>") == 0.f &&
+               flatXmlHmdMultiplier("<Root>" + hmd + hmd + "</Root>") == 0.f && flatXmlHmdMultiplier("<Root>" + hmd) == 0.f,
+               "named DLSS accepts one active multiplier and rejects duplicate or truncated settings");
         // <AAModeX> must not answer for <AAMode>.
         expect(!flatXmlInt("<AAModeX>4</AAModeX>", "AAMode", &v), "a longer tag name is another tag");
     }

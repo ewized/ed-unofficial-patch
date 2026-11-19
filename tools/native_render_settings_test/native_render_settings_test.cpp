@@ -247,6 +247,21 @@ int wmain(int argc,wchar_t** argv) {
               reply.quality==static_cast<uint32_t>(DlssQuality::Custom) && reply.eliteMultiplier==0.f,
               "non-DLSS startup ignores a saved named quality");
         config.set("fix.temporal_aa","dlss");
+        check(edvrQueryNativeDlssQuality(EDVR_NATIVE_DLSS_QUALITY_VERSION_1,sizeof(reply),&reply)==TRUE &&
+              reply.quality==static_cast<uint32_t>(DlssQuality::Custom) && reply.eliteMultiplier==0.f,
+              "a build without NGX declines named sizing before Elite receives a reduced recommendation");
+        auto unsupported=snapshot(1,1.f);
+        EdvrNativeRenderSizingV2 refused{};refused.sizing=unsupported;
+        refused.sizing.version=EDVR_NATIVE_RENDER_SIZING_VERSION_2;refused.sizing.size=sizeof(refused);
+        refused.dlssQuality=static_cast<uint32_t>(DlssQuality::Performance);
+        check(edvrPublishNativeRenderSizing(refused.sizing.version,sizeof(refused),&refused)==FALSE,
+              "known NGX refusal rejects a named publication before the ordinary sizing fallback");
+        check(edvrPublishNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(unsupported),&unsupported)==TRUE &&
+              edvr::nativeDlssQualityActive()==DlssQuality::Custom && edvr::nativeDlssQualityStatus()==edvr::NativeDlssQualityStatus::Unavailable,
+              "ordinary sizing retains the named backend refusal for the menu");
+        unsupported.valid=0;
+        check(edvrPublishNativeRenderSizing(EDVR_NATIVE_RENDER_SIZING_VERSION_1,sizeof(unsupported),&unsupported)==TRUE &&
+              edvr::nativeDlssQualityStatus()==edvr::NativeDlssQualityStatus::Custom,"withdrawal clears the evidence for the next session");
         config.set("fix.dlss_quality","bad-quality");
         check(edvrQueryNativeDlssQuality(EDVR_NATIVE_DLSS_QUALITY_VERSION_1,sizeof(reply),&reply)==TRUE &&
               reply.quality==static_cast<uint32_t>(DlssQuality::Invalid),

@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include "native_dlss_quality.h"
 
 namespace edvr {
 
@@ -34,6 +35,43 @@ inline constexpr ConditionalRestartEntry kConditionalRestarts[] = {
 };
 
 enum class RestartState { NotPending, PendingRestart, Stopped };
+
+enum class MenuDlssQualityState { Idle, Waiting, Checking, Unavailable, Stale };
+
+// A failed launch can publish Custom despite a saved named request. Only compare changes against the size the host actually published.
+inline MenuDlssQualityState menuDlssQualityState(DlssQuality selected, DlssQuality published, NativeDlssQualityStatus status,
+                                                 bool sizingPublished, bool launchDlss, DlssQuality launchChoice) {
+  using State = MenuDlssQualityState;
+  if (selected == DlssQuality::Invalid) return State::Idle;
+  if (selected == published && selected == DlssQuality::Custom) return State::Idle;
+  if (!sizingPublished) return status == NativeDlssQualityStatus::Unavailable ? State::Unavailable : State::Checking;
+  if (selected != published) {
+    if (published == DlssQuality::Custom &&
+        (status == NativeDlssQualityStatus::Unavailable || (selected == launchChoice && launchDlss))) return State::Unavailable;
+    return State::Waiting;
+  }
+  switch (status) {
+    case NativeDlssQualityStatus::Applied: return State::Idle;
+    case NativeDlssQualityStatus::Stale: return State::Stale;
+    case NativeDlssQualityStatus::Unavailable: return State::Unavailable;
+    default: return State::Checking;
+  }
+}
+
+inline bool menuDlssQualityWaiting(MenuDlssQualityState state) {
+  return state == MenuDlssQualityState::Waiting || state == MenuDlssQualityState::Stale;
+}
+
+inline const char* menuDlssQualityHint(MenuDlssQualityState state, DlssQuality published) {
+  switch (state) {
+    case MenuDlssQualityState::Unavailable:
+      return published == DlssQuality::Custom ? "DLSS quality did not apply. Using Elite's HMD Quality."
+                                               : "DLSS quality did not apply. The game still uses the named input size.";
+    case MenuDlssQualityState::Stale: return "The input or output size changed. Restart the game to apply this DLSS quality.";
+    case MenuDlssQualityState::Checking: return "Waiting for the runtime to confirm DLSS quality in both eyes.";
+    default: return nullptr;
+  }
+}
 
 struct RestartInput {
   bool flatProfile = false;

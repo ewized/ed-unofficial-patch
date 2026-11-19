@@ -403,6 +403,32 @@ const char* const kToggle = "xess_frame_generation";
 const char* const kFrames = "xess_generated_frames";
 const char* const kAa = "temporal_aa";
 
+void dlssQualityCases() {
+    using Q = DlssQuality;
+    using R = NativeDlssQualityStatus;
+    using S = MenuDlssQualityState;
+    auto afterFailedBalanced = [](Q selected) { return menuDlssQualityState(selected, Q::Custom, R::Custom, true, true, Q::Balanced); };
+    check(afterFailedBalanced(Q::Balanced) == S::Unavailable, "a rejected launch request does not count as running");
+    check(afterFailedBalanced(Q::Custom) == S::Idle, "returning to the published Custom sizing needs no restart");
+    check(afterFailedBalanced(Q::Performance) == S::Waiting, "a different named request compares against published Custom");
+    check(menuDlssQualityState(Q::Balanced, Q::Custom, R::Custom, true, false, Q::Balanced) == S::Waiting,
+          "choosing DLSS after launch queues its unchanged named quality");
+    check(menuDlssQualityState(Q::Balanced, Q::Custom, R::Custom, false, true, Q::Balanced) == S::Checking,
+          "a host that has not published sizing has not yet declined the request");
+    check(menuDlssQualityState(Q::Balanced, Q::Balanced, R::Pending, true, true, Q::Balanced) == S::Checking,
+          "published sizing alone cannot prove DLSS evaluated");
+    check(menuDlssQualityState(Q::Balanced, Q::Balanced, R::Applied, true, true, Q::Balanced) == S::Idle,
+          "confirmed evaluation with matching sizing clears pending status");
+    check(menuDlssQualityState(Q::Balanced, Q::Balanced, R::Stale, true, true, Q::Balanced) == S::Stale && menuDlssQualityWaiting(S::Stale),
+          "a live HMD size change needs restart even when the setting never changed");
+    check(menuDlssQualityState(Q::Balanced, Q::Balanced, R::Unavailable, true, true, Q::Balanced) == S::Unavailable &&
+          !menuDlssQualityWaiting(S::Unavailable), "NGX falling back after publication cannot claim applied or promise a restart fixes it");
+    check(menuDlssQualityState(Q::Performance, Q::Custom, R::Unavailable, true, true, Q::Balanced) == S::Unavailable,
+          "a known unavailable engine cannot promise a different named quality at restart");
+    check(menuDlssQualityState(Q::Custom, Q::Balanced, R::Unavailable, true, true, Q::Balanced) == S::Waiting,
+          "after a fallback, returning a published named input size to Custom still needs restart");
+}
+
 void restartCases() {
     using S = RestartState;
     auto st = [](const RestartInput& in, const char* key) { return conditionalRestartState(in, "fix", key); };
@@ -581,6 +607,7 @@ int main(int argc, char** argv) {
     noticeCases();
     pageCases();
     restartCases();
+    dlssQualityCases();
     statusCases();
     flatLayoutCases();
     std::printf("menu_policy_test: %u checks, %u failures\n", checks, failures);

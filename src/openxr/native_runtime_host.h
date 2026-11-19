@@ -1808,7 +1808,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         // below), so 0 means no read the game made could have seen anything
         // but what this frame tells it.
         const uint64_t asks=sizeAsks.load(std::memory_order_relaxed);
-        fovTrim.beginFrame(settings,frusta,dimensions,poses.read().originGeneration,asks!=0);
+        fovTrim.beginFrame(settings,frusta,dimensions,poses.read().originGeneration,asks!=0,activeDlssQuality,eliteHmdMultiplier);
         if(fovTrim.changed()) {
           invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;
           // Eye 0's, as they stand at this stage: the frustum the treated

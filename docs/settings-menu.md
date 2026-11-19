@@ -3,7 +3,7 @@
 ## Status
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Headset validation pending.
-- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. The blue highlight distinguishes 2x2 and 4x4 zones. GPU and game validation pending; see the rendering notes below.
+- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. The blue highlight distinguishes 2x2 and 4x4 zones. GPU testing at `97cdd5e5` confirmed 1x1, 2x2 and 4x4 shading under simulated gaze and measured fewer pixel shader invocations. In-game FPS, physical eye tracking and perceived image quality were not measured.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -944,12 +944,15 @@ region** beside **Frame generation**. The external Magic file controls and the
 separate VRS/Beyond page are removed. The native VRS configuration names remain
 `experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
 
-Material coverage no longer depends on two shader hash pairs. Original
-depth-tested scene materials, including cockpit and forward transparent
-materials, can use the current eye's map. The gate still requires a settled
-eye depth target, full matching viewport and valid gaze/frame ownership.
-HUD/menu draws, redirected or private reissues, screen-only passes, and
-unproven state remain full rate.
+Material coverage no longer depends on two shader hash pairs. Qualified
+original scene shaders can use the current eye's map after their creation
+bytes and actual bindings are checked. Captured opaque canopy, station and
+terrain shaders qualify without motion outputs. The gate also requires a
+settled eye depth target, matching viewport and valid gaze/frame ownership.
+HUD/menu draws, private reissues, screen resolves, lighting passes, cutouts,
+unproven state and active MRT6/7 motion witnesses remain full rate. Complete
+cockpit coverage still needs a separate pass that preserves exact motion
+and depth data while the material shader runs at a coarse rate.
 
 The map uses 1x1 in the sharp centre, 2x2 in the middle ring and 4x4 outside.
 The [NVIDIA D3D11 shading-rate API](https://docs.nvidia.com/nvapi/nvapi_8h_source.html)
@@ -1026,11 +1029,19 @@ they were there (flown 2026-09-07).
    Named modes require a readable active Custom graphics preset so the
    renderer can compensate for Elite's saved HMD Quality. An unverifiable
    preset leaves the existing render size in use and shows **not applied**.
+   F8 waits for native sizing and DLSS evaluation in both eyes before treating
+   a named quality as applied. An unavailable DLSS feature is marked **not applied**;
+   a size change after launch prompts a restart. Returning to **Custom** needs no
+   restart if the host already uses Custom sizing. F7 temporarily shows **Off**
+   and disables the DLSS controls; restoring resumes the running engine even
+   when another anti-aliasing choice is saved for the next launch.
    Automatic texture mip bias follows the named ratio for samplers created
    after native sizing is published; earlier immutable samplers retain
    their creation bias. The startup log reports that boundary.
    **DLSS model** stays on the page and dims whenever DLSS or DLAA is not
-   selected. Its K/L/M choice changes NVIDIA's reconstruction model live.
+   selected. The K/L/M setting can change live. The actual NGX mode determines
+   the model: DLAA, Quality and Ultra Quality use K even when L or M is saved.
+   Balanced and Performance accept the selected model.
    At the BOTTOM of the page, a **Developer mode** switch (`menu.developer`,
    its `ui:` line tagged `menu performance`), so the extra pages can be
    turned on from inside the headset; flipping it rebuilds the pages, and

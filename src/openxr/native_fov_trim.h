@@ -1,5 +1,6 @@
 #pragma once
 #include "game_render_size.h"
+#include "../common/dlss_quality.h"
 
 #include <cmath>
 #include <cstdint>
@@ -114,7 +115,8 @@ class NativeFovTrim final {
   NativeTrimStage beginFrame(const NativeTrimSettings& settings,
       const NativeTrimFrustum (&trueFrusta)[2],
       const NativeTrimDimensions (&runtimeDims)[2],
-      uint64_t referenceGeneration, bool sizeAsked = true) noexcept {
+      uint64_t referenceGeneration, bool sizeAsked = true,
+      DlssQuality quality = DlssQuality::Custom, float eliteMultiplier = 1.f) noexcept {
     changed_ = false; nudge_ = NativeTrimNudge::None;
     const bool standDown=pendingStandDown_;pendingStandDown_=false;
     // Every exit records what the game is told from here on, so the next
@@ -211,7 +213,7 @@ class NativeFovTrim final {
       if (route_ == NativeTrimRoute::FirstAsk) floor_ = 0;
       else if (!baselineReady_) for (unsigned e=0;e<2;++e)
         pendingAsk_[e] = told_[e].width && told_[e].height ? told_[e] : gameFacingDimensions(runtime_[e]);
-      startNudge();
+      startNudge(quality,eliteMultiplier);
       if (route_ == NativeTrimRoute::FirstAsk) for (unsigned e=0;e<2;++e) pendingAsk_[e] = recommended(e);
     }
     return finish();
@@ -377,25 +379,31 @@ class NativeFovTrim final {
   // width alone, or a taller ask, waited for a Graphics-settings apply, 52 s
   // and counting. So a change that leaves the height where it was, or does
   // not lower it under the floor (the lowest height told since the rebuild
-  // last seen, re-based at each promotion), is told a height two pixels
-  // under that floor, for good: the game rebuilds at once, both axes at the
+  // last seen, re-based at each promotion), is told a height below that
+  // floor, for good: the game rebuilds at once, both axes at the
   // current ask, and what it builds is what the temporal pass is sized by.
-  // Each such change costs two more rows until a genuine shrink or an apply
+  // Each such change costs an even number of output rows (two on Custom) until a shrink or apply
   // re-bases the floor; past kNativeTrimNudgeMaxPx the ask is told as it is
   // and the trace says so. An ask taller than the one the floor was told
   // for is never nudged: the rows asked for are the point of it, a dip would
   // quietly drop them, and the game builds them at the next apply. Only the
   // left eye's height is measured; both eyes are told the dip.
-  void startNudge() noexcept {
+  void startNudge(DlssQuality quality,float eliteMultiplier) noexcept {
     nudgeHeight_=0; nudgeFloor_=floor_;
     const auto want=trueRecommended(0); const auto before=trueTold_[0];
     if(!floor_||!want.height||!before.height){nudge_=NativeTrimNudge::First;return;}
     if(want.width==before.width&&want.height==before.height){nudge_=NativeTrimNudge::Same;return;}
-    if(want.height<floor_){nudge_=NativeTrimNudge::Shrink;return;}
+    const auto gameHeight=[&](uint32_t height){return quality==DlssQuality::Custom?height:dlssGameDimension(height,quality,eliteMultiplier);};
+    const auto gameFloor=gameHeight(floor_);
+    if(gameHeight(want.height)<gameFloor){nudge_=NativeTrimNudge::Shrink;return;}
     if(want.height>floorAsk_){nudge_=NativeTrimNudge::Taller;return;}
-    const uint32_t dip=floor_>kNativeTrimNudgePx?floor_-kNativeTrimNudgePx:0;
-    if(dip<16||want.height-dip>kNativeTrimNudgeMaxPx){nudge_=NativeTrimNudge::Capped;return;}
-    nudgeHeight_=dip;nudge_=NativeTrimNudge::Started;
+    // Two output rows can round to the same even game ask. Keep the
+    // smallest bounded dip that really lowers the OpenVR recommendation.
+    for(uint32_t dip=(std::min)(want.height,floor_);dip>=16 && want.height-dip<=kNativeTrimNudgeMaxPx;dip-=kNativeTrimNudgePx){
+      const auto asked=gameHeight(dip);
+      if(asked&&asked<gameFloor){nudgeHeight_=dip;nudge_=NativeTrimNudge::Started;return;}
+    }
+    nudge_=NativeTrimNudge::Capped;
   }
   void clearApplied() noexcept { for(unsigned e=0;e<2;++e) appliedOuter_[e]=appliedNasal_[e]=appliedVertical_[e]=0; }
   void resetAdoption(bool keepBaseline=false) noexcept {

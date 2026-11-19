@@ -1,5 +1,10 @@
 #include "../common/native_render_settings.h"
 #include "native_dlss_quality.h"
+#include "native_dlss_evidence.h"
+#ifdef EDVR_HAVE_NGX
+#include "dlaa.h"
+#include "../common/frame_flag.h"
+#endif
 #include "flat_elite_settings.h"
 #include "native_render_labels.h"
 
@@ -19,6 +24,8 @@
 namespace {
 std::mutex g_sizingMutex;
 EdvrNativeRenderSizing g_sizing{};
+float g_queriedDlssMultiplier = 0.f;
+bool g_declinedDlssQuality = false;
 // The last v2 query's names, under the sizing's mutex and cleared with it:
 // the settings input carries no generation of its own (the query runs before
 // the sizing publish mints one), so the labels borrow the sizing's.
@@ -100,6 +107,10 @@ std::string number(uint32_t value) {
 
 edvr::DlssQuality edvr::nativeDlssQualityActive() noexcept {
     return Config::get().nativeDlssQuality();
+}
+
+edvr::NativeDlssQualityStatus edvr::nativeDlssQualityStatus() noexcept {
+    return nativeDlssEvidence.status();
 }
 
 bool nativeRenderLabels(NativeRenderLabels* out) {
@@ -281,6 +292,8 @@ extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
         std::lock_guard<std::mutex> lock(g_sizingMutex);
         if(!g_sizing.valid || candidate.generation==g_sizing.generation) {
             g_sizing={}; g_labels={};
+            g_queriedDlssMultiplier=0.f; g_declinedDlssQuality=false;
+            edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Custom,0.f);
             edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Custom);
         }
         return TRUE;
@@ -307,9 +320,11 @@ extern "C" BOOL WINAPI edvrPublishNativeRenderSizing(uint32_t version,
     {
         std::lock_guard<std::mutex> lock(g_sizingMutex);
         if(g_sizing.valid && candidate.generation<g_sizing.generation) return FALSE;
+        if(g_declinedDlssQuality && quality!=edvr::DlssQuality::Custom) return FALSE;
         candidate.size=sizeof(candidate);
         candidate.version=EDVR_NATIVE_RENDER_SIZING_VERSION_1;
         g_sizing=candidate;
+        edvr::nativeDlssEvidence.publish(quality,g_queriedDlssMultiplier,g_declinedDlssQuality);
         edvr::Config::get().setNativeDlssQuality(quality);
     }
     // Remembered for a LATER launch's fix.vscreen_res_width = auto, which has
@@ -340,10 +355,24 @@ extern "C" BOOL WINAPI edvrQueryNativeDlssQuality(uint32_t version, uint32_t siz
             setting = iniValue(text, "fix.dlss_quality", "custom");
         }
     }
-    if (_stricmp(mode.c_str(), "dlss") != 0) return writeDlssQuality(output, answer);
-    const DlssQuality quality = parseDlssQuality(setting);
+    const DlssQuality quality = _stricmp(mode.c_str(), "dlss") == 0 ? parseDlssQuality(setting) : DlssQuality::Custom;
     answer.quality = static_cast<uint32_t>(quality);
+    bool declined = false;
     if (dlssQualityRatio(quality)) {
+        const char* reason = "this build has no DLSS SDK";
+#ifdef EDVR_HAVE_NGX
+        auto* device = static_cast<ID3D11Device*>(gameDevice());
+        reason = "the game's graphics device is unavailable";
+        declined = !device || !dlaaAvailable(device, &reason);
+#else
+        declined = true;
+#endif
+        if (declined) {
+            answer.quality = static_cast<uint32_t>(DlssQuality::Custom);
+            Log::get().note("DLSS quality: keeping Elite's original recommendation: %s.", reason);
+        }
+    }
+    if (!declined && dlssQualityRatio(quality)) {
         const auto folder = flatEliteGraphicsFolder();
         const auto elite = flatReadEliteGraphics(folder, flatListEliteGraphics(folder));
         answer.eliteMultiplier = elite.hmdMultiplier;
@@ -353,6 +382,11 @@ extern "C" BOOL WINAPI edvrQueryNativeDlssQuality(uint32_t version, uint32_t siz
                             elite.presetKnown ? elite.preset : "unknown",
                             elite.fileRead ? elite.file : "unknown");
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_sizingMutex);
+        g_declinedDlssQuality = declined;
+        g_queriedDlssMultiplier = answer.eliteMultiplier;
     }
     return writeDlssQuality(output, answer);
 }

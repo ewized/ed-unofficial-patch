@@ -6,6 +6,7 @@
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
 #include "native_reflex.h"
+#include "native_vrs_material_receipt.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -856,6 +857,8 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         { cross_profile::CaptureScope capture(!runtimeFlatProfile()); rememberFlatProbeShader('p', hash, bytecode, len); }
         registerShaderHash(*out, hash);
         concoursePaneNoteShader(hash, bytecode, static_cast<size_t>(len));
+        if (runtimeScopeIncludesVr() && !linkage)
+            native_vrs::rememberMaterialPs(static_cast<ID3D11PixelShader*>(*out), hash, bytecode, len);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         remlokRememberVisorPs(hash, bytecode, static_cast<size_t>(len));   // F27: the visor shader's bytes, for the per-eye variants
         if (runtimeScopeIncludesFlat()) {
@@ -2720,9 +2723,9 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
         }
         // The overrides. Off by default, so the census costs the game a
         // comparison and nothing else.
-        const float dlssRatio = s.samplerBiasAuto && runtimeVrProfile()
-            ? static_cast<float>(dlssQualityRatio(nativeDlssQualityActive())) : 0.0f;
-        const float bias = dlssRatio > 0.0f ? log2f(dlssRatio) : s.samplerBias;
+        const auto quality = s.samplerBiasAuto && runtimeVrProfile() ? nativeDlssQualityActive() : DlssQuality::Custom;
+        const float dlssRatio = nativeDlssQualityBiasRatio(quality);
+        const float bias = dlssRatio > 0.0f ? log2f(dlssRatio) : quality == DlssQuality::Custom ? s.samplerBias : 0.0f;
         if (dlssRatio > 0.0f && !s.samplerDlssBiasNoted) {
             s.samplerDlssBiasNoted = true;
             Log::get().note("texture filtering: DLSS quality uses auto mip bias %+.2f for render scale %.3f. "
@@ -2744,7 +2747,8 @@ HRESULT STDMETHODCALLTYPE hookedCreateSamplerState(ID3D11Device* self,
                     "positive bias trades sharpness for quiet on distant repeating "
                     "detail; a negative one does the reverse.",
                     s.samplerAniso, static_cast<double>(bias),
-                    dlssRatio > 0.0f ? "auto: active DLSS quality"
+                    dlssRatio > 0.0f ? "auto: published DLSS quality"
+                        : quality != DlssQuality::Custom ? "auto: named DLSS sizing no longer matches the running pass"
                         : s.samplerBiasWhy[0] ? s.samplerBiasWhy : "no bias asked for");
             }
         }
@@ -3520,8 +3524,9 @@ bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {
     State& s = ensureState();
     if (!s.samplerBiasAuto) return false;
-    const float dlssRatio = runtimeVrProfile()
-        ? static_cast<float>(dlssQualityRatio(nativeDlssQualityActive())) : 0.0f;
+    const auto quality = runtimeVrProfile() ? nativeDlssQualityActive() : DlssQuality::Custom;
+    const float dlssRatio = nativeDlssQualityBiasRatio(quality);
+    if (quality != DlssQuality::Custom && !(dlssRatio > 0.0f)) return false;
     if (!(dlssRatio > 0.0f) && !(s.samplerBiasMult > 0.0f)) return false;
     if (multiplier) *multiplier = dlssRatio > 0.0f ? dlssRatio : s.samplerBiasMult;
     if (bias) *bias = dlssRatio > 0.0f ? log2f(dlssRatio) : s.samplerBias;
