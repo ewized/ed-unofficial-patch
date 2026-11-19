@@ -1,6 +1,7 @@
 #include "../../src/d3d11/vrs_coverage_policy.h"
 #include "../../src/d3d11/native_vrs_draw_policy.h"
 #include "../../src/d3d11/native_vrs_material.h"
+#include "../../src/d3d11/native_vrs_replay.h"
 #include "../../src/d3d11/flat_replay_query_tracker.h"
 #include "../native_vrs_test/witness_pixel_reference.h"
 #include "callback_dependency_tests.h"
@@ -24,7 +25,9 @@ unsigned classifications=0,scopes=0,preparations=0;
 int nativeSceneMaterialDecision(ID3D11DeviceContext*,bool,bool,char,unsigned,unsigned){++classifications;return 0;}
 template<class Draw> bool nativeWorldIssue(int,Draw draw){++scopes;return draw();}
 void nativeBeforeOriginal(ID3D11DeviceContext*){++preparations;}
-template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext*,Draw){return false;}
+template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext*,edvr::native_vrs::WitnessDraw args,Draw){
+    check(!args.valid(),"uncounted draws cannot provide retained direct arguments");return false;
+}
 #include "../../src/d3d11/native_vrs_uncounted_issue.h"
 void test(){
     ID3D11DeviceContext owner{},deferred{};state.ownerCtx=&owner;

@@ -6,7 +6,8 @@ void nativeUncountedMaterialIssue(ID3D11DeviceContext* context, char kind, Draw 
     if (!nativeVrsLive() || context != g_state->ownerCtx) { draw(); return; }
     const auto decision = nativeSceneMaterialDecision(context, true, false, kind, 0, 0);
     nativeWorldIssue(decision, [&]{
-        if(nativeSplitOriginal(context,[&](bool){draw();}))return true;
+        // No owned direct arguments: retain synchronous splitting and never queue.
+        if(nativeSplitOriginal(context,{},[&](bool){draw();}))return true;
         nativeBeforeOriginal(context);
         draw();
         return true;
