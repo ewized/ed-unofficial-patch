@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** confirmed in a stationary on-foot tutorial: median application GPU time rose from about 9.7 ms to 54.6 ms with VRS on. Binding reuse in `61c50e14` reduced driver calls without recovering GPU time. The uniform witness palette in `4778c602` passed the focused RTX check; server maintenance prevented its game comparison. The slowdown remains unresolved. See the on-foot measurements below.
+- **VRS performance investigation:** in the stationary on-foot tutorial, median application GPU time was about 9.8 ms off and 55.8 ms with the paired motion and material draws on in `4778c602`. Suppressing pairs while keeping ordinary material VRS active yielded 10.9 ms. The individual costs of changing rates, replaying geometry and copying depth remain unresolved.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1009,18 +1009,27 @@ the material draw; public full-rate boundaries still disable VRS and
 unbind the map. The production DLLs compiled, and the focused real RTX
 fixture verified exact full-rate witness pixels, restored coarse pixels,
 fine motion/skin/depth/stencil data, two retained transitions and OFF
-restoration. The full readiness suite was not run. Elite then displayed
-a server-maintenance notice and exited before this candidate reached
-the tutorial, so its gameplay performance remains unmeasured.
+restoration. After server maintenance, the same stationary tutorial
+measured about 9.8 ms median application GPU time with VRS off. With the
+uniform witness palette on, the partial 22.8-second window 19 recorded
+391 valid samples, a 55.846 ms GPU median and a 22.309 ms CPU median.
+Keeping VRS enabled during the fine draw did not recover GPU time.
 
 The PS-invocation diagnostic suppresses paired draws only while its
 recorder is active. It stops at 600 frames or five matched triples per
 eye, then normal paired draws resume. A 30-second window spanning that
 transition is mixed evidence and must not be used as a split-disabled
-performance comparison. For a future diagnostic isolation, enabling
-`advanced.vrs_work_reference` while leaving coverage and PS measurement
-off suppresses paired draws persistently without issuing reference
-queries; its extra CPU wrapper still makes it a diagnostic treatment.
+performance comparison. In window 20, enabling `advanced.vrs_work_reference`
+with coverage and PS measurement off kept the paired counter at 2,681,921
+while ordinary material accepts continued. The completed 30-second window
+recorded 2,600 valid samples, a 10.901 ms GPU median and a 7.981 ms CPU
+median. Restoring normal VRS at the same pose produced 516 valid samples
+in completed 30-second window 22. Median GPU time returned to 55.751 ms
+and CPU time to 22.299 ms. This diagnostic includes an extra CPU wrapper.
+The comparison isolates the combined cost of the paired path. A separate
+experiment keeps the viewport rate table fixed and switches only the
+tile-index view between the fine and material draws to measure the
+contribution of per-pair rate-table changes.
 
 ### Simulator validation (2026-11-19)
 

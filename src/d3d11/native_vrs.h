@@ -24,7 +24,7 @@ struct NativeVrsStatus {
     uint64_t ticks=0,providerPolls=0,validPairs=0,invalidPairs=0,staleRefusals=0;
     uint64_t worldCalls=0,worldAccepted=0,fullRateCalls=0,invalidations=0;
     uint64_t expandedMaterialAccepted[2]{};
-    uint64_t retainedWitnessReactivations=0;
+    uint64_t witnessMapReactivations=0,witnessMapCreations=0;
     uint64_t mapUpdates[2]{},mapBytes=0,rateSets=0,resourceSets=0,driverErrors=0;
     uint64_t contextRefusals=0,frameRefusals=0,targetRefusals=0;
     float sharpRadius=.15f,transitionRadius=.45f;
@@ -67,6 +67,24 @@ struct NativeVrsProjection {
     float frustum[4]{}; // left,right,down,up tangents, before jitter
     float shift[2]{};
 };
+struct NativeVrsWitnessStamp {
+    unsigned eye=2;
+    uintptr_t map=0;
+    uint64_t frame=0,config=0,gazeEpoch=0,invalidation=0;
+    bool matches(const NativeVrsWitnessStamp& other) const noexcept {
+        return map && eye==other.eye && map==other.map && frame==other.frame &&
+            config==other.config && gazeEpoch==other.gazeEpoch && invalidation==other.invalidation;
+    }
+};
+// One synchronous split owns this receipt. The native owner also checks its
+// address, actual rebound attachments and current projection before resuming.
+struct NativeVrsWitnessReceipt {
+    NativeVrsWitnessReceipt()=default;
+    NativeVrsWitnessReceipt(const NativeVrsWitnessReceipt&)=delete;
+    NativeVrsWitnessReceipt& operator=(const NativeVrsWitnessReceipt&)=delete;
+    NativeVrsWitnessStamp stamp;
+    NativeVrsWitnessStamp take() noexcept {const auto saved=stamp;stamp={};return saved;}
+};
 // Caller identified an original material draw, a settled scene depth eye and
 // a full-eye scene color target. At issue, this validates actual attachments,
 // depth test, raster state, viewport, provider and frame. A true result means
@@ -74,12 +92,12 @@ struct NativeVrsProjection {
 // for coverage counters only; it does not affect admission.
 bool nativeVrsBeforeWorld(ID3D11DeviceContext*,unsigned eye,
     ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection* =nullptr,
-    bool expandedMaterial=false) noexcept;
+    bool expandedMaterial=false,NativeVrsWitnessReceipt* prepared=nullptr) noexcept;
 // Check the current eye and prepare its map before a full-rate motion issue.
 // A false result leaves the original, combined single-draw path in charge.
 bool nativeVrsWitnessReady(ID3D11DeviceContext*) noexcept;
 bool nativeVrsPrepareWitness(ID3D11DeviceContext*,unsigned eye,
-    ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection&) noexcept;
+    ID3D11RenderTargetView*,ID3D11DepthStencilView*,const NativeVrsProjection&,NativeVrsWitnessReceipt&) noexcept;
 // All UI, unknown passes and reissues must pass a full-rate boundary. Invalidate
 // on ExecuteCommandList/ClearState/foreign ownership; never trust a prior set.
 void nativeVrsFullRate(ID3D11DeviceContext*) noexcept;

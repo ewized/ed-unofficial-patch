@@ -32,9 +32,16 @@ namespace edvr {
 int guardFilter(unsigned long,const char*) {return EXCEPTION_EXECUTE_HANDLER;}
 // This private fixture injects SIMULATED readiness as well as gaze. It does
 // not claim a real native channel, runtime startup or physical eye tracking.
-NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device*,unsigned long){return {1,1,true};}
-uint64_t nativeTemporalGazeEpoch() noexcept{return 1;}
-bool nativeTemporalWithGazeReady(ID3D11Device*,unsigned long,uint64_t epoch,NativeGazeReadyCallback callback,void* user){if(epoch!=1)return false;callback(user,1);return true;}
+static uint64_t providerEpoch=1;
+static bool changeEpochOnCoarse=false;
+NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device*,unsigned long){return {providerEpoch,1,true};}
+uint64_t nativeTemporalGazeEpoch() noexcept{
+    if(changeEpochOnCoarse && nativeVrsStatus().coarseAcknowledged){
+        ++providerEpoch;changeEpochOnCoarse=false;
+    }
+    return providerEpoch;
+}
+bool nativeTemporalWithGazeReady(ID3D11Device*,unsigned long,uint64_t epoch,NativeGazeReadyCallback callback,void* user){if(epoch!=providerEpoch)return false;callback(user,epoch);return true;}
 void nativeGazeReset() noexcept {}
 void nativeGazeSetLifetime(uint64_t) noexcept {}
 NativeGazeSample nativeGazePoll(bool enabled) noexcept {
@@ -191,14 +198,42 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     edvr::NativeVrsProjection projection{1,{-1.f,1.f,-1.f,1.f},{0.f,0.f}};
     const bool accepted=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
     submit(results[1]);const auto coarseStatus=edvr::nativeVrsStatus();
-    // Exercise both palettes on an identical eye map. Keep the original
+    // Exercise both map views with the same viewport palette. Keep the original
     // public full-rate, gaze-movement and OFF controls independent.
-    const bool uniformReady=edvr::nativeVrsPrepareWitness(context.Get(),0,rtv.Get(),dsv.Get(),projection);
+    edvr::NativeVrsWitnessReceipt receipt;
+    const bool uniformReady=edvr::nativeVrsPrepareWitness(context.Get(),0,rtv.Get(),dsv.Get(),projection,receipt);
     const auto uniformStatus=edvr::nativeVrsStatus();submit(results[7]);
-    const bool patternResumed=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
+    const bool patternResumed=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection,false,&receipt);
     const auto resumedStatus=edvr::nativeVrsStatus();submit(results[8]);
+    // A successful receipt is spent. A fresh one must still verify the
+    // physical OM binding after the private output-merger rebind.
+    const auto targetRefusalsBefore=edvr::nativeVrsStatus().targetRefusals;
+    const bool replayRefused=!edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection,false,&receipt)
+        && edvr::nativeVrsStatus().fullRateAcknowledged;
+    const bool reboundPrepared=edvr::nativeVrsPrepareWitness(context.Get(),0,rtv.Get(),dsv.Get(),projection,receipt);
+    context->OMSetRenderTargets(0,nullptr,nullptr);
+    const bool reboundRefused=!edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection,false,&receipt)
+        && edvr::nativeVrsStatus().fullRateAcknowledged;
+    context->OMSetRenderTargets(1,&raw,dsv.Get());
+    const bool receiptRefusals=patternResumed && replayRefused && reboundPrepared && reboundRefused &&
+        edvr::nativeVrsStatus().targetRefusals==targetRefusalsBefore+2;
+    std::printf("{\"witness_receipt_replay_and_om_mismatch_refused\":%s}\n",receiptRefusals?"true":"false");
     const bool eye1Accepted=edvr::nativeVrsBeforeWorld(context.Get(),1,rtv.Get(),dsv.Get(),&projection);
     submit(results[2]);
+    const bool otherEyePrepared=edvr::nativeVrsPrepareWitness(context.Get(),1,rtv.Get(),dsv.Get(),projection,receipt);
+    const bool otherEyeResumed=edvr::nativeVrsBeforeWorld(context.Get(),1,rtv.Get(),dsv.Get(),&projection,false,&receipt);
+    const bool sharedWitnessMap=otherEyePrepared && otherEyeResumed &&
+        edvr::nativeVrsStatus().witnessMapCreations==uniformStatus.witnessMapCreations;
+    edvr::nativeVrsFullRate(context.Get());
+    const auto priorEpoch=edvr::providerEpoch;
+    const auto priorAccepted=edvr::nativeVrsStatus().worldAccepted;
+    edvr::changeEpochOnCoarse=true;
+    const bool lateEpochAccepted=edvr::nativeVrsBeforeWorld(context.Get(),1,rtv.Get(),dsv.Get(),&projection);
+    const auto lateEpochStatus=edvr::nativeVrsStatus();
+    const bool lateEpochRefused=!lateEpochAccepted && edvr::providerEpoch==priorEpoch+1 &&
+        lateEpochStatus.worldAccepted==priorAccepted && lateEpochStatus.fullRateAcknowledged;
+    edvr::changeEpochOnCoarse=false;
+    std::printf("{\"post_activation_epoch_change_refused\":%s}\n",lateEpochRefused?"true":"false");
     edvr::nativeVrsTick(context.Get(),2);projection.sequence=2;
     const bool movedAccepted=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
     submit(results[3]);const auto movedStatus=edvr::nativeVrsStatus();
@@ -240,8 +275,9 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     };
     const bool uniformWitness=uniformReady&&patternResumed&&uniformStatus.vendorStateKnown&&
         !uniformStatus.fullRateAcknowledged&&!uniformStatus.coarseAcknowledged&&resumedStatus.coarseAcknowledged&&
-        uniformStatus.rateSets==coarseStatus.rateSets+1&&resumedStatus.rateSets==uniformStatus.rateSets+1&&
-        uniformStatus.resourceSets==coarseStatus.resourceSets&&resumedStatus.resourceSets==coarseStatus.resourceSets&&
+        uniformStatus.rateSets==coarseStatus.rateSets&&resumedStatus.rateSets==uniformStatus.rateSets&&
+        uniformStatus.resourceSets==coarseStatus.resourceSets+1&&resumedStatus.resourceSets==uniformStatus.resourceSets+1&&
+        uniformStatus.witnessMapCreations==coarseStatus.witnessMapCreations+1&&
         samePixels(results[7],full)&&samePixels(results[8],coarse)&&
         results[7].stats.PSInvocations==full.stats.PSInvocations&&results[8].stats.PSInvocations==coarse.stats.PSInvocations&&
         ringFootprints&&replication;
@@ -254,13 +290,13 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const bool reduced=full.stats.PSInvocations>0&&coarse.stats.PSInvocations>0&&coarse.stats.PSInvocations<full.stats.PSInvocations;
     const bool owner=accepted&&coarseStatus.coarseAcknowledged&&coarseStatus.magicAbsent&&coarseStatus.mapUpdates[0]>0&&!finalStatus.driverErrors&&!finalStatus.refused;
     edvr::nativeVrsConfigure(true);
-    uint64_t witnessFrame=3,resourceSetsAtPause=0,verifiedReactivations=0;
-    bool startFrame=true,retained=false,transitionsExact=true;
+    uint64_t witnessFrame=3,resourceSetsAtPause=0,rateSetsAtPause=0,verifiedReactivations=0;
+    bool startFrame=true,switched=false,transitionsExact=true;
     using witness_gpu::RateStep;
     auto witnessRate=[&](RateStep step,ID3D11RenderTargetView* c,ID3D11DepthStencilView* d){
         if(step==RateStep::BeginPass || step==RateStep::StrongFull){
             if(step==RateStep::BeginPass)startFrame=true;
-            retained=false;
+            switched=false;
             edvr::nativeVrsFullRate(context.Get());
             const bool strong=edvr::nativeVrsStatus().fullRateAcknowledged;
             transitionsExact=transitionsExact&&strong;return strong;
@@ -268,19 +304,21 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
         if(step==RateStep::PrepareWitness){
             if(startFrame){edvr::nativeVrsTick(context.Get(),++witnessFrame);projection.sequence=witnessFrame;startFrame=false;}
             const auto before=edvr::nativeVrsStatus();
-            if(!edvr::nativeVrsPrepareWitness(context.Get(),0,c,d,projection))return false;
+            if(!edvr::nativeVrsPrepareWitness(context.Get(),0,c,d,projection,receipt))return false;
             const auto fine=edvr::nativeVrsStatus();
-            retained=before.coarseAcknowledged;
+            switched=before.coarseAcknowledged;
             resourceSetsAtPause=before.resourceSets;
+            rateSetsAtPause=before.rateSets;
             return fine.vendorStateKnown && !fine.coarseAcknowledged &&
-                (retained?(!fine.fullRateAcknowledged && fine.resourceSets==resourceSetsAtPause &&
-                           fine.rateSets==before.rateSets+1):fine.fullRateAcknowledged);
+                (switched?(!fine.fullRateAcknowledged && fine.resourceSets==resourceSetsAtPause+1 &&
+                           fine.rateSets==rateSetsAtPause):fine.fullRateAcknowledged);
         }
-        if(!edvr::nativeVrsBeforeWorld(context.Get(),0,c,d,&projection))return false;
-        if(retained){
+        if(!edvr::nativeVrsBeforeWorld(context.Get(),0,c,d,&projection,false,&receipt))return false;
+        if(switched){
             const auto resumed=edvr::nativeVrsStatus();
-            transitionsExact=transitionsExact && resumed.coarseAcknowledged && resumed.resourceSets==resourceSetsAtPause;
-            ++verifiedReactivations;retained=false;
+            transitionsExact=transitionsExact && resumed.coarseAcknowledged &&
+                resumed.resourceSets==resourceSetsAtPause+2 && resumed.rateSets==rateSetsAtPause;
+            ++verifiedReactivations;switched=false;
         }
         return true;
     };
@@ -288,10 +326,14 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     edvr::nativeVrsConfigure(false);edvr::nativeVrsTick(context.Get(),++witnessFrame);
     const auto witnessOff=edvr::nativeVrsStatus();
     const bool witness=witnessPixels && transitionsExact && verifiedReactivations>=2 && witnessOff.fullRateAcknowledged &&
-        witnessOff.retainedWitnessReactivations-finalStatus.retainedWitnessReactivations==verifiedReactivations;
+        witnessOff.witnessMapReactivations-finalStatus.witnessMapReactivations==verifiedReactivations &&
+        witnessOff.witnessMapCreations==finalStatus.witnessMapCreations+1;
+    const bool witnessMapSwitches=uniformWitness && sharedWitnessMap && witness;
+    std::printf("{\"witness_map_switches_without_viewport_changes\":%s,\"witness_map_creations\":%llu}\n",
+        witnessMapSwitches?"true":"false",witnessOff.witnessMapCreations);
     std::printf("{\"verified_same_eye_witness_reactivations\":%llu,\"transitions_exact\":%s}\n",verifiedReactivations,transitionsExact?"true":"false");
     std::printf("{\"split_sloped_overlap_coplanar_depth_stencil_slot_skin_exact\":%s}\n",witness?"true":"false");
-    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&uniformWitness&&witness;
+    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&witnessMapSwitches&&receiptRefusals&&lateEpochRefused;
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");

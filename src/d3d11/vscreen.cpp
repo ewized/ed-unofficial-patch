@@ -1097,7 +1097,7 @@ template<class Draw> bool nativeWorldIssue(const NativeWorldDecision& decision,D
     if(decision.eye>=2)nativeVrsFullRate(decision.context);
     return draw();
 }
-bool nativeOriginalRate(ID3D11DeviceContext* context,bool certifiedSplit,bool prepareWitness=false) {
+bool nativeOriginalRate(ID3D11DeviceContext* context,NativeVrsWitnessReceipt* certifiedSplit=nullptr,bool prepareWitness=false) {
     if(!nativeVrsLive() || context!=g_state->ownerCtx)return false;
     const auto* d=g_nativeWorldDecision;
     if(d&&d->context==context&&d->eye<2&&nativeVrsCoarseRequested()){
@@ -1117,8 +1117,8 @@ bool nativeOriginalRate(ID3D11DeviceContext* context,bool certifiedSplit,bool pr
         }
         if(p.valid&&nativeTemporalFrameSequence()==sequence){
             if(certifiedSplit && d->splitWitness){
-                if(prepareWitness)return nativeVrsPrepareWitness(context,d->eye,d->rtv,d->dsv,p.value);
-                return nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial);
+                if(prepareWitness)return nativeVrsPrepareWitness(context,d->eye,d->rtv,d->dsv,p.value,*certifiedSplit);
+                return nativeVrsBeforeWorld(context,d->eye,d->rtv,d->dsv,&p.value,d->expandedMaterial,certifiedSplit);
             }
             ID3D11VertexShader* actualVs=nullptr;
             ID3D11PixelShader* actualPs=nullptr;
@@ -1133,7 +1133,7 @@ bool nativeOriginalRate(ID3D11DeviceContext* context,bool certifiedSplit,bool pr
     nativeVrsFullRate(context);
     return false;
 }
-void nativeBeforeOriginal(ID3D11DeviceContext* context) {nativeOriginalRate(context,false);}
+void nativeBeforeOriginal(ID3D11DeviceContext* context) {nativeOriginalRate(context);}
 template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,Draw draw) {
     const auto* d=g_nativeWorldDecision;
     if(!d || d->context!=ctx || !d->splitWitness || !nativeVrsWitnessReady(ctx) ||
@@ -1141,6 +1141,8 @@ template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,Draw draw
     struct Internal {bool old=g_witnessInternal;Internal(){g_witnessInternal=true;}~Internal(){g_witnessInternal=old;}} internal;
     struct Issue {
         ID3D11DeviceContext* ctx;Draw& draw;bool finePending=false;
+        NativeVrsWitnessReceipt receipt;
+        uint64_t preparedEpoch=0,preparedDraw=0;
         ~Issue(){if(finePending)nativeVrsFullRate(ctx);}
     } issue{ctx,draw};
     bool safe;
@@ -1150,7 +1152,19 @@ template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,Draw draw
         [](void* user,bool material){static_cast<Issue*>(user)->draw(material);},
         [](void* user,bool coarse){
             auto& current=*static_cast<Issue*>(user);
-            const bool ready=nativeOriginalRate(current.ctx,true,!coarse);
+            // Only this synchronous issue can reuse its validated raster state.
+            // Private map uploads may advance the mutation epoch, so capture it
+            // after preparation. Any intervening draw or mutation falls back.
+            if(coarse && (current.preparedEpoch!=g_state->witnessEpoch.load() ||
+                          current.preparedDraw!=g_state->witnessDraw.load())){
+                current.receipt.take();nativeVrsFullRate(current.ctx);
+                current.finePending=false;return false;
+            }
+            const bool ready=nativeOriginalRate(current.ctx,&current.receipt,!coarse);
+            if(!coarse && ready){
+                current.preparedEpoch=g_state->witnessEpoch.load();
+                current.preparedDraw=g_state->witnessDraw.load();
+            }
             if(coarse && !ready)nativeVrsFullRate(current.ctx);
             current.finePending=!coarse && ready;
             return ready;
@@ -7197,8 +7211,8 @@ void vScreenFrameBoundary() {
             Log::get().noteReserved("native world VRS: configured=%u driver_ready=%u refused=%u magic_absent=%u vendor_known=%u full_rate_ack=%u coarse_ack=%u failure=%u driver_status=%d ticks=%llu provider_polls=%llu valid_pairs=%llu invalid_pairs=%llu stale=%llu world_calls=%llu world_accepted=%llu full_rate_calls=%llu invalidations=%llu updates=%llu,%llu map_bytes=%llu rate_sets=%llu resource_sets=%llu driver_errors=%llu context_refused=%llu frame_refused=%llu target_refused=%llu world_ps_reduction_verified=0 gpu_benefit_verified=0 sensor_timestamp_unavailable=1 projection_mapping_verified=0 physical_calibration_verified=0 coordinates_logged=0",
                 n.configured?1u:0u,n.driverReady?1u:0u,n.refused?1u:0u,n.magicAbsent?1u:0u,n.vendorStateKnown?1u:0u,n.fullRateAcknowledged?1u:0u,n.coarseAcknowledged?1u:0u,unsigned(n.failure),n.lastDriverStatus,n.ticks,n.providerPolls,n.validPairs,n.invalidPairs,n.staleRefusals,n.worldCalls,n.worldAccepted,n.fullRateCalls,n.invalidations,n.mapUpdates[0],n.mapUpdates[1],n.mapBytes,n.rateSets,n.resourceSets,n.driverErrors,n.contextRefusals,n.frameRefusals,n.targetRefusals);
             engineVelocityReportWitness();
-            Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu retained_witness_reactivations=%llu",
-                n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1],n.retainedWitnessReactivations);}
+            Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu witness_map_reactivations=%llu witness_map_creations=%llu",
+                n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1],n.witnessMapReactivations,n.witnessMapCreations);}
     }
     if (g_state && g_state->ownerCtx) vrsCoverageTick(g_state->ownerCtx);
     // The AA-off path's skipped shadows (2026-10-13): once engine velocity is read again, VsSrv33 and Blend hold
