@@ -60,6 +60,7 @@
 #include "menu_policy.h"
 #include "menu_flat_layout.h"
 #include "menu_pages.h"
+#include "menu_vr_performance.h"
 #include "menu_restart.h"
 #include "native_dlss_quality.h"
 #include "native_menu.h"
@@ -2024,13 +2025,14 @@ Page makePage(const MenuPageDef& d) {
     p.name = d.name;
     switch (d.source) {
         case MenuPageSource::Settings:
-            addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
             if (d.token && !strcmp(d.token, "performance") && d.tier == MenuPageTier::Fix) {
-                moveRowAfter(p,"experimental","eye_tracked_foveation","fix","nvidia_reflex");
-                moveRowAfter(p,"experimental","foveation_focus","experimental","eye_tracked_foveation");
-                moveRowAfter(p,"experimental","foveation_highlight","experimental","foveation_focus");
+                forEachVrPerformanceRow(kMenuRows, kRowDefCount, [&](int index) {
+                    Entry entry;
+                    entry.def = index;
+                    p.entries.push_back(entry);
+                });
                 addNativePerformanceStatus(p);
-            }
+            } else addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
             break;
         case MenuPageSource::FlatPerformance: addFlatPerformanceRows(p); break;
         case MenuPageSource::FlatVisual: addFlatVisualRows(p); break;
@@ -3263,6 +3265,12 @@ void buildContent(MenuContent& c) {
             MenuLine& l = c.lines[c.lineCount++];
             strncpy(l.left, "Nothing on this page yet.", sizeof(l.left) - 1);
             l.style = kMenuDim;
+        }
+        if (c.wrapRows && p.highlight == 0 && !p.readingBody && !c.hint[0] &&
+            !strcmp(p.name, "Performance")) {
+            // The body has a scroll thumb, but it can be easy to miss in VR.
+            snprintf(c.hint, sizeof(c.hint), "%s for more settings.",
+                     aliasesLive && navName[kNavDown] && navName[kNavDown][0] ? navName[kNavDown] : "Down");
         }
         // The DWELL is what this records, not whether a card was drawn. A
         // row that yields no tooltip -- an action, a heading, an empty

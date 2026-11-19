@@ -4899,7 +4899,7 @@ exit /b 0
 :rig_menu_policy_test
 echo [edvr] === menu_policy_test.exe ===
 if not exist "%OBJ%\menupolicy" mkdir "%OBJ%\menupolicy"
-%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 /Fo"%OBJ%\menupolicy"\ /Fe"%BUILD%\menu_policy_test.exe" ^
 "tools\menu_policy_test\menu_policy_test.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: menu_policy_test build failed & exit /b 1 )

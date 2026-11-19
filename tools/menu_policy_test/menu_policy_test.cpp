@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "../../src/common/flat_profile_keys.h"
 #include "../../src/d3d11/flat_notice_queue.h"
 #include "../../src/d3d11/menu_flat_status.h"
@@ -15,10 +16,13 @@
 #include "../../src/d3d11/menu_policy.h"
 #include "../../src/d3d11/menu_flat_layout.h"
 #include "../../src/d3d11/menu_panel.h"
+#include "../../src/d3d11/menu_vr_performance.h"
 
 using namespace edvr;
 
 namespace {
+#include "menu_schema.inc"
+
 unsigned checks = 0, failures = 0;
 void check(bool ok, const char* name) {
     ++checks;
@@ -243,6 +247,30 @@ void pageCases() {
     size_t posts = 0;
     for (size_t i = 0; i < kMenuPageCount; ++i) posts += kMenuPages[i].post != MenuPagePost::None;
     check(posts == 1, "only Native on foot has a post step");
+}
+
+void vrPerformanceCases() {
+    std::vector<std::string> rows;
+    forEachVrPerformanceRow(kMenuRows, sizeof(kMenuRows) / sizeof(kMenuRows[0]), [&](int index) {
+        const auto& row = kMenuRows[index];
+        rows.emplace_back(std::string(row.section) + "." + row.key);
+    });
+    const std::vector<std::string> opening = {
+        "fix.temporal_aa", "fix.dlss_quality", "fix.temporal_aa_model",
+        "fix.frame_generation", "fix.nvidia_reflex", "experimental.eye_tracked_foveation",
+        "experimental.foveation_focus", "experimental.foveation_highlight",
+    };
+    check(rows.size() >= opening.size() && std::equal(opening.begin(), opening.end(), rows.begin()),
+          "native FG, low latency and the VRS controls are in the opening VR Performance viewport");
+    const auto indexOf = [&](const char* key) { return std::find(rows.begin(), rows.end(), key); };
+    const auto uiQuality = indexOf("fix.ui_quality"), optimized = indexOf("fix.optimized_stations");
+    check(uiQuality != rows.end() && optimized != rows.end() &&
+          static_cast<std::size_t>(uiQuality - rows.begin()) >= opening.size() && uiQuality < optimized,
+          "UI quality and Optimized stations remain reachable below the native controls");
+    check(indexOf("fix.xess_frame_generation") == rows.end() && indexOf("fix.xess_generated_frames") == rows.end() &&
+          flatPageHasRow("fix", "xess_frame_generation") && flatPageHasRow("fix", "xess_generated_frames") &&
+          !flatPageHasRow("fix", "frame_generation") && !flatPageHasRow("fix", "nvidia_reflex"),
+          "the flat Performance tab keeps its separate XeSS choices");
 }
 
 // The flat Status page's lines (menu_flat_status.h): which are there for each situation, and what they say.
@@ -606,6 +634,7 @@ int main(int argc, char** argv) {
     monitorPanelCases();
     noticeCases();
     pageCases();
+    vrPerformanceCases();
     restartCases();
     dlssQualityCases();
     statusCases();
