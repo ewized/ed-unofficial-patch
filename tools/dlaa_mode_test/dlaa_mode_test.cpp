@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
         changed = balanced;
         changed.createFlags = 1;
         CHECK(retry.ready(changed, 100000, false));
-        retry.clear(); // device/engine lifecycle or a successful evaluation
+        retry.clear(); // device/engine lifecycle
         CHECK(retry.ready(balanced, 100000, false));
         retry.failed(balanced, 100000, DlssFailure::Transient);
         CHECK(!retry.ready(balanced, 100249, false) && retry.ready(balanced, 100250, false));
@@ -117,6 +117,79 @@ int main(int argc, char** argv) {
               antialias.outWidth == antialias.width && antialias.outHeight == antialias.height);
         CHECK(!dlssWarmSize(DlssQuality::Custom, .75f, 3840, 2160).width);
         CHECK(!dlssWarmSize(DlssQuality::Performance, 0.f, 3840, 2160).width);
+    }
+
+    {
+        const DlssFeatureKey a{2228, 1253, 3840, 2160, 1, 0};
+        auto b = a;
+        b.width -= 2;
+        DlssRetryPolicy retry;
+        unsigned attempts = 0;
+        for (unsigned frame = 0; frame < 120; ++frame) {
+            const auto& key = frame & 1 ? b : a;
+            const uint64_t now = frame * 8u;
+            if (!retry.ready(key, now, false)) continue;
+            retry.attempting(key, now);
+            retry.failed(key, now, DlssFailure::Transient);
+            ++attempts;
+        }
+        CASE("C16.many-contracts.alternating-failures", attempts == 6);
+
+        retry.clear();
+        retry.failed(a, 0, DlssFailure::Permanent);
+        CHECK(retry.ready(b, 8, false));
+        retry.attempting(b, 8);
+        retry.succeeded(b);
+        CASE("C16.many-contracts.good-key-preserves-other-refusal", !retry.ready(a, 16, true));
+        CHECK(retry.ready(b, 16, false));
+
+        retry.clear();
+        retry.failed(a, 0, DlssFailure::Transient);
+        retry.failed(b, 8, DlssFailure::Transient);
+        CHECK(retry.ready(a, 16, true));
+        retry.attempting(a, 16);
+        retry.failed(a, 16, DlssFailure::Transient);
+        CHECK(!retry.ready(a, 24, true) && retry.ready(b, 24, true));
+        retry.succeeded(a);
+        CHECK(retry.ready(a, 25, false) && !retry.ready(b, 25, false));
+    }
+
+    {
+        DlssFeatureKey first{2228, 1253, 3840, 2160, 1, 0};
+        DlssRetryPolicy retry;
+        // Flood the slot with contracts whose individually proven refusal is
+        // permanent. A bounded cache cannot memorize every unknown size; its
+        // overflow allowance must still prevent per-frame NGX work.
+        unsigned attempts = 0;
+        for (unsigned frame = 0; frame < 160; ++frame) {
+            auto key = first;
+            key.width += frame * 2;
+            const uint64_t now = frame * 8u;
+            if (!retry.ready(key, now, true)) continue;
+            retry.attempting(key, now);
+            retry.failed(key, now, DlssFailure::Permanent);
+            ++attempts;
+        }
+        CASE("C17.overflow.unknown-attempts-bounded", attempts == DlssRetryPolicy::kFailureSlots + 4);
+        CASE("C17.overflow.first-permanent-key-not-evicted", !retry.ready(first, 5000, true));
+
+        auto good = first;
+        good.outWidth -= 2;
+        CHECK(retry.ready(good, 5000, false));
+        retry.attempting(good, 5000);
+        retry.succeeded(good);
+        CASE("C17.overflow.live-good-key-keeps-running", retry.ready(good, 5008, false, true));
+        CHECK(!retry.ready(good, 5008, false)); // without a matching successful handle
+        retry.failed(good, 5008, DlssFailure::Transient);
+        CHECK(!retry.ready(good, 5016, false));
+        CHECK(retry.ready(good, 5258, false)); // resize probe opens again
+
+        ++good.presetGeneration;
+        CHECK(retry.ready(good, 5016, false));
+        retry.attempting(good, 5016);
+        CHECK(!retry.hasFailure());
+        retry.clear();
+        CHECK(retry.ready(first, 5016, false));
     }
 
     {

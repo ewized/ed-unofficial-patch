@@ -4,7 +4,8 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** `aba9d747` completed 30-second OFF/ON/OFF windows at 10.320 / 13.100 / 10.391 ms GPU. The unrelated-write cache route preserved no writes in this scene, so it has no demonstrated game benefit here. A guarded writable-EQUAL depth route is implemented for GPU validation. VRS still regresses; see the dated measurements below.
+- **VRS performance investigation:** `aba9d747` completed 30-second OFF/ON/OFF windows at 10.320 / 13.100 / 10.391 ms GPU. The unrelated-write cache route preserved no writes in this scene, so it has no demonstrated game benefit here. The guarded writable-EQUAL route passed WARP and RTX pixel checks on `619031af`; its game performance remains unmeasured after a startup connection failure.
+- **DLSS failure retries:** a bounded per-contract cache prevents alternating failing sizes, or a successful different size, from clearing an NGX refusal. Portable checks pass; native validation remains pending.
 - **FG recovery:** `aba9d747` recovered from an actual missed handoff with VRS On. Both bounded captures retained all rows and verified 286 generated frames against their exact native endpoints and existing timing budget. Remaining repeats, physical headset behavior and full Reflex SDK qualification remain open.
 - **F8 opening view:** `249e7c9a` displayed DLSS quality, experimental frame generation, NVIDIA low latency, VRS and its sharp region together in the native VR Performance page. Physical headset validation remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
@@ -1271,7 +1272,16 @@ draws keep their mirror. Other formats and depth comparisons retain their
 existing paths. See the [D3D11.3 depth rules, sections 17.10–17.13](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm).
 The GPU fixture compares constant/raw-exceptional seeds and a clipped
 perspective draw's exact depth across both eyes, the three shading rates,
-and late refusal. Native pixel and live opportunity checks remain pending.
+and late refusal. On `619031af`, both WARP and RTX passed these pixel
+checks. RTX also verified the physical 1×1, 2×2 and 4×4 footprints, all
+13 prior material footprints and four continuations. The early and
+regenerated shader inputs matched. Production compilation and the affected
+native recipes passed; this is not the complete readiness build. The
+subsequent training launch produced a black screen; the user reported a
+startup network error and restarted manually. No performance window was
+taken. Record a startup connection error and relaunch instead of dismissing
+it and treating the resulting black view as loading. Live opportunity and
+performance checks remain pending.
 Private-copy counters also report comparison state and possible stencil
 writes, using descriptors already captured.
 Portable checks cover 110,592 state/format/ownership cases, 16,384 ordered
@@ -1304,6 +1314,31 @@ immediate native fallback. A four-opportunity result was refused. Both
 captures had continuous owner ticks and no overflow. These observations
 verify recovery and continued delivery with VRS in this session, not
 45-native-plus-45-generated cadence or physical display latency.
+
+### DLSS retries across changing sizes (2026-11-19)
+
+The original per-slot retry policy remembered only the last failed contract.
+Alternating two failing sizes admitted 120 NGX attempts in 120 frames over
+960 ms. A permanently failing size interleaved with a successful size was
+attempted on all 60 of its frames, because success erased the other refusal.
+
+Each slot now remembers eight independent contracts for its current model
+generation. Transient failures retain their 250 ms to 4 s backoff and one
+early retry after a genuine history change. Success retires only the exact
+successful contract. A full cache retains permanent refusals and permits
+at most one unseen-contract probe every 250 ms; only an expired transient
+entry can be replaced. A matching successfully evaluated live feature keeps
+running without that probe limit. A model or device lifecycle reset clears
+the cache. Competing unseen sizes share the overflow probe on a first-eligible
+basis, so an individual size has no fairness guarantee during continuous
+size churn.
+
+The same input sequences now admit six transient attempts and one permanent
+attempt respectively, while the other size still succeeds on all 60 frames.
+A 160-size failure stream admits eight initial attempts and four overflow
+probes. The portable mode rig passes 224 checks and the seven focused feature
+mutations fail as expected. Native compilation and the final readiness
+suite remain pending; no driver failure was injected into the game.
 
 ### Simulator validation (2026-11-19)
 

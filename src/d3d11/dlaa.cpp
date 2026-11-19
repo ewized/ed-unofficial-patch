@@ -99,6 +99,11 @@ struct EyeFeature {
     const char* modeName = "none";
     DlssFeatureKey key{};
     DlssRetryPolicy retry;
+    bool evaluated = false;
+
+    bool successful(const DlssFeatureKey& requested) const {
+        return handle && evaluated && key == requested;
+    }
 };
 
 // The flag set is hdr_backend_flags.h's, pure so a rig can pin it; every constant is checked against the SDK's own
@@ -280,6 +285,7 @@ DlssFailure classifyFailure(NVSDK_NGX_Result result) {
 void releaseFeature(EyeFeature& f) {
     if (f.handle) NVSDK_NGX_D3D11_ReleaseFeature(f.handle);
     f.handle = nullptr;
+    f.evaluated = false;
 }
 
 void releaseFeatures() {
@@ -710,6 +716,16 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, const DlssFeatureKey& size, bool* prepar
     const auto key = featureKey(size.width, size.height, size.outWidth, size.outHeight, false);
     bool allPrepared = true;
     for (int eye = 0; eye < 2; ++eye) {
+        auto& feature = g_feature[eye];
+        if (feature.retry.hasFailure()) {
+            const auto now = GetTickCount64();
+            if (!feature.retry.ready(key, now, false, feature.successful(key))) {
+                if (reason) *reason = "the previous NGX failure is in backoff";
+                allPrepared = false;
+                continue;
+            }
+            feature.retry.attempting(key, now, feature.successful(key));
+        }
         if (!ensureFeature(ctx, eye, key, reason, createMs ? &createMs[eye] : nullptr))
             allPrepared = false;
     }
@@ -722,9 +738,10 @@ bool dlaaRetryReady(int eye, uint32_t w, uint32_t h, uint32_t outW, uint32_t out
                     bool historyChanged, bool hdr) {
 #ifdef EDVR_HAVE_NGX
     if (!upscalerSlotHasFullFrame(eye)) return false;
-    const auto& retry = g_feature[eye].retry;
-    return !retry.hasFailure() ||
-           retry.ready(featureKey(w, h, outW, outH, hdr), GetTickCount64(), historyChanged);
+    const auto& feature = g_feature[eye];
+    if (!feature.retry.hasFailure()) return true;
+    const auto key = featureKey(w, h, outW, outH, hdr);
+    return feature.retry.ready(key, GetTickCount64(), historyChanged, feature.successful(key));
 #else
     (void)eye; (void)w; (void)h; (void)outW; (void)outH; (void)historyChanged; (void)hdr;
     return false;
@@ -766,11 +783,12 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
     EyeFeature& f = g_feature[eye];
     if (f.retry.hasFailure()) {
         const auto now = GetTickCount64();
-        if (!f.retry.ready(key, now, historyChanged)) {
+        const bool successfulLive = f.successful(key);
+        if (!f.retry.ready(key, now, historyChanged, successfulLive)) {
             if (reason) *reason = "the previous NGX failure is in backoff";
             return false;
         }
-        f.retry.attempting(key, now);
+        f.retry.attempting(key, now, successfulLive);
     }
     pollTimingRing(ctx);
     // The feature: found made (by the warm-up or a previous frame) or made
@@ -854,8 +872,9 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
         releaseFeature(f);
         return false;
     }
+    f.evaluated = true;
     if (f.retry.hasFailure()) {
-        f.retry.clear();
+        f.retry.succeeded(key);
         g_reason = "available";
     }
     ++g_evaluations;

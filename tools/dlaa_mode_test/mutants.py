@@ -51,6 +51,7 @@ ZERO_LADDER, ANSWERED_LADDER, SINGLE_POINT, PARTIAL = "C1", "C2", "C3", "C4"
 CEILING_8268, CEILING_TALL, CEILING_SQUARE, CEILING_ODD, CEILING_NONE = "C5", "C6", "C7", "C8", "C9"
 CEILING_VERIFIED, CEILING_CALLS, CEILING_PIXEL_MODEL, WINDOW_MODE = "C10", "C11", "C12", "C13"
 NGX_BACKOFF, STARTUP_SIZING = "C14", "C15"
+MANY_CONTRACTS, CONTRACT_OVERFLOW = "C16", "C17"
 
 ANSWERED = ("return m.ok && m.optW && m.optH && m.minW && m.minH && m.maxW && m.maxH &&\n"
             "           m.minW <= m.maxW && m.minH <= m.maxH;")
@@ -117,6 +118,18 @@ MUTANTS = [
     M("ngx-warm-dlaa-for-upscale", STARTUP_SIZING, "feature",
       [("return {width, height, outputWidth, outputHeight};", "return {outputWidth, outputHeight, outputWidth, outputHeight};")],
       "a named upscale warms the old 1:1 pair and discards it at the first evaluation"),
+    M("ngx-forgets-other-failures", MANY_CONTRACTS, "feature",
+      [("auto* failure = find(key);\n        if (!failure) {", "clear();\n        selectPreset(key.presetGeneration);\n        auto* failure = find(key);\n        if (!failure) {")],
+      "alternating failed dimensions erase each other's cooldown"),
+    M("ngx-success-clears-all", MANY_CONTRACTS, "feature",
+      [("void succeeded(const DlssFeatureKey& key) noexcept {", "void succeeded(const DlssFeatureKey& key) noexcept {\n        clear();")],
+      "successful resized input forgets a different permanent refusal"),
+    M("ngx-unbounded-unknown-probes", CONTRACT_OVERFLOW, "feature",
+      [("|| nowMs >= nextUnknownProbe_;", "|| true;")],
+      "new dimensions can issue NGX every frame at capacity"),
+    M("ngx-good-feature-throttled", CONTRACT_OVERFLOW, "feature",
+      [("return successfulLiveFeature || count_ < kFailureSlots", "(void)successfulLiveFeature;\n        return count_ < kFailureSlots")],
+      "an already evaluated feature stops while unrelated failures fill the cache"),
 ]
 
 if __name__ == "__main__":

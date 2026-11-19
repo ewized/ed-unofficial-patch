@@ -2,6 +2,8 @@
 
 #include "../common/dlss_quality.h"
 
+#include <array>
+
 namespace edvr {
 
 struct DlssFeatureKey {
@@ -18,42 +20,101 @@ struct DlssFeatureKey {
 
 enum class DlssFailure { None, Transient, Permanent };
 
-// One retry state per feature slot, scoped to the initialized device. A genuine
-// history change can probe early once per failure streak; NGX's own reset bit
-// is deliberately excluded because the fallback itself raises it.
+// Failed contracts are independent within one feature slot/model generation.
+// An incoming history change can probe each transient streak early once.
 class DlssRetryPolicy {
 public:
-    bool ready(const DlssFeatureKey& key, uint64_t nowMs, bool historyChanged) const noexcept {
-        return failure_ == DlssFailure::None || !(key_ == key) ||
-               (failure_ == DlssFailure::Transient &&
-                (nowMs >= retryAt_ || (historyChanged && !usedEarlyRetry_)));
+    static constexpr unsigned kFailureSlots = 8;
+    static constexpr uint64_t kMinRetryMs = 250;
+
+    // successfulLiveFeature belongs to this exact key and has previously
+    // evaluated successfully. It only bypasses the unseen-contract throttle.
+    bool ready(const DlssFeatureKey& key, uint64_t nowMs, bool historyChanged,
+               bool successfulLiveFeature = false) const noexcept {
+        if (presetGeneration_ != key.presetGeneration) return true;
+        if (const auto* failure = find(key)) return failure->ready(nowMs, historyChanged);
+        return successfulLiveFeature || count_ < kFailureSlots || nowMs >= nextUnknownProbe_;
     }
 
     // Called only once the caller actually has inputs and will ask NGX.
-    void attempting(const DlssFeatureKey& key, uint64_t nowMs) noexcept {
-        if (failure_ == DlssFailure::Transient && key_ == key && nowMs < retryAt_)
-            usedEarlyRetry_ = true;
+    void attempting(const DlssFeatureKey& key, uint64_t nowMs, bool successfulLiveFeature = false) noexcept {
+        selectPreset(key.presetGeneration);
+        if (auto* failure = find(key)) {
+            if (failure->kind == DlssFailure::Transient && nowMs < failure->retryAt_)
+                failure->usedEarlyRetry_ = true;
+        } else if (!successfulLiveFeature && count_ == kFailureSlots) {
+            nextUnknownProbe_ = nowMs + kMinRetryMs;
+        }
     }
 
-    void failed(const DlssFeatureKey& key, uint64_t nowMs, DlssFailure failure) noexcept {
-        if (failure_ == DlssFailure::None || !(key_ == key)) clear();
-        key_ = key;
-        failure_ = failure;
-        // 250 ms, 500 ms, 1 s, 2 s, then 4 s. A persistent driver or memory
-        // problem stays observable without trying expensive creation every frame.
-        retryAt_ = nowMs + (uint64_t{250} << failures_);
-        if (failures_ < 4) ++failures_;
+    void failed(const DlssFeatureKey& key, uint64_t nowMs, DlssFailure kind) noexcept {
+        selectPreset(key.presetGeneration);
+        auto* failure = find(key);
+        if (!failure) {
+            // Never discard a permanent refusal or an active cooldown. If
+            // capacity is exhausted, throttled probes cover untracked keys.
+            for (auto& entry : entries_) {
+                if (entry.kind == DlssFailure::None) { failure = &entry; break; }
+                if (entry.kind == DlssFailure::Transient && nowMs >= entry.retryAt_ &&
+                    (!failure || entry.retryAt_ < failure->retryAt_)) failure = &entry;
+            }
+            if (!failure) {
+                nextUnknownProbe_ = nowMs + kMinRetryMs;
+                return;
+            }
+            if (failure->kind == DlssFailure::None && ++count_ == kFailureSlots)
+                nextUnknownProbe_ = nowMs + kMinRetryMs;
+            *failure = {key};
+        }
+        failure->kind = kind;
+        failure->retryAt_ = nowMs + (kMinRetryMs << failure->failures);
+        if (failure->failures < 4) ++failure->failures;
+    }
+
+    // Successful evaluation retires only the contract actually evaluated.
+    void succeeded(const DlssFeatureKey& key) noexcept {
+        if (auto* failure = find(key)) {
+            *failure = {};
+            --count_;
+        }
     }
 
     void clear() noexcept { *this = {}; }
-    bool hasFailure() const noexcept { return failure_ != DlssFailure::None; }
+    bool hasFailure() const noexcept { return count_ != 0; }
 
 private:
-    DlssFeatureKey key_{};
-    DlssFailure failure_ = DlssFailure::None;
-    uint64_t retryAt_ = 0;
-    unsigned failures_ = 0;
-    bool usedEarlyRetry_ = false;
+    struct Failure {
+        DlssFeatureKey key{};
+        DlssFailure kind = DlssFailure::None;
+        uint64_t retryAt_ = 0;
+        unsigned failures = 0;
+        bool usedEarlyRetry_ = false;
+
+        bool ready(uint64_t nowMs, bool historyChanged) const noexcept {
+            return kind == DlssFailure::Transient &&
+                   (nowMs >= retryAt_ || (historyChanged && !usedEarlyRetry_));
+        }
+    };
+
+    template<class Entries>
+    static auto findIn(Entries& entries, const DlssFeatureKey& key) noexcept
+        -> decltype(entries.data()) {
+        for (auto& failure : entries)
+            if (failure.kind != DlssFailure::None && failure.key == key) return &failure;
+        return nullptr;
+    }
+    Failure* find(const DlssFeatureKey& key) noexcept { return findIn(entries_, key); }
+    const Failure* find(const DlssFeatureKey& key) const noexcept { return findIn(entries_, key); }
+    void selectPreset(uint64_t generation) noexcept {
+        if (presetGeneration_ == generation) return;
+        clear();
+        presetGeneration_ = generation;
+    }
+
+    std::array<Failure, kFailureSlots> entries_{};
+    uint64_t presetGeneration_ = 0;
+    uint64_t nextUnknownProbe_ = 0;
+    unsigned count_ = 0;
 };
 
 // A named quality uses the same recommendation, float multiplication and
