@@ -38,9 +38,9 @@ struct V { float4 pos:SV_POSITION; nointerpolation uint slot:SLOTID; float2 uv:T
 V vs(uint vertex:SV_VertexID){
  uint triIndex=vertex/3, corner=vertex%3;
  float2 xy=corner==0?float2(-1,-1):corner==1?float2(-1,1):float2(1,-1);
- if(triIndex==1)xy=float2(-xy.x,-xy.y);
- V o;o.pos=float4(xy,0.375+xy.x*0.0625+xy.y*0.125+(triIndex==2?0.25:0),1);
- o.slot=triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
+ if(triIndex==1 || triIndex==5)xy=float2(-xy.x,-xy.y);
+ V o;o.pos=float4(xy,0.375+xy.x*0.0625+xy.y*0.125+(triIndex==2?0.25:triIndex>=4?0.125:0),1);
+ o.slot=triIndex>=4?6:triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
 }
 float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCOORD):SV_TARGET {
  return uv.x+2*uv.y+float(slot)*0.01+pos.z;
@@ -69,6 +69,27 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
        FAILED(dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&combined))||
        !edvr::engineVelocityPatchPs(psCode->GetBufferPointer(),psCode->GetBufferSize(),inputs,bytes,why,false,FlatMarkerKind::None,nullptr,true)||
        FAILED(dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&fine)))return failure(__LINE__);
+    // Guarded overlays select depth from the snapshot at t3 when the owner
+    // matches. Production masks MRT7 to preserve the underlying skin sample.
+    ComPtr<ID3D11PixelShader> guardedCombined,guardedFine;
+    inputs.skinExport=false;
+    if(!edvr::engineVelocityPatchPs(psCode->GetBufferPointer(),psCode->GetBufferSize(),inputs,bytes,why,true)||
+       FAILED(dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&guardedCombined))||
+       !edvr::engineVelocityPatchPs(psCode->GetBufferPointer(),psCode->GetBufferSize(),inputs,bytes,why,true,FlatMarkerKind::None,nullptr,true)||
+       FAILED(dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&guardedFine)))return failure(__LINE__);
+    struct Marker {float code,depth;};
+    std::vector<Marker> substrate(side*side);
+    for(UINT y=0;y<side;++y)for(UINT x=0;x<side;++x){
+        const float nx=(2.f*x+1.f)/side-1.f,ny=1.f-(2.f*y+1.f)/side;
+        const unsigned region=(x+2*y)%3;
+        substrate[y*side+x]={region==0?13.f:region==1?15.f:-1.f,.375f+nx*.0625f+ny*.125f};
+    }
+    D3D11_TEXTURE2D_DESC sd{};target[0].tex[1]->GetDesc(&sd);
+    sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;sd.Usage=D3D11_USAGE_IMMUTABLE;
+    D3D11_SUBRESOURCE_DATA data{substrate.data(),UINT(side*sizeof(Marker)),0};
+    ComPtr<ID3D11Texture2D> snapshot,guardOutput[2],skinBefore[2];ComPtr<ID3D11ShaderResourceView> guardSrv;
+    if(FAILED(dev->CreateTexture2D(&sd,&data,&snapshot))||
+       FAILED(dev->CreateShaderResourceView(snapshot.Get(),nullptr,&guardSrv)))return failure(__LINE__);
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
     dd.DepthFunc=D3D11_COMPARISON_LESS;dd.StencilEnable=TRUE;dd.StencilReadMask=dd.StencilWriteMask=255;
     dd.FrontFace.StencilFunc=D3D11_COMPARISON_ALWAYS;dd.FrontFace.StencilPassOp=D3D11_STENCIL_OP_INCR_SAT;
@@ -78,10 +99,14 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
     dd.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
     dd.FrontFace.StencilFunc=dd.BackFace.StencilFunc=D3D11_COMPARISON_EQUAL;
     if(FAILED(dev->CreateDepthStencilState(&dd,&ties)))return failure(__LINE__);
+    dd.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;dd.StencilEnable=FALSE;
+    ComPtr<ID3D11DepthStencilState> overlay;if(FAILED(dev->CreateDepthStencilState(&dd,&overlay)))return failure(__LINE__);
     D3D11_BLEND_DESC bd{};bd.IndependentBlendEnable=TRUE;
     for(auto& rt:bd.RenderTarget){rt.SrcBlend=rt.SrcBlendAlpha=D3D11_BLEND_ONE;rt.DestBlend=rt.DestBlendAlpha=D3D11_BLEND_ZERO;
         rt.BlendOp=rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;rt.RenderTargetWriteMask=15;}
     ComPtr<ID3D11BlendState> blend;if(FAILED(dev->CreateBlendState(&bd,&blend)))return failure(__LINE__);
+    bd.RenderTarget[7].RenderTargetWriteMask=0;
+    ComPtr<ID3D11BlendState> guardBlend;if(FAILED(dev->CreateBlendState(&bd,&guardBlend)))return failure(__LINE__);
     D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.DepthClipEnable=TRUE;
     ComPtr<ID3D11RasterizerState> raster;if(FAILED(dev->CreateRasterizerState(&rd,&raster)))return failure(__LINE__);
     ctx->ClearState();D3D11_VIEWPORT viewport{0,0,float(side),float(side),0,1};
@@ -91,6 +116,7 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
     ComPtr<ID3D11Texture2D> overlap[2];
     for(unsigned pass=0;pass<2;++pass){
         auto& t=target[pass];const FLOAT zero[4]{};
+        ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
         if(!rate(false,t.color.Get(),t.depth.Get()))return failure(__LINE__);
         for(auto* r:{t.color.Get(),t.slot.Get(),t.skin.Get()})ctx->ClearRenderTargetView(r,zero);
         ctx->ClearDepthStencilView(t.depth.Get(),3,1,0);
@@ -151,6 +177,24 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
             ctx->SetPredication(nullptr,FALSE);
             if(ran || unexpectedIssues || counts.stateRefused!=1)return failure(__LINE__);
         }
+        // Keep the ordinary MRT6 for its independent depth comparison below.
+        // The overlay reuses the actual nonzero E from the preceding skin draw.
+        D3D11_TEXTURE2D_DESC od{};t.tex[1]->GetDesc(&od);
+        ComPtr<ID3D11RenderTargetView> guardRtv;
+        if(FAILED(dev->CreateTexture2D(&od,nullptr,&guardOutput[pass]))||
+           FAILED(dev->CreateRenderTargetView(guardOutput[pass].Get(),nullptr,&guardRtv)))return failure(__LINE__);
+        t.tex[2]->GetDesc(&od);od.BindFlags=0;od.Usage=D3D11_USAGE_STAGING;od.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        if(FAILED(dev->CreateTexture2D(&od,nullptr,&skinBefore[pass])))return failure(__LINE__);
+        ctx->CopyResource(skinBefore[pass].Get(),t.tex[2].Get());
+        rt[6]=guardRtv.Get();ctx->ClearRenderTargetView(guardRtv.Get(),zero);ctx->OMSetRenderTargets(8,rt,t.depth.Get());
+        ctx->OMSetDepthStencilState(overlay.Get(),0);ctx->OMSetBlendState(guardBlend.Get(),nullptr,~0u);
+        ctx->PSSetShader(guardedCombined.Get(),nullptr,0);
+        ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,guardSrv.GetAddressOf());
+        if(!pass)ctx->Draw(6,12);
+        else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),guardRtv.Get(),t.skin.Get(),
+            vs.Get(),guardedCombined.Get(),guardedFine.Get(),ps.Get(),guardBlend.Get(),mirror,3,5,true,counts,
+            [&](bool){ctx->Draw(6,12);},[&]{return rate(true,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
+        ID3D11ShaderResourceView* empty=nullptr;ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,&empty);
     }
     ctx->OMSetRenderTargets(0,nullptr,nullptr);ctx->ClearState();
     for(auto& first:overlap){
@@ -165,18 +209,27 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
     }
     std::vector<uint32_t> depthWitness(side*side);
     bool distinctMaterial=false,sawNear=false,sawTie=false,sawStencil=false,sawSlope=false;
-    for(unsigned k=0;k<4;++k){
-        const unsigned pixelBytes=k==1||k==3?8:k==2?16:4;
+    for(unsigned k=0;k<5;++k){
+        const unsigned pixelBytes=k==0?4:k==2?16:8;
         std::vector<uint8_t> pixels[2];
         for(unsigned pass=0;pass<2;++pass){
-            D3D11_TEXTURE2D_DESC td{};target[pass].tex[k]->GetDesc(&td);td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            auto* output=k==4?guardOutput[pass].Get():target[pass].tex[k].Get();
+            D3D11_TEXTURE2D_DESC td{};output->GetDesc(&td);td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
             ComPtr<ID3D11Texture2D> read;if(FAILED(dev->CreateTexture2D(&td,nullptr,&read)))return failure(__LINE__);
-            ctx->CopyResource(read.Get(),target[pass].tex[k].Get());D3D11_MAPPED_SUBRESOURCE mapped{};
+            ctx->CopyResource(read.Get(),output);D3D11_MAPPED_SUBRESOURCE mapped{};
             if(FAILED(ctx->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped)))return failure(__LINE__);
             pixels[pass].resize(side*side*pixelBytes);
             for(unsigned y=0;y<side;++y)std::memcpy(pixels[pass].data()+y*side*pixelBytes,
                 static_cast<const BYTE*>(mapped.pData)+y*mapped.RowPitch,side*pixelBytes);
             ctx->Unmap(read.Get(),0);
+            if(k==2){
+                if(FAILED(ctx->Map(skinBefore[pass].Get(),0,D3D11_MAP_READ,0,&mapped)))return failure(__LINE__);
+                bool intact=true;
+                for(unsigned y=0;y<side;++y)intact&=std::memcmp(pixels[pass].data()+y*side*pixelBytes,
+                    static_cast<const BYTE*>(mapped.pData)+y*mapped.RowPitch,side*pixelBytes)==0;
+                ctx->Unmap(skinBefore[pass].Get(),0);
+                if(!intact)return failure(__LINE__);
+            }
             if(k==3)for(size_t pos=0;pos<pixels[pass].size();pos+=8)
                 std::memset(pixels[pass].data()+pos+5,0,3); // X24 is not depth or stencil
         }
@@ -188,9 +241,15 @@ float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCO
             if(k==2 && value[2]!=2.f && value[2]!=4.f)return failure(__LINE__);
             if(k==3){sawStencil|=pixels[0][pos+4]==21;
                 if(std::memcmp(&depthWitness[pos/8],pixels[0].data()+pos,4))return failure(__LINE__);}
+            if(k==4){
+                const auto& under=substrate[pos/8];
+                float sceneDepth;std::memcpy(&sceneDepth,&depthWitness[pos/8],4);
+                const float expected=under.code==13.f?sceneDepth:sceneDepth+.125f;
+                if(under.depth!=sceneDepth||value[0]!=13.f||value[1]!=expected)return failure(__LINE__);
+            }
         }
     }
-    return counts.paired==3 && counts.copies==3 && counts.reused==1 && counts.rateRefused==1 &&
+    return counts.paired==4 && counts.copies==4 && counts.reused==1 && counts.rateRefused==1 &&
         distinctMaterial==hardware && sawNear && sawTie && sawSlope && sawStencil;
 }
 }
