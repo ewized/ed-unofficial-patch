@@ -558,15 +558,26 @@ void run(){
   check(submittedSizedNotes==sized1+1,"F198: the submitted size is noted with the mode on too");
   check(offAaDepthNotes==depth0+1,"F202: with a mode on the AA-off depth step is never called (the pass makes the depth view itself): the AA-on path is what it was");
   c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
-  check(treat(dlss,1,1,source.Get())==S_OK&&edvr::nativeTemporalGazeEpoch(),"successful DLSS pair establishes readiness before the refusal regression");
+  check(dlss.invalidate(dlss.context)==S_OK,"invalidate the incomplete left-only frame as the host does");
+  f=frame(13,2);begin(dlss,f);
+  check(treat(dlss,2,1,source.Get())==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,
+        "a right eye in the next frame cannot confirm the invalidated left eye");
+  check(dlss.skipEye(dlss.context,2,0,0,0)==S_OK,"the left eye was withheld");
+  f=frame(13,3);begin(dlss,f);
+  check(treat(dlss,3,0,source.Get())==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,
+        "an eye following a skip still needs its own frame's peer");
+  check(treat(dlss,3,1,source.Get())==S_OK&&edvr::nativeTemporalGazeEpoch(),"successful DLSS pair establishes readiness before the refusal regression");
   check(edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Applied,"matching evaluated features and measured dimensions confirm the stereo preset");
-  ngxEvaluated=false;f=frame(13,2);begin(dlss,f);
-  check(treat(dlss,2,0,source.Get())==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Unavailable,
+  f=frame(13,4);begin(dlss,f);
+  check(dlss.skipEye(dlss.context,4,0,0,0)==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Pending,
+        "a skipped eye revokes the prior complete verdict");
+  ngxEvaluated=false;
+  check(treat(dlss,4,1,source.Get())==S_OK&&edvr::nativeDlssEvidence.status()==edvr::NativeDlssQualityStatus::Unavailable,
         "an own-pass fallback can return pixels but cannot reuse the last NGX evaluation as evidence");
-  f=frame(13,3);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,3,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
+  f=frame(13,5);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,5,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");
   check(!edvr::nativeTemporalGazeEpoch(),"refused temporal output never admits gaze");
-  f=frame(13,4);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
+  f=frame(13,6);p=begin(dlss,f);check(p.tangentShift[0][0]==0&&p.tangentShift[0][1]==0,"refusal disables future jitter");check(dlss.close(dlss.context)==S_OK,"DLSS close");
   edvr::Config::get().setNativeDlssQuality(edvr::DlssQuality::Custom);edvr::nativeDlssEvidence.publish(edvr::DlssQuality::Custom,0.f);
   auto unknown=acquire(d,14,"invalid-mode");f=frame(14,1);begin(unknown,f);check(treat(unknown,1,0,source.Get())==S_FALSE,"unknown mode is off");check(unknown.close(unknown.context)==S_OK,"unknown close");
   { // World scale (common/world_scale.h) moves the eye origins Elite is given: history made at one separation is not history at the next, whatever moved it.

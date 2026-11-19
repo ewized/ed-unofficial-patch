@@ -227,6 +227,7 @@ void clearZoom(State& s) {
   edvr::lightGridCacheNoteZoomedFrame(false);
 }
 void reset(State& s) {
+  edvr::nativeDlssEvidence.invalidate();
   gazeReadyEpoch.store(0,std::memory_order_release);
   s.gazeReadiness.reset(++gazeEpoch);
   for(auto& h:s.history) h={}; s.treated[0]=s.treated[1]=false;
@@ -525,7 +526,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   const uint32_t w=region[2]-region[0],h=region[3]-region[1];if(!w||!h)return E_INVALIDARG;
   const auto namedQuality=edvr::Config::get().nativeDlssQuality();
   const auto noteDlss=[&](const edvr::NativeDlssEvaluation& proof,bool attempted){
-    if(namedQuality!=edvr::DlssQuality::Custom&&edvr::nativeDlssEvidence.observe(eye,namedQuality,w,h,s->recW,s->recH,proof,attempted))
+    if(namedQuality!=edvr::DlssQuality::Custom&&edvr::nativeDlssEvidence.observe(seq,eye,namedQuality,w,h,s->recW,s->recH,proof,attempted))
       edvr::Log::get().note("DLSS quality: eye %u requested=%s NGX=%s input=%ux%u output=%ux%u recommended=%ux%u.",
         eye,edvr::dlssQualityName(namedQuality),attempted?proof.feature:"skipped",w,h,proof.outputWidth,proof.outputHeight,s->recW,s->recH);
   };
@@ -667,6 +668,7 @@ HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint3
   edvr::uiLayerMapRunEnd(nullptr);   // as in treat
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
+  edvr::nativeDlssEvidence.invalidate();
   edvr::nativeFgInvalidateProducer(2);
   // The transition-flash fix withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
   // lets go of the world and resets its resolver's history with the eyes'. A no-op with the key off.

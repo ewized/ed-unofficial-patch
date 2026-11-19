@@ -82,21 +82,35 @@ int main(int argc, char** argv) {
         evidence.publish(selected, .5f);
         const auto ask = dlssGameDimension(3000, selected, .5f);
         CHECK(ask == 3000 && evidence.status() == Status::Pending);
+        uint64_t sequence = 1;
         const auto submit = [&](unsigned eye, float elite, const char* mode, uint32_t output) {
             const auto input = static_cast<uint32_t>(float(ask) * elite);
-            evidence.observe(eye, selected, input, input, 3000, 3000,
+            evidence.observe(sequence, eye, selected, input, input, 3000, 3000,
                              {static_cast<int>(eye), mode, input, input, output, output});
         };
         submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending);
-        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied);
+        ++sequence;
+        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending); // opposite eye, different frame
+        evidence.invalidate();
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending); // old right receipt is gone
+        ++sequence;
+        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending);
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied); // right-first stereo completes
+        ++sequence;
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied); // normal first eye retains last pair
+        ++sequence;
+        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending); // no complete pair in previous frame
         submit(0, 1.f, "dlaa", 3000); CHECK(evidence.status() == Status::Stale);
         submit(0, .5f, "balanced", 3000); CHECK(evidence.status() == Status::Unavailable);
         submit(0, .5f, "balanced", 2750); CHECK(evidence.status() == Status::Stale);
         submit(0, .5f, "performance", 2750); CHECK(evidence.status() == Status::Stale);
-        evidence.observe(0, selected, 1500, 1500, 3000, 3000, {}); CHECK(evidence.status() == Status::Unavailable);
-        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied);
-        evidence.observe(0, selected, 1500, 1500, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Pending);
-        evidence.observe(0, selected, 3000, 3000, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Stale);
+        evidence.observe(sequence, 0, selected, 1500, 1500, 3000, 3000, {}); CHECK(evidence.status() == Status::Unavailable);
+        ++sequence;
+        submit(0, .5f, "performance", 3000); CHECK(evidence.status() == Status::Pending);
+        submit(1, .5f, "performance", 3000); CHECK(evidence.status() == Status::Applied);
+        evidence.observe(++sequence, 0, selected, 1500, 1500, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Pending);
+        evidence.observe(++sequence, 0, selected, 3000, 3000, 3000, 3000, {}, false); CHECK(evidence.status() == Status::Stale);
+        evidence.invalidate(); CHECK(evidence.status() == Status::Stale);
         evidence.publish(DlssQuality::Custom, 0.f, true); CHECK(evidence.status() == Status::Unavailable);
         evidence.publish(DlssQuality::Custom, 0.f); CHECK(evidence.status() == Status::Custom);
     }

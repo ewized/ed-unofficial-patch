@@ -10,7 +10,7 @@ DlssQuality nativeDlssQualityActive() noexcept;
 
 enum class NativeDlssQualityStatus { Custom, Pending, Applied, Stale, Unavailable };
 
-// Applied requires both eyes to have evaluated the requested NGX feature
+// Applied requires both eyes of one frame to have evaluated the requested NGX feature
 // with matching input and output dimensions. Stale requires a restart to
 // recapture Elite's settings. Unavailable includes an NGX refusal at startup
 // (Custom sizing) or a later fallback (the named sizing remains published).
