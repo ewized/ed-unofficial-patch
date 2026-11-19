@@ -451,7 +451,7 @@ int wmain(int argc, wchar_t** argv) {
     shader_tests::run({device.Get(), context.Get(), &check});
     overlay_depth_gpu_tests::run(device.Get(), context.Get(), &check);
     check(witness_gpu::run(device.Get(),context.Get(),&D3DCompile,
-        [](bool,ID3D11RenderTargetView*,ID3D11DepthStencilView*){return true;},false),
+        [](witness_gpu::RateStep,ID3D11RenderTargetView*,ID3D11DepthStencilView*){return true;},false),
         "private depth batch reproduces every depth/stencil bit, slot and skin sample across overlapping and coplanar geometry");
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});

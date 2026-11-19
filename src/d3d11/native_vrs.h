@@ -24,6 +24,7 @@ struct NativeVrsStatus {
     uint64_t ticks=0,providerPolls=0,validPairs=0,invalidPairs=0,staleRefusals=0;
     uint64_t worldCalls=0,worldAccepted=0,fullRateCalls=0,invalidations=0;
     uint64_t expandedMaterialAccepted[2]{};
+    uint64_t retainedWitnessReactivations=0;
     uint64_t mapUpdates[2]{},mapBytes=0,rateSets=0,resourceSets=0,driverErrors=0;
     uint64_t contextRefusals=0,frameRefusals=0,targetRefusals=0;
     float sharpRadius=.15f,transitionRadius=.45f;

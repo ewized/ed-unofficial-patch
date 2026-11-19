@@ -8,6 +8,7 @@
 
 namespace witness_gpu {
 using Microsoft::WRL::ComPtr;
+enum class RateStep {BeginPass,PrepareWitness,Material,StrongFull};
 inline bool failure(int line){
     std::fprintf(stderr,"witness_gpu_cases.h line %d failed\n",line);return false;
 }
@@ -141,12 +142,12 @@ Witness referencePs(V i){
         const bool split=pass==1,independent=pass==2;
         auto& t=target[pass];const FLOAT zero[4]{};
         ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
-        if(!rate(false,t.color.Get(),t.depth.Get()))return failure(__LINE__);
+        if(!rate(RateStep::BeginPass,t.color.Get(),t.depth.Get()))return failure(__LINE__);
         for(auto* r:{t.color.Get(),t.slot.Get(),t.skin.Get()})ctx->ClearRenderTargetView(r,zero);
         ctx->ClearDepthStencilView(t.depth.Get(),3,1,0);
         ID3D11RenderTargetView* rt[8]{};rt[0]=t.color.Get();rt[6]=t.slot.Get();rt[7]=t.skin.Get();
         ctx->OMSetRenderTargets(8,rt,t.depth.Get());ctx->PSSetShader(independent?reference.Get():combined.Get(),nullptr,0);
-        auto fineRate=[&]{return rate(false,t.color.Get(),t.depth.Get());};
+        auto fineRate=[&]{return rate(RateStep::PrepareWitness,t.color.Get(),t.depth.Get());};
         struct Api{
             ID3D11DeviceContext* ctx;decltype(fineRate)& restored;
             bool full(){return restored();}
@@ -172,7 +173,10 @@ Witness referencePs(V i){
             if(!split)issue(true);
             else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),t.slot.Get(),t.skin.Get(),
                 vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get(),mirror,step>=2?2:1,step+1,true,counts,issue,
-                [&]{return step!=2 && rate(true,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
+                [&]{
+                    if(step==2){rate(RateStep::StrongFull,t.color.Get(),t.depth.Get());return false;}
+                    return rate(RateStep::Material,t.color.Get(),t.depth.Get());
+                }))return failure(__LINE__);
             if(split && step==2 && !combinedFallback)return failure(__LINE__);
             if(!independent && step==0){
                 D3D11_TEXTURE2D_DESC td{};t.tex[1]->GetDesc(&td);
@@ -218,7 +222,7 @@ Witness referencePs(V i){
         if(!pass)ctx->DrawIndexed(6,12,0);
         else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),guardRtv.Get(),t.skin.Get(),
             vs.Get(),guardedCombined.Get(),guardedFine.Get(),ps.Get(),guardBlend.Get(),mirror,3,5,true,counts,
-            [&](bool){ctx->DrawIndexed(6,12,0);},[&]{return rate(true,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
+            [&](bool){ctx->DrawIndexed(6,12,0);},[&]{return rate(RateStep::Material,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
         ID3D11ShaderResourceView* empty=nullptr;ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,&empty);
     }
     ctx->OMSetRenderTargets(0,nullptr,nullptr);ctx->ClearState();

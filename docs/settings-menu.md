@@ -4,6 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** no material-family or input-semantic allowlist is used. Broad coverage is the normal behavior, with independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions, and this behavior is retained. Automated validation of that build and matched-scene performance remain unmeasured.
+- **VRS performance investigation:** on-foot slowdown reported with broad coverage. A `f93ef4e6` VRS-on window recorded 57.035 ms median application CPU elapsed time and approximately 242,000 NVAPI rate/resource setters per second; nearby off windows were faster but were not controlled scene matches. A scoped retained-map witness path is under comparison; freshness and UI barriers remain unchanged.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.

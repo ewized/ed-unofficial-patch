@@ -110,6 +110,7 @@ struct VendorStateCache {
     void invalidate() noexcept {ratesKnown=enabled=bindingKnown=false;binding=0;}
     bool fullRateKnown()const noexcept {return ratesKnown&&!enabled&&bindingKnown&&!binding;}
     bool active(uintptr_t view)const noexcept {return ratesKnown&&enabled&&bindingKnown&&view&&binding==view;}
+    bool retainedForWitness(uintptr_t view)const noexcept {return ratesKnown&&!enabled&&bindingKnown&&view&&binding==view;}
     bool acceptRates(int result,bool on) noexcept {
         if(result){invalidate();return false;}ratesKnown=true;enabled=on;return true;
     }
@@ -117,6 +118,12 @@ struct VendorStateCache {
         if(result){invalidate();return false;}bindingKnown=true;binding=view;return true;
     }
 };
+// NV_D3D11_VIEWPORTS_SHADING_RATE_DESC_V1::numViewports == 0 globally
+// disables VRS. Only the private witness may retain its current eye's SRRV.
+template<class Rates>
+bool pauseForWitness(VendorStateCache& cache,uintptr_t view,Rates&& rates) {
+    return cache.active(view) && cache.acceptRates(rates(false),false);
+}
 template<class Rates,class Resource>
 bool applyFullRate(VendorStateCache& cache,Rates&& rates,Resource&& resource) {
     bool ok=true;

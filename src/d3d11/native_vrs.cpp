@@ -57,6 +57,7 @@ struct Shared {
     std::atomic<uint64_t> ticks{0},polls{0},valid{0},invalid{0},stale{0};
     std::atomic<uint64_t> world{0},accepted{0},full{0},invalidations{0};
     std::atomic<uint64_t> expandedAccepted[2]{};
+    std::atomic<uint64_t> retainedWitnessReactivations{0};
     std::atomic<uint64_t> updates[2]{},bytes{0},rates{0},resources{0},errors{0};
     std::atomic<uint64_t> contextRefusals{0},frameRefusals{0},targetRefusals{0};
 };
@@ -463,7 +464,17 @@ bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11Ren
     auto& s=state();
     try {
         syncInvalidation(s);
-        return !s.failed && prepareMap(s,eye,rtv,dsv,projection) && fullRate(s) && nativeVrsWitnessReady(context);
+        if(s.failed || !prepareMap(s,eye,rtv,dsv,projection))return false;
+        const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
+        if(s.cache.active(view)){
+            if(!native_vrs::pauseForWitness(s.cache,view,[&](bool on){return setRates(s,on);})){
+                refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));
+                fullRate(s);return false;
+            }
+            publish(s);
+        }else if(!fullRate(s))return false;
+        if(nativeVrsWitnessReady(context))return true;
+        fullRate(s);return false;
     }catch(...){refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
 }
 bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,const NativeVrsProjection* projection,bool expandedMaterial) noexcept {
@@ -487,7 +498,9 @@ bool nativeVrsBeforeWorld(ID3D11DeviceContext* context,unsigned eye,ID3D11Render
         if(!receiptFresh(s)){++a.stale;a.failure.store(NativeVrsFailure::GazeStale,std::memory_order_relaxed);fullRate(s);return false;}
         if(s.gazeEpoch!=nativeTemporalGazeEpoch()){fullRate(s);return false;}
         const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
+        const bool retained=s.cache.retainedForWitness(view);
         if(!activateMap(s,view))return false;
+        if(retained)++a.retainedWitnessReactivations;
         if(a.highlight.load(std::memory_order_relaxed))s.eyes[eye].highlightFrame=s.frame;
         if(expandedMaterial)++a.expandedAccepted[eye];
         ++a.accepted;return true;
@@ -541,6 +554,7 @@ NativeVrsStatus nativeVrsStatus() noexcept {
     for(unsigned eye=0;eye<2;++eye)out.expandedMaterialAccepted[eye]=a.expandedAccepted[eye].load();
     for(unsigned i=0;i<2;++i)out.mapUpdates[i]=a.updates[i].load();
     out.mapBytes=a.bytes.load();out.rateSets=a.rates.load();out.resourceSets=a.resources.load();out.driverErrors=a.errors.load();
+    out.retainedWitnessReactivations=a.retainedWitnessReactivations.load();
     out.contextRefusals=a.contextRefusals.load();out.frameRefusals=a.frameRefusals.load();out.targetRefusals=a.targetRefusals.load();return out;
 }
 void nativeVrsPsMeasureConfigure(bool enabled,NativeVrsPsSink sink)noexcept {

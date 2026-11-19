@@ -1139,17 +1139,21 @@ template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,Draw draw
     if(!d || d->context!=ctx || !d->splitWitness || !nativeVrsWitnessReady(ctx) ||
        !g_state->realPSSetShader || !g_state->realOMSetRenderTargets)return false;
     struct Internal {bool old=g_witnessInternal;Internal(){g_witnessInternal=true;}~Internal(){g_witnessInternal=old;}} internal;
-    struct Issue {ID3D11DeviceContext* ctx;Draw& draw;} issue{ctx,draw};
+    struct Issue {
+        ID3D11DeviceContext* ctx;Draw& draw;bool finePending=false;
+        ~Issue(){if(finePending)nativeVrsFullRate(ctx);}
+    } issue{ctx,draw};
     bool safe;
     {std::lock_guard<std::mutex> lock(g_state->witnessQueryMutex);safe=g_state->witnessQueries.safe();}
     return engineVelocitySplitMaterial({ctx,d->rtv,d->dsv,d->eye,g_state->witnessEpoch.load(),g_state->witnessDraw.load(),
         g_state->witnessBatchHooks,safe&&!vrsCoverageEnabled()&&!vrsWorkReferenceEnabled()&&!nativeVrsPsMeasureLive(),&issue,
         [](void* user,bool material){static_cast<Issue*>(user)->draw(material);},
         [](void* user,bool coarse){
-            auto* context=static_cast<Issue*>(user)->ctx;
-            if(nativeOriginalRate(context,true,!coarse))return true;
-            if(coarse)nativeVrsFullRate(context);
-            return false;
+            auto& current=*static_cast<Issue*>(user);
+            const bool ready=nativeOriginalRate(current.ctx,true,!coarse);
+            if(coarse && !ready)nativeVrsFullRate(current.ctx);
+            current.finePending=!coarse && ready;
+            return ready;
         }});
 }
 void nativeBeforeReissue(ID3D11DeviceContext* context) {
@@ -7193,8 +7197,8 @@ void vScreenFrameBoundary() {
             Log::get().noteReserved("native world VRS: configured=%u driver_ready=%u refused=%u magic_absent=%u vendor_known=%u full_rate_ack=%u coarse_ack=%u failure=%u driver_status=%d ticks=%llu provider_polls=%llu valid_pairs=%llu invalid_pairs=%llu stale=%llu world_calls=%llu world_accepted=%llu full_rate_calls=%llu invalidations=%llu updates=%llu,%llu map_bytes=%llu rate_sets=%llu resource_sets=%llu driver_errors=%llu context_refused=%llu frame_refused=%llu target_refused=%llu world_ps_reduction_verified=0 gpu_benefit_verified=0 sensor_timestamp_unavailable=1 projection_mapping_verified=0 physical_calibration_verified=0 coordinates_logged=0",
                 n.configured?1u:0u,n.driverReady?1u:0u,n.refused?1u:0u,n.magicAbsent?1u:0u,n.vendorStateKnown?1u:0u,n.fullRateAcknowledged?1u:0u,n.coarseAcknowledged?1u:0u,unsigned(n.failure),n.lastDriverStatus,n.ticks,n.providerPolls,n.validPairs,n.invalidPairs,n.staleRefusals,n.worldCalls,n.worldAccepted,n.fullRateCalls,n.invalidations,n.mapUpdates[0],n.mapUpdates[1],n.mapBytes,n.rateSets,n.resourceSets,n.driverErrors,n.contextRefusals,n.frameRefusals,n.targetRefusals);
             engineVelocityReportWitness();
-            Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu",
-                n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1]);}
+            Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu retained_witness_reactivations=%llu",
+                n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1],n.retainedWitnessReactivations);}
     }
     if (g_state && g_state->ownerCtx) vrsCoverageTick(g_state->ownerCtx);
     // The AA-off path's skipped shadows (2026-10-13): once engine velocity is read again, VsSrv33 and Blend hold
