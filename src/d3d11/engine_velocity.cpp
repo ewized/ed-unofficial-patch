@@ -2813,7 +2813,7 @@ static bool queueWitness(const EngineWitnessIssue& issue,ID3D11RenderTargetView*
     }
     if(batch.draws.empty()){
         auto& p=batch.state.emplace();
-        if(!p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get())){
+        if(!p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer)){
             ++batch.stateRefused;batch.state.reset();return false;
         }
         NativeVrsCohortReceipt prearm;

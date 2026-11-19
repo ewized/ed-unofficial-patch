@@ -14,20 +14,22 @@ template<class T,UINT N> struct WitnessBindings {
     WitnessBindings(const WitnessBindings&)=delete;
     ~WitnessBindings(){for(auto* p:slots)if(p)p->Release();}
 };
-template<class Object,class Desc> bool witnessResourceFlags(ID3D11Resource* resource,UINT& flags,bool texture){
+using WitnessMappedBuffer=bool (*)(ID3D11Resource*) noexcept;
+template<class Object,class Desc> bool witnessResourceFlags(ID3D11Resource* resource,UINT& flags,bool texture,WitnessMappedBuffer mapped=nullptr){
     WitnessPtr<Object> object;
     if(FAILED(resource->QueryInterface(IID_PPV_ARGS(object.GetAddressOf()))))return false;
     Desc desc{};object->GetDesc(&desc);flags=desc.MiscFlags;
     // Texture memory can also be written through IDXGISurface::Map, outside
     // the observed immediate-context Map/Unmap transaction.
-    return !texture || !desc.CPUAccessFlags;
+    if(texture)return !desc.CPUAccessFlags;
+    return !(mapped && (desc.CPUAccessFlags&D3D11_CPU_ACCESS_WRITE) && mapped(resource));
 }
-inline bool witnessLocalResource(ID3D11Resource* resource) {
+inline bool witnessLocalResource(ID3D11Resource* resource,WitnessMappedBuffer mapped=nullptr) {
     if(!resource)return true;
     D3D11_RESOURCE_DIMENSION dim{};resource->GetType(&dim);
     UINT flags=0;
     switch(dim){
-    case D3D11_RESOURCE_DIMENSION_BUFFER:if(!witnessResourceFlags<ID3D11Buffer,D3D11_BUFFER_DESC>(resource,flags,false))return false;break;
+    case D3D11_RESOURCE_DIMENSION_BUFFER:if(!witnessResourceFlags<ID3D11Buffer,D3D11_BUFFER_DESC>(resource,flags,false,mapped))return false;break;
     case D3D11_RESOURCE_DIMENSION_TEXTURE1D:if(!witnessResourceFlags<ID3D11Texture1D,D3D11_TEXTURE1D_DESC>(resource,flags,true))return false;break;
     case D3D11_RESOURCE_DIMENSION_TEXTURE2D:if(!witnessResourceFlags<ID3D11Texture2D,D3D11_TEXTURE2D_DESC>(resource,flags,true))return false;break;
     case D3D11_RESOURCE_DIMENSION_TEXTURE3D:if(!witnessResourceFlags<ID3D11Texture3D,D3D11_TEXTURE3D_DESC>(resource,flags,true))return false;break;
@@ -37,10 +39,10 @@ inline bool witnessLocalResource(ID3D11Resource* resource) {
         D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS|D3D11_RESOURCE_MISC_BUFFER_STRUCTURED|D3D11_RESOURCE_MISC_RESOURCE_CLAMP;
     return !(flags&~ordinary);
 }
-inline bool witnessLocalView(ID3D11View* view){
+inline bool witnessLocalView(ID3D11View* view,WitnessMappedBuffer mapped=nullptr){
     if(!view)return true;
     WitnessPtr<ID3D11Resource> resource;view->GetResource(&resource);
-    return resource && witnessLocalResource(resource.Get());
+    return resource && witnessLocalResource(resource.Get(),mapped);
 }
 struct WitnessStageInputs {
     static constexpr UINT buffers=D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
@@ -50,9 +52,9 @@ struct WitnessStageInputs {
     UINT first[buffers]{},count[buffers]{};
     WitnessBindings<ID3D11ShaderResourceView,resources> srv;
     WitnessBindings<ID3D11SamplerState,samplers> sampler;
-    bool local()const {
-        for(auto* b:cb.slots)if(!witnessLocalResource(b))return false;
-        for(auto* v:srv.slots)if(!witnessLocalView(v))return false;
+    bool local(WitnessMappedBuffer mapped)const {
+        for(auto* b:cb.slots)if(!witnessLocalResource(b,mapped))return false;
+        for(auto* v:srv.slots)if(!witnessLocalView(v,mapped))return false;
         return true;
     }
 };
@@ -81,7 +83,7 @@ struct WitnessPipeline {
     // this physical pipeline untouched until its synchronous replay.
     bool capture(ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* dsv,
         ID3D11RenderTargetView* marker,ID3D11RenderTargetView* skin,ID3D11VertexShader* vs,ID3D11PixelShader* ps,
-        ID3D11PixelShader* finePs,ID3D11PixelShader* materialPs,ID3D11BlendState* blendState){
+        ID3D11PixelShader* finePs,ID3D11PixelShader* materialPs,ID3D11BlendState* blendState,WitnessMappedBuffer mapped=nullptr){
         if(!ctx||!color||!dsv||!marker||!vs||!ps||!finePs||!materialPs||!blendState)return false;
         context=ctx;WitnessPtr<ID3D11DeviceContext1> ranged;
         if(FAILED(context.As(&ranged)) || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
@@ -100,20 +102,20 @@ struct WitnessPipeline {
         ctx->OMGetRenderTargets(8,rt.slots,&depth);
         ctx->OMGetBlendState(&blend,factors,&sampleMask);ctx->OMGetDepthStencilState(&depthState,&stencil);
         if(depth.Get()!=dsv||rt.slots[0]!=color||rt.slots[6]!=marker||rt.slots[7]!=skin||blend.Get()!=blendState)return false;
-        for(auto* v:rt.slots)if(!witnessLocalView(v))return false;
-        if(!witnessLocalView(depth.Get()))return false;
+        for(auto* v:rt.slots)if(!witnessLocalView(v,mapped))return false;
+        if(!witnessLocalView(depth.Get(),mapped))return false;
         ctx->IAGetInputLayout(&layout);ctx->IAGetPrimitiveTopology(&topology);
         ctx->IAGetVertexBuffers(0,UINT(std::size(vertices.slots)),vertices.slots,strides,offsets);
         ctx->IAGetIndexBuffer(&index,&indexFormat,&indexOffset);
-        for(auto* b:vertices.slots)if(!witnessLocalResource(b))return false;
-        if(!witnessLocalResource(index.Get()))return false;
+        for(auto* b:vertices.slots)if(!witnessLocalResource(b,mapped))return false;
+        if(!witnessLocalResource(index.Get(),mapped))return false;
         ctx->RSGetState(&raster);ctx->RSGetViewports(&viewportCount,viewport);ctx->RSGetScissorRects(&scissorCount,scissors);
         ranged->VSGetConstantBuffers1(0,vsInputs.buffers,vsInputs.cb.slots,vsInputs.first,vsInputs.count);
         ranged->PSGetConstantBuffers1(0,psInputs.buffers,psInputs.cb.slots,psInputs.first,psInputs.count);
         ctx->VSGetShaderResources(0,vsInputs.resources,vsInputs.srv.slots);ctx->PSGetShaderResources(0,psInputs.resources,psInputs.srv.slots);
         ctx->VSGetSamplers(0,vsInputs.samplers,vsInputs.sampler.slots);ctx->PSGetSamplers(0,psInputs.samplers,psInputs.sampler.slots);
         fine=finePs;material=materialPs;
-        return vsInputs.local() && psInputs.local();
+        return vsInputs.local(mapped) && psInputs.local(mapped);
     }
 };
 

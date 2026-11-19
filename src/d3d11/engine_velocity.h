@@ -319,6 +319,7 @@ struct EngineWitnessBatchInput {
     void (*replay)(ID3D11DeviceContext*,const native_vrs::WitnessDraw&,bool material)=nullptr;
     decltype(&nativeVrsSetCohortRate) rate=nullptr;
     bool (*invalidateFrame)(ID3D11DeviceContext*,unsigned eye,uint64_t outputGeneration,uint64_t frame) noexcept=nullptr;
+    bool (*mappedBuffer)(ID3D11Resource*) noexcept=nullptr; // consulted only during first capture
 };
 struct EngineWitnessIssue {
     ID3D11DeviceContext* ctx;

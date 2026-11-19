@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/native_vrs_ps_measure.h"
+#include "witness_map_cases.h"
 #include <d3dcompiler.h>
 #include <string>
 #include <set>
@@ -87,6 +88,7 @@ inline void run(){
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
     const HRESULT made=create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context);
     check(SUCCEEDED(made),"WARP device for actual recorder");if(FAILED(made))return;
+    witness_map_fixture::run(device.Get(),context.Get(),check);
     const char shader[]="float4 VS(uint id:SV_VertexID):SV_Position { return float4(id==1?3:-1,id==2?3:-1,0,1); } float4 PS():SV_Target { return float4(.2,.3,.4,1); }";
     ComPtr<ID3DBlob> vb,pb,error;
     const HRESULT vc=compile(shader,sizeof(shader)-1,nullptr,nullptr,nullptr,"VS","vs_5_0",0,0,&vb,&error);

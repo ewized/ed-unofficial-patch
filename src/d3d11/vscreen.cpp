@@ -7,6 +7,7 @@
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "native_vrs.h"
 #include "native_vrs_barrier_hooks.h"
+#include "native_vrs_witness_maps.h"
 #include "../common/native_temporal.h"
 #include "../common/native_witness_drain.h"
 #include "native_vrs_cohort_probe.h"
@@ -596,10 +597,7 @@ struct State : DrawHot {
     std::atomic<uint64_t> witnessQueryRefused{0},witnessMapRefused{0},witnessObserverRefused{0};
     std::atomic<uint64_t> witnessProjectionRefused{0},witnessOutputRefused{0},witnessOffered{0};
     std::atomic<uint64_t> witnessInputs{1},witnessPipeline{1};
-    struct WitnessMap { ID3D11Resource* resource=nullptr; UINT sub=0; };
-    std::array<WitnessMap,32> witnessMaps{};
-    unsigned witnessMappings=0;
-    bool witnessMappingUncertain=false;
+    native_vrs::WitnessMappedBuffers witnessMaps;
     FlatReplayQueryTracker witnessQueries;
     std::mutex witnessQueryMutex;
     std::atomic<uint64_t> witnessEpoch{1},witnessDraw{0};
@@ -1330,6 +1328,11 @@ void replayWitnessDraw(ID3D11DeviceContext* ctx,const native_vrs::WitnessDraw& d
     default:break; // admission rejected unknown draw kinds
     }
 }
+bool witnessMappedBuffer(ID3D11Resource* buffer) noexcept {
+    if(!g_state->witnessMaps.conflicts(buffer))return false;
+    g_state->witnessMapRefused.fetch_add(1,std::memory_order_relaxed);
+    return true;
+}
 __declspec(noinline) bool nativeSplitCohort(const EngineWitnessIssue& original,const NativeWorldDecision* d,native_vrs::WitnessDraw args) {
     auto* ctx=original.ctx;
     unsigned ready=0;
@@ -1342,6 +1345,7 @@ __declspec(noinline) bool nativeSplitCohort(const EngineWitnessIssue& original,c
         batch.pipeline=g_state->witnessPipeline.load(std::memory_order_relaxed);
         batch.outputGeneration=nativeTemporalVrsOutputGeneration(ctx,batch.projection.sequence);
         batch.certified=batch.outputGeneration!=0;batch.expandedMaterial=d->expandedMaterial;
+        if(g_state->witnessMaps.needsCheck())batch.mappedBuffer=&witnessMappedBuffer;
         batch.replay=&replayWitnessDraw;batch.rate=&nativeVrsSetCohortRate;batch.invalidateFrame=&nativeTemporalInvalidateVrsEye;
         if(batch.certified)g_state->witnessOffered.fetch_add(1,std::memory_order_relaxed);else g_state->witnessOutputRefused.fetch_add(1,std::memory_order_relaxed);
     }else g_state->witnessProjectionRefused.fetch_add(1,std::memory_order_relaxed);
@@ -1386,7 +1390,6 @@ template<class Draw> bool nativeSplitOriginal(ID3D11DeviceContext* ctx,native_vr
         }};
     if(kWitnessReplayEnabled && vScreenWitnessCohortQualified(ctx)){
         if(!request.querySafe)g_state->witnessQueryRefused.fetch_add(1,std::memory_order_relaxed);
-        else if(g_state->witnessMappings || g_state->witnessMappingUncertain)g_state->witnessMapRefused.fetch_add(1,std::memory_order_relaxed);
         else if(witnessDrawMayConsume(ctx))g_state->witnessObserverRefused.fetch_add(1,std::memory_order_relaxed);
         else return nativeSplitCohort(request,d,args);
     }
@@ -3980,17 +3983,7 @@ __declspec(noinline) bool mapBufferDesc(ID3D11Resource* res, UINT* byteWidth,
 void witnessMapped(ID3D11DeviceContext* ctx,ID3D11Resource* resource,UINT sub,bool mapped) {
     if(!g_state->witnessCohortCovered || ctx!=g_state->ownerCtx || GetCurrentThreadId()!=g_state->witnessOwnerThread ||
        g_witnessInternal || g_engineWitnessCohortReplaying)return;
-    if(!resource || g_state->witnessMappingUncertain){g_state->witnessMappingUncertain=true;return;}
-    for(auto& item:g_state->witnessMaps){
-        if(item.resource!=resource || item.sub!=sub)continue;
-        if(mapped)g_state->witnessMappingUncertain=true;
-        else {item={};--g_state->witnessMappings;}
-        return;
-    }
-    if(mapped)for(auto& item:g_state->witnessMaps)if(!item.resource){
-        item={resource,sub};++g_state->witnessMappings;return;
-    }
-    g_state->witnessMappingUncertain=true;
+    g_state->witnessMaps.observe(resource,sub,mapped);
 }
 
 HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* res,
@@ -4050,6 +4043,7 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     } else {
         hr = s->realMap(self, res, sub, type, flags, mapped);
     }
+    if(kWitnessReplayEnabled && g_state->witnessCohortCovered && SUCCEEDED(hr))witnessMapped(self,res,sub,true);
     // THE MAP SUCCEEDED AND GAVE US SUBRESOURCE 0, asked once.
     //
     // Every tee below used to spell `SUCCEEDED(hr) && mapped && sub == 0`
@@ -4186,7 +4180,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         s->sceneCbBytes = 0;
         mapBufferDesc(res, &s->sceneCbBytes);
     }
-    if(kWitnessReplayEnabled && g_state->witnessCohortCovered && SUCCEEDED(hr))witnessMapped(self,res,sub,true);
     return hr;
 }
 
@@ -7650,6 +7643,11 @@ void vScreenFrameBoundary() {
                 unsigned(g_state->witnessOffers.covered),unsigned(q.ownerThread),unsigned(q.barriersInstalled),unsigned(q.lifecycleCovered),unsigned(q.revoked),
                 g_state->witnessOffered.load(std::memory_order_relaxed),g_state->witnessQueryRefused.load(std::memory_order_relaxed),g_state->witnessMapRefused.load(std::memory_order_relaxed),g_state->witnessObserverRefused.load(std::memory_order_relaxed),
                 g_state->witnessProjectionRefused.load(std::memory_order_relaxed),g_state->witnessOutputRefused.load(std::memory_order_relaxed));
+            if(q.ownerThread){
+                const auto& maps=g_state->witnessMaps;
+                Log::get().noteReserved("native VRS writable buffer maps: open=%zu peak=%zu unmatched_unmaps=%llu duplicate_maps=%llu storage_failures=%llu identity_failures=%llu unknown=%u",
+                    maps.open(),maps.peak,maps.unmatched,maps.duplicates,maps.storageFailures,maps.identityFailures,unsigned(maps.unknown));
+            }
             Log::get().noteReserved("native VRS material coverage: outside_old_shader_list_accepted_left=%llu right=%llu retained_witness_reactivations=%llu",
                 n.expandedMaterialAccepted[0],n.expandedMaterialAccepted[1],n.retainedWitnessReactivations);}
     }
