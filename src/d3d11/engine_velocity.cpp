@@ -2707,7 +2707,7 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
             inputs.skinExport=!guarded && fam.psExports[g_bound.originalPs];
             inputs.skinZero=!guarded && fam.psZeroes[g_bound.originalPs];
             std::vector<BYTE> derived;std::string why;
-            if(native_vrs::materialPixelShader(bytes.data(),bytes.size())&&
+            if(native_vrs::compatibleScenePixelShader(bytes.data(),bytes.size())&&
                engineVelocityPatchPs(bytes.data(),bytes.size(),inputs,derived,why,guarded,
                    dxbc_engine_velocity_detail::FlatMarkerKind::None,nullptr,true)){
                 Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);

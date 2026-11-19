@@ -124,13 +124,14 @@ int main(int argc,char** argv){
      std::ifstream stream(std::string(argv[1])+"/tools/flat_temporal_test/fixtures/"+file,std::ios::binary);
      const std::string bytes{std::istreambuf_iterator<char>(stream),{}};
      check(!bytes.empty(),"retail DXBC fixture present");
-     return edvr::native_vrs::materialPixelShader(bytes.data(),bytes.size());
+     return edvr::native_vrs::compatibleScenePixelShader(bytes.data(),bytes.size());
  };
  check(capturedMaterial("ps_4E4FF61E8A08FC7E.dxbc")&&capturedMaterial("ps_B7D50283329322C3.dxbc")&&
        capturedMaterial("ps_76849D64AC657DB9.dxbc"),"stock forward canopy, station material and planet-surface creation bytes earn material receipts");
- check(!capturedMaterial("ps_7EAC71963E66C5FE.dxbc")&&!capturedMaterial("ps_81812EF97FB4A361.dxbc")&&
-       !capturedMaterial("ps_F0BAE053476F8730.dxbc")&&!capturedMaterial("ps_0DF03E64DF9DBEF1.dxbc"),
-       "screen shadow, light volume, screen filter and discard material cannot earn receipts");
+ check(!eligible(0x53211E8C072CD02Eull,0x7EAC71963E66C5FEull,leftMaterial)&&
+       !eligible(0x0357BBB2DEE43C1Full,0x81812EF97FB4A361ull,leftMaterial)&&
+       !eligible(0x525D47E3D5E2EFF4ull,0xF0BAE053476F8730ull,leftMaterial)&&!capturedMaterial("ps_0DF03E64DF9DBEF1.dxbc"),
+       "draw policy excludes known screen shadows, lights and filters; shader compatibility excludes discard");
  check(!eligible(0x53211E8C072CD02Eull,0x7EAC71963E66C5FEull,leftMaterial,false,'N',3)&&
        !eligible(0x7E38A6AA1269C901ull,0x7CECABDE34FFBE9Eull,rightMaterial,false,'N',4)&&
        !eligible(0x963B52C73B4143ACull,0x50364C9D994141D5ull,leftMaterial,false,'X',84,25),

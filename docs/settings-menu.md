@@ -3,7 +3,7 @@
 ## Status
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
-- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. GPU testing at `3d287e87` confirmed 1x1, 2x2 and 4x4 shading and exact fine motion data under simulated gaze. Live hangar counters confirmed expanded material coverage and depth-copy reuse. In-game FPS gains, physical eye tracking and perceived image quality were not measured.
+- **VRS material coverage (experimental, untested).** Original scene pixel shaders can now qualify regardless of material family or input semantic names. The earlier, narrower build at `3d287e87` demonstrated 1x1, 2x2 and 4x4 shading and exact fine motion data under simulated gaze. The broader build awaits physical headset testing.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -944,20 +944,19 @@ region** beside **Frame generation**. The external Magic file controls and the
 separate VRS/Beyond page are removed. The native VRS configuration names remain
 `experimental.eye_tracked_foveation` and `experimental.foveation_focus`.
 
-Material coverage no longer depends on two shader hash pairs. Qualified
-original scene shaders can use the current eye's map after their creation
-bytes and actual bindings are checked. Captured opaque canopy, station and
-terrain shaders qualify without motion outputs. The gate also requires a
-settled eye depth target, matching viewport and valid gaze/frame ownership.
+The experimental build accepts compatible original scene pixel shaders
+regardless of material family or input semantic names. This broader
+eligibility is untested. The owner checks shader bytecode, actual bindings,
+the settled eye depth target, the viewport and the current gaze sample.
 Qualified opaque shaders that carry MRT6/7 motion data use a separate,
 minimal full-rate witness pass against a private depth/stencil surface.
 Their material pass then runs at the requested rate without overwriting
 the fine motion data. Adjacent compatible draws can reuse the depth copy;
 intervening writers invalidate it. A late rate refusal restores the original
-combined draw. Windows/WARP and RTX 5090 validation passed at `3d287e87`,
-including sloped overlap, coplanar ties, stencil, skin and guarded overlays.
+combined draw. The earlier build at `3d287e87` passed Windows/WARP and RTX
+5090 validation for sloped overlap, coplanar ties, stencil, skin and guarded overlays.
 
-HUD/menu draws, screen resolves, lighting passes, cutouts, explicit shader
+Recognized HUD/menu draws, known screen resolves and lighting passes, cutouts, explicit shader
 depth or sample-mask outputs, UAV side effects and unproven state remain
 full rate. The split also refuses counting queries, predication, stream
 output and unsupported geometry stages; timing queries remain supported.

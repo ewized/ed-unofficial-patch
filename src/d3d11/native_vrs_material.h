@@ -8,14 +8,14 @@ namespace edvr::native_vrs {
 
 // Read-only subset of the retail SM5 DXBC format in dxbc_container.h. This
 // runs on successful game PS creation, including when VRS is toggled on later.
-// Keep only the receipt, not the bytecode; unknown chunk layouts fail closed.
-inline bool materialPixelShader(const void* bytecode, size_t size) noexcept {
+// The receipt covers color outputs and read-only instructions. Draw-time
+// eye, target and pass checks decide where it can be used.
+inline bool compatibleScenePixelShader(const void* bytecode, size_t size) noexcept {
     if (!bytecode || size < 32 || size > 1024 * 1024) return false;
     const auto* bytes = static_cast<const uint8_t*>(bytecode);
     const auto word = [&](size_t at) { uint32_t value; std::memcpy(&value, bytes + at, 4); return value; };
     const uint32_t chunks = word(28);
     if (std::memcmp(bytes, "DXBC", 4) || word(24) != size || chunks > 128 || chunks > (size - 32) / 4) return false;
-    bool normal = false, tangent = false, surfaceUv = false, terrainUv = false, lightingPosition = false;
     bool input = false, output = false, program = false, color = false;
     for (uint32_t index = 0; index < chunks; ++index) {
         const size_t at = word(32 + 4 * index);
@@ -35,17 +35,11 @@ inline bool materialPixelShader(const void* bytecode, size_t size) noexcept {
                 const char* name = reinterpret_cast<const char*>(bytes + base + offset);
                 const auto* end = static_cast<const char*>(std::memchr(name, 0, length - offset));
                 if (!end) return false;
-                const std::string_view semantic(name, static_cast<size_t>(end - name));
                 if (tag == "OSGN") {
                     // No explicit depth, sample mask, or motion/stencil ownership outputs.
+                    const std::string_view semantic(name, static_cast<size_t>(end - name));
                     if (semantic != "SV_TARGET" || word(row + 4) > 3) return false;
                     color |= word(row + 4) == 0;
-                } else if (word(row + 20) & 0x0f00) {
-                    normal |= semantic == "__USER_VERTEX_M_LIGHTINGNORMAL";
-                    tangent |= semantic == "__USER_VERTEX_M_LIGHTINGTANGENT";
-                    surfaceUv |= semantic == "__USER_VERTEX_M_TEXCOORD";
-                    terrainUv |= semantic == "__USER_PLANETSURFACE_TEXCOORD";
-                    lightingPosition |= semantic == "__USER_VERTEX_M_LIGHTINGPOSITION";
                 }
             }
         } else if (tag == "SHEX" || tag == "SHDR") {
@@ -68,7 +62,7 @@ inline bool materialPixelShader(const void* bytecode, size_t size) noexcept {
             }
         }
     }
-    return input && output && color && program && ((normal && (tangent || surfaceUv)) || (terrainUv && lightingPosition));
+    return input && output && color && program;
 }
 
 } // namespace edvr::native_vrs

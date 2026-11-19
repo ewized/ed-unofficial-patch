@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Which tree a compile-only build came from, and what it produced.
 
-A compile-only build is the Linux (Steam Deck, Proton) test-flight path:
-tools/linux_toolchain.py runs `build.bat --compile-only` under Wine, and that
-compiles the production DLLs into <root>/build/compile-build with none of the
-full build's validation gates.  This module is the one definition of such a
+A compile-only build compiles production DLLs into <root>/build/compile-build
+with none of the full build's validation gates. The Linux test-flight path
+runs through tools/linux_toolchain.py under Wine; native Windows owners can
+record the same unvalidated output with NATIVE_KIND. This module defines the
 build's identity, shared by the toolchain that writes its receipt and by
 `install_edvr.py --compile-only`, which refuses a build whose tree has moved.
 
@@ -40,6 +40,8 @@ import build_receipt  # noqa: E402
 
 
 KIND = "local-wine-production-dll-compile-only"
+NATIVE_KIND = "local-native-production-dll-compile-only"
+KINDS = (KIND, NATIVE_KIND)
 RECEIPT = "compile_only_receipt.json"
 # What an install takes from the build directory; everything else there (gen\,
 # obj\, .lib, .exp, .pdb, phase times) is the compile's own.
@@ -95,10 +97,13 @@ def remove_receipt(root):
         path.unlink()
 
 
-def write_receipt(root, fingerprint, toolchain):
+def write_receipt(root, fingerprint, toolchain, kind=KIND):
     """Write the receipt for the build of `root` compiled from `fingerprint`.
     Refuses (ValueError) when the tree is no longer that one, or when the build
-    directory lacks a required output."""
+    directory lacks a required output. `kind` records Wine or native Windows
+    provenance; neither kind represents a validated build."""
+    if kind not in KINDS:
+        raise ValueError("unsupported compile-only build kind")
     root = Path(root).resolve()
     bdir = build_dir(root)
     if source_fingerprint(root) != fingerprint:
@@ -108,7 +113,7 @@ def write_receipt(root, fingerprint, toolchain):
     if missing:
         raise ValueError("%s has no %s" % (bdir, ", ".join(missing)))
     receipt = {
-        "kind": KIND,
+        "kind": kind,
         "validated": False,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "commit": _git(root, "rev-parse", "HEAD") or "nogit",

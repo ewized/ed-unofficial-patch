@@ -1185,7 +1185,7 @@ def compile_only_build(root, require_current=True, out=print):
             receipt = json.load(f)
         outputs = receipt["outputs"]
         fingerprint = receipt["source_fingerprint"]
-        if receipt.get("kind") != COMPILE_ONLY_KIND or receipt.get("validated") is not False \
+        if receipt.get("kind") not in compile_only.KINDS or receipt.get("validated") is not False \
                 or not isinstance(outputs, dict) or not outputs or not isinstance(fingerprint, str):
             raise ValueError("not a compile-only receipt")
     except (OSError, ValueError, KeyError) as exc:
@@ -3239,7 +3239,7 @@ def _main(argv=None):
                          "script's own repository, which is what you want "
                          "unless you are installing another worktree's build")
     ap.add_argument("--compile-only", action="store_true",
-                    help="install the Linux toolchain's compile-only build "
+                    help="install an unvalidated compile-only build "
                          "(<root>/build/compile-build) instead of <root>/build. Refused "
                          "when its receipt does not match this tree; the build is not "
                          "Windows validated. Compile with: %s "
