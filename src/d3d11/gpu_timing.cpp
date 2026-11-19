@@ -243,6 +243,7 @@ struct GpuTimer::State : TimerRegistration {
         }
         return true;
     }
+    bool start(ID3D11DeviceContext*,bool borrowedFrame,uint64_t now) noexcept;
     void retire(bool keepQueries) noexcept {
         if (lease && !domain->unavailable.load(std::memory_order_acquire))
             domain->clock.release(lease, GetTickCount64());
@@ -279,16 +280,33 @@ bool GpuTimer::beginImpl(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     if (!state_) return false;
     auto& s = *state_;
     if (s.phase != State::Phase::Idle || !s.allocate()) return false;
-    s.startedAt = now;
-    s.lease = borrowedFrame ? d->clock.acquireBorrowedFrame() :
-                              d->clock.acquireInterval(s.startedAt);
-    if (!s.lease) return false;
-    s.phase = State::Phase::Open;
-    s.ready = 0;
-    s.invalid = false;
-    s.ticks[0] = s.ticks[1] = 0;
-    if (d->ops.end(d->ops.user, ctx, s.stamps[0]) != S_OK) {
-        s.retire(false); // Explicit owner cancellation closes a standalone scope once.
+    return s.start(ctx,borrowedFrame,now);
+}
+
+bool GpuTimer::prepareBorrowedFrame(ID3D11Device* dev,ID3D11DeviceContext* ctx) noexcept {
+    auto d=current();
+    if(!d || !d->accepts(ctx) || d->device()!=dev || (state_ && state_->domain!=d))return false;
+    if(!state_)state_=new (std::nothrow) State(d);
+    return state_ && state_->phase==State::Phase::Idle && state_->allocate();
+}
+
+bool GpuTimer::beginPreparedBorrowedFrame(ID3D11DeviceContext* ctx) noexcept {
+    if(!state_ || !state_->domain->accepts(ctx) || gpuTimingYielding() ||
+       state_->phase!=State::Phase::Idle || !state_->stamps[0] || !state_->stamps[1])return false;
+    return state_->start(ctx,true,GetTickCount64());
+}
+
+bool GpuTimer::State::start(ID3D11DeviceContext* ctx,bool borrowedFrame,uint64_t now) noexcept {
+    startedAt = now;
+    lease = borrowedFrame ? domain->clock.acquireBorrowedFrame() :
+                              domain->clock.acquireInterval(startedAt);
+    if (!lease) return false;
+    phase = State::Phase::Open;
+    ready = 0;
+    invalid = false;
+    ticks[0] = ticks[1] = 0;
+    if (domain->ops.end(domain->ops.user, ctx, stamps[0]) != S_OK) {
+        retire(false); // Explicit owner cancellation closes a standalone scope once.
         return false;
     }
     return true;

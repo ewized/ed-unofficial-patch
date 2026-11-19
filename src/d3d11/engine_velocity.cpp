@@ -4,6 +4,7 @@
 #include "native_vrs_cohort_probe.h"
 #include "native_vrs_witness.h"
 #include "native_vrs_witness_state.h"
+#include "native_vrs_witness_timing.h"
 #include "native_vrs_material.h"
 #include "temporal_shader_bytecode.h"
 #include "dxbc_flat_overlay.h"
@@ -2717,6 +2718,25 @@ struct EngineWitnessCohort {
     uint64_t batches=0,multiple=0,materials=0,fallback=0,invalid=0,maxLength=0,stateRefused=0;
 };
 EngineWitnessCohort g_witnessCohort;
+native_vrs::WitnessTiming g_witnessTiming;
+std::atomic<bool> g_witnessTimingNeedsFrame{false};
+}
+
+void engineVelocityWitnessTimingConfigure(bool on) noexcept {
+    g_witnessTiming.requested.store(on,std::memory_order_relaxed);
+}
+void engineVelocityWitnessTimingFrame(ID3D11DeviceContext* ctx,uint64_t frame,bool vrs) noexcept {
+    if(!g_witnessTiming.requested.load(std::memory_order_relaxed) &&
+       !g_witnessTimingNeedsFrame.load(std::memory_order_relaxed))return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    g_witnessTiming.tick(ctx,frame,vrs);
+    g_witnessTimingNeedsFrame.store(g_witnessTiming.mode!=native_vrs::WitnessTiming::Mode::Idle,std::memory_order_relaxed);
+}
+void engineVelocityWitnessTimingAbandon() noexcept {
+    if(!g_witnessTimingNeedsFrame.load(std::memory_order_relaxed))return;
+    g_witnessTiming.clearTimers(nullptr); // quiescent, shared clock already abandoned
+    g_witnessTiming.owner=nullptr;g_witnessTiming.mode=native_vrs::WitnessTiming::Mode::Idle;
+    g_witnessTimingNeedsFrame.store(false,std::memory_order_relaxed);
 }
 bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext* ctx) noexcept {
     if(!ctx || g_engineWitnessCohortReplaying)return false;
@@ -2776,9 +2796,14 @@ void engineVelocityFlushWitnessCohort(ID3D11DeviceContext* ctx){
     } api{ctx,rate};
     const unsigned length=batch.draws.size();
     const auto paired=g_witnessCounts.paired;
+    std::optional<native_vrs::WitnessObservation> obs;
+    if(g_witnessTiming.active(ctx))
+        obs.emplace(g_witnessTiming,native_vrs::witnessRoute(true,false,length),length,
+            native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.epoch,batch.firstDraw,true),s.depthState.Get());
     native_vrs::replayWitnessCohort(batch.draws,s,eye.witnessMirror,batch.epoch,batch.firstDraw,g_witnessCounts,api,
         [&](const native_vrs::WitnessDraw& d,bool material){input.replay(ctx,d,material);},
-        [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong);
+        [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong,obs?&*obs:nullptr);
+    if(obs)obs->finish(g_witnessCounts.paired-paired);
     ++batch.batches;batch.multiple+=length>1;batch.materials+=length;batch.fallback+=length-(g_witnessCounts.paired-paired);
     batch.maxLength=(std::max)(batch.maxLength,uint64_t(length));
     batch.draws.retire();batch.strongFull=false;batch.state.reset();g_engineWitnessCohortPending.store(false,std::memory_order_release);
@@ -2813,12 +2838,20 @@ static bool queueWitness(const EngineWitnessIssue& issue,ID3D11RenderTargetView*
     }
     if(batch.draws.empty()){
         auto& p=batch.state.emplace();
-        if(!p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer)){
+        const bool timing=g_witnessTiming.active(issue.ctx) && g_witnessTiming.mode==native_vrs::WitnessTiming::Mode::Collect;
+        const bool sampled=timing && g_witnessTiming.admissionSample();
+        const auto begin=sampled?native_vrs::WitnessTiming::ticks():0;
+        const bool captured=p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer);
+        if(sampled){++g_witnessTiming.captureSamples;g_witnessTiming.captureTicks+=native_vrs::WitnessTiming::ticks()-begin;}
+        if(!captured){
             ++batch.stateRefused;batch.state.reset();return false;
         }
         NativeVrsCohortReceipt prearm;
+        if(timing)++g_witnessTiming.prearms;
+        const auto armStart=sampled?native_vrs::WitnessTiming::ticks():0;
         batch.strongFull=input->rate(issue.ctx,issue.eye,issue.color,issue.depth,input->projection,input->expandedMaterial,
                                     prearm,NativeVrsCohortStage::StrongFull);
+        if(sampled){++g_witnessTiming.prearmSamples;g_witnessTiming.prearmTicks+=native_vrs::WitnessTiming::ticks()-armStart;}
         if(!batch.strongFull || batch.handoffSeen.load(std::memory_order_acquire)){
             batch.strongFull=false;batch.state.reset();return false;
         }
@@ -2886,11 +2919,16 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
     if(queueWitness(issue,eye.slotsRtv.Get(),skin,vertex,found->second.Get())){prior.queued=true;return true;}
     if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
     const bool observe=vrsCohortActive(ctx);
-    const auto paired=observe?g_witnessCounts.paired:0,copies=observe?g_witnessCounts.copies:0;
+    std::optional<native_vrs::WitnessObservation> obs;
+    if(g_witnessTiming.active(ctx))
+        obs.emplace(g_witnessTiming,native_vrs::witnessRoute(false,g_bound.guardSrv3.Get()!=nullptr,1),1,
+            native_vrs::witnessNeedsCopy(eye.witnessMirror,issue.depth,issue.epoch,issue.drawNumber,issue.reuse));
+    const auto paired=(observe||obs)?g_witnessCounts.paired:0,copies=observe?g_witnessCounts.copies:0;
     const bool issued=native_vrs::splitWitness(api,ctx,issue.color,issue.depth,eye.slotsRtv.Get(),skin,
         vertex,g_bound.patchedPs,found->second.Get(),g_bound.originalPs,
         g_bound.derivedBlend.Get(),eye.witnessMirror,issue.epoch,issue.drawNumber,issue.reuse,g_witnessCounts,
-        [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);});
+        [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);},obs?&*obs:nullptr);
+    if(obs)obs->finish(g_witnessCounts.paired-paired);
     // A late refusal also issues material, through the combined shader.
     // Only the completed fine/coarse pair can contribute to a candidate run.
     if(observe && g_witnessCounts.paired!=paired){

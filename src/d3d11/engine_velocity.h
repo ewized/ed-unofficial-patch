@@ -340,6 +340,12 @@ inline bool engineVelocityWitnessCohortPending() noexcept {return g_engineWitnes
 void engineVelocityFlushWitnessCohort(ID3D11DeviceContext*);
 bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext*) noexcept;
 void engineVelocityReportWitness();
+// Private borrowed timestamp commands pass the context hooks without becoming
+// application query events or advancing the witness mutation generations.
+inline thread_local bool engineWitnessTimingQueryInternal=false;
+void engineVelocityWitnessTimingConfigure(bool on) noexcept;
+void engineVelocityWitnessTimingFrame(ID3D11DeviceContext*,uint64_t frame,bool vrsEnabled) noexcept;
+void engineVelocityWitnessTimingAbandon() noexcept; // quiescent, after gpuTimingAbandon
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);

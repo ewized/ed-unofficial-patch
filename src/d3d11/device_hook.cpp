@@ -3699,6 +3699,7 @@ void shutdownDeviceHooks() {
     // issuing context commands. Normal process exit skips this entire path.
     gpuTimingAbandon();
     gpuFrameAbandon();
+    engineVelocityWitnessTimingAbandon();
     // The keyboard first: a gate left set past the module's life is a
     // keyboard the game never gets back.
     menuShutdown();

@@ -11,7 +11,17 @@ struct WitnessMirror {
     WitnessPtr<ID3D11Texture2D> texture;
     uint64_t epoch=0,draw=0;
     bool reusable=false;
+    UINT width=0,height=0;
+    DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN; // actual single-sample DSV format
 };
+enum class WitnessPhase : unsigned { Prepare, Copy, Fine, CoarseBind, Material, Count };
+struct WitnessObserver {
+    virtual void validated(const WitnessMirror&,bool copied) noexcept=0;
+    virtual void stage(WitnessPhase) noexcept=0;
+};
+inline bool witnessNeedsCopy(const WitnessMirror& m,ID3D11DepthStencilView* d,uint64_t epoch,uint64_t draw,bool reuse) noexcept {
+    return m.source.Get()!=d || !m.reusable || !reuse || m.epoch!=epoch || m.draw+1!=draw;
+}
 struct WitnessCounts {uint64_t paired=0,copies=0,reused=0,stateRefused=0,shaderRefused=0,queryRefused=0,rateRefused=0;};
 
 // Replay ordered fine witnesses against their private DSV before committing
@@ -22,7 +32,7 @@ template<class Api,class Draw,class Coarse>
 bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
     ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,ID3D11VertexShader* vertex,
     ID3D11PixelShader* combined,ID3D11PixelShader* fine,ID3D11PixelShader* material,ID3D11BlendState* blend,
-    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,unsigned length,Draw draw,Coarse coarse) {
+    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,unsigned length,Draw draw,Coarse coarse,WitnessObserver* observer=nullptr) {
     auto refuse=[&]{++counts.stateRefused;return false;};
     if(!length||!ctx||!color||!depth||!slots||!vertex||!combined||!fine||!material||!blend)return refuse();
     WitnessPtr<ID3D11Device> device;ctx->GetDevice(&device);
@@ -61,15 +71,20 @@ bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* c
         WitnessMirror next;td.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         if(FAILED(device->CreateTexture2D(&td,nullptr,&next.texture))||
            FAILED(device->CreateDepthStencilView(next.texture.Get(),&vd,&next.view)))return refuse();
+        next.width=td.Width;next.height=td.Height;next.format=vd.Format;
         next.source=depth;mirror=std::move(next);
     }
     if(!api.full()) {++counts.rateRefused;return false;}
     ID3D11RenderTargetView* outputs[8]{};outputs[6]=rt[6];outputs[7]=rt[7];
-    if(!mirror.reusable||!reuseAllowed||mirror.epoch!=epoch||mirror.draw+1!=drawNumber){
+    const bool copied=witnessNeedsCopy(mirror,depth,epoch,drawNumber,reuseAllowed);
+    if(observer)observer->validated(mirror,copied);
+    if(copied){
+        if(observer)observer->stage(WitnessPhase::Copy);
         api.targets(0,nullptr,nullptr);
         api.copy(mirror.texture.Get(),source.Get());++counts.copies;
     }else ++counts.reused;
     counts.reused+=length-1; // later witnesses evolve the same depth/stencil mirror in order
+    if(observer)observer->stage(WitnessPhase::Fine);
     api.targets(8,outputs,mirror.view.Get());
     struct Restore {
         Api& api;ID3D11RenderTargetView** rt;ID3D11DepthStencilView* depth;ID3D11PixelShader* ps;
@@ -77,14 +92,17 @@ bool splitWitnessRun(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* c
     } restore{api,rt,depth,combined};
     api.pixel(fine);
     for(unsigned i=0;i<length;++i)draw(i,false);
+    if(observer)observer->stage(WitnessPhase::CoarseBind);
     api.targets(6,rt,depth);api.pixel(material);
     for(unsigned i=0;i<length;++i){
         if(!coarse(i)){
             counts.rateRefused+=length-i;mirror.reusable=false;
             api.targets(8,rt,depth);api.pixel(combined);
+            if(observer && !i)observer->stage(WitnessPhase::Material);
             for(;i<length;++i)draw(i,true);
             return true;
         }
+        if(observer && !i)observer->stage(WitnessPhase::Material);
         draw(i,true);++counts.paired;
     }
     mirror.epoch=epoch;mirror.draw=drawNumber+length-1;mirror.reusable=true;return true;
@@ -93,8 +111,8 @@ template<class Api,class Draw,class Coarse>
 bool splitWitness(Api& api,ID3D11DeviceContext* ctx,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
     ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,ID3D11VertexShader* vertex,
     ID3D11PixelShader* combined,ID3D11PixelShader* fine,ID3D11PixelShader* material,ID3D11BlendState* blend,
-    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,Draw draw,Coarse coarse) {
+    WitnessMirror& mirror,uint64_t epoch,uint64_t drawNumber,bool reuseAllowed,WitnessCounts& counts,Draw draw,Coarse coarse,WitnessObserver* observer=nullptr) {
     return splitWitnessRun(api,ctx,color,depth,slots,skin,vertex,combined,fine,material,blend,mirror,epoch,drawNumber,
-        reuseAllowed,counts,1,[&](unsigned,bool m){draw(m);},[&](unsigned){return coarse();});
+        reuseAllowed,counts,1,[&](unsigned,bool m){draw(m);},[&](unsigned){return coarse();},observer);
 }
 }

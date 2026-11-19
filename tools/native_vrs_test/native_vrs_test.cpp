@@ -3,6 +3,7 @@
 #include "../../src/d3d11/native_vrs.h"
 #include "../../src/d3d11/native_vrs_policy.h"
 #include "witness_rate_cases.h"
+#include "witness_sampling_cases.h"
 #include "witness_replay_cases.h"
 #include "../../src/d3d11/native_gaze.h"
 #include "../../src/d3d11/native_gaze_readiness.h"
@@ -30,6 +31,7 @@ DriverResult run(std::initializer_list<DriverOp> ops){return runDriverFixture(op
 #include "ps_draw_scope_cases.h"
 int main(){
     witnessRateCases(check);
+    witnessSamplingCases(check);
     witnessReplayCases(check);
     // Poison COM pointers would crash if OFF or a foreign owner touched D3D.
     auto* poison=reinterpret_cast<ID3D11DeviceContext*>(uintptr_t(1));

@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** the stationary on-foot tutorial still regresses in `a5d4cae4`: median application GPU time was 10.186 ms off and 55.595 ms on. Batching both passes passed the RTX fixture in `50f8cb8b`, including exact motion and material pixels. Production context qualification and game timing remain pending.
+- **VRS performance investigation:** production batching is active in `62c1b3aa`. Completed stationary on-foot windows measured median application GPU time of 10.641 ms off, 18.768 ms on and 10.312 ms off again. This reduces the earlier 55.6 ms ON result but still regresses. A temporary default-off `log.vrs_witness_timing` probe measures replay stages; its native checks and game capture are pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -1084,6 +1084,25 @@ depth and stencil, refusal recovery, two material continuations without
 vendor setters, and a serialized worker handoff that issued all originals
 without transferring the NVAPI owner. These offscreen results do not prove
 that production admitted cohorts or that game frame time improved.
+
+At `62c1b3aa`, production admitted 3,491,824 materials in 330,057 cohorts
+within the first 15 seconds of the ON profile. All three completed
+30-second OFF/ON/OFF windows had no invalid or missing GPU samples. The
+remaining regression requires measurement before another rendering change.
+
+The temporary `log.vrs_witness_timing` instrument borrows the application
+frame's disjoint clock. It preallocates timestamp pairs, samples at most
+three replay spans per frame and reads them without flushing after four
+frame boundaries. A pilot frame precedes 30 seconds of collection and up
+to two seconds of draining. Its summary distinguishes completion from an
+interrupted capture and records counts, sample weights, missing samples,
+depth formats and logical copy bytes. GPU intervals cover replay through
+material restoration, including ordinary material shading; admission
+capture and prearm have CPU samples only. Compare estimated replay cost
+with mean application GPU time over the same frames. The unassigned
+remainder also includes other rendering and sampling error and cannot be
+attributed to prearm. Disable the probe after collection; it is not a
+performance optimization.
 
 ### Simulator validation (2026-11-19)
 

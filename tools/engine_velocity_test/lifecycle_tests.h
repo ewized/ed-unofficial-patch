@@ -177,6 +177,14 @@ void Log::note(const char* fmt, ...) {
     va_end(args);
     lifecycle_fake::g_log.push_back(text);
 }
+void Log::noteReserved(const char* fmt, ...) {
+    char text[8192];
+    va_list args;
+    va_start(args,fmt);
+    std::vsnprintf(text,sizeof(text),fmt,args);
+    va_end(args);
+    lifecycle_fake::g_log.push_back(text);
+}
 SkinHookState skinEntityHookArm(char* why, size_t cap) {
     ++lifecycle_fake::g_hookArms;
     if (why && cap) std::snprintf(why, cap, "rig: the entity hook is not linked into this rig");

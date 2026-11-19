@@ -87,7 +87,7 @@ template<class I> bool sameDxgiOfferAlias(ID3D11Device* device,IDXGIDevice2* bas
     return ok;
 }
 
-template<auto Pipeline, auto Input, class Hook>
+template<auto Pipeline, auto Input, auto QueryRead, class Hook>
 bool installCohortBarrierHooks(ID3D11DeviceContext* ctx,const Hook& hook) {
     bool ok=true;
 #define EDVR_COHORT_HOOK(i,slot,method,barrier) ok=CohortBarrierHook<slot,&i::method,barrier>::install(hook) && ok
@@ -99,7 +99,7 @@ bool installCohortBarrierHooks(ID3D11DeviceContext* ctx,const Hook& hook) {
     EDVR_COHORT_HOOK(C,22,GSSetConstantBuffers,Pipeline);
     EDVR_COHORT_HOOK(C,24,IASetPrimitiveTopology,Pipeline);
     EDVR_COHORT_HOOK(C,26,VSSetSamplers,Pipeline);
-    EDVR_COHORT_HOOK(C,29,GetData,Input);
+    EDVR_COHORT_HOOK(C,29,GetData,QueryRead);
     EDVR_COHORT_HOOK(C,31,GSSetShaderResources,Pipeline);
     EDVR_COHORT_HOOK(C,32,GSSetSamplers,Pipeline);
     EDVR_COHORT_HOOK(C,37,SOSetTargets,Pipeline);

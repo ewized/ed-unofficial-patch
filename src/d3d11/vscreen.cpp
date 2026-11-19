@@ -1146,6 +1146,12 @@ template<bool Inputs> bool witnessBarrier(ID3D11DeviceContext* ctx) {
     return true;
 }
 
+// Only the timing probe's own nonblocking read may observe the driver
+// without breaking the cohort it is measuring. Game GetData still drains.
+bool witnessQueryReadBarrier(ID3D11DeviceContext* ctx) {
+    return engineWitnessTimingQueryInternal || witnessBarrier<true>(ctx);
+}
+
 // DXGI offer detaches even an ordinary bound render target, and its content
 // may be discarded. Queue the DXGI event only after preceding GPU work too.
 bool witnessDxgiBarrier(IDXGIDevice2* self) {
@@ -5593,6 +5599,7 @@ void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
 
 void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
+    if(engineWitnessTimingQueryInternal){g_state->realEnd(self,async);return;}
     if(!witnessBarrier<true>(self))return;
     if(vrsCohortTracking()&&!gpuFrameInternal())vrsCohortNoteBreak(self, VrsCohortBreak::Query);
     witnessQuery(self,async,false);
@@ -7424,6 +7431,7 @@ static void vScreenRefreshConfigBody(bool forced) {
         cfg.getString("experimental.foveation_focus","normal").c_str());
     nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     vrsCohortConfigure(cfg.getBool("log.vrs_cohort_probe",false));
+    engineVelocityWitnessTimingConfigure(cfg.getBool("log.vrs_witness_timing",false));
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));
@@ -7618,7 +7626,10 @@ void introCurveNoteRetired() {
 void vScreenNativeFrameBoundary(uint64_t frameOrdinal) {
     if(!vScreenDrainWitnessCohort())return;
     if(g_state){
-        vrsCohortFrame(g_state->ownerCtx, frameOrdinal, nativeVrsCoarseRequested()&&!runtimeFlatProfile());
+        const bool vrsEnabled=nativeVrsCoarseRequested()&&!runtimeFlatProfile();
+        vrsCohortFrame(g_state->ownerCtx,frameOrdinal,vrsEnabled);
+        if(g_state->ownerCtx && g_state->witnessOwnerThread==GetCurrentThreadId())
+            engineVelocityWitnessTimingFrame(g_state->ownerCtx,frameOrdinal,vrsEnabled);
         if(nativeVrsLive()&&g_state->ownerCtx)++g_state->witnessEpoch;
     }
     if(!nativeVrsLive()||!g_state||!g_state->ownerCtx)return;
@@ -8557,6 +8568,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode, bool nativeImmedia
         cfg.getString("experimental.foveation_focus","normal").c_str());
     nativeVrsConfigureHighlight(cfg.getBool("experimental.foveation_highlight",false));
     vrsCohortConfigure(cfg.getBool("log.vrs_cohort_probe",false));
+    engineVelocityWitnessTimingConfigure(cfg.getBool("log.vrs_witness_timing",false));
     nativeVrsPsMeasureConfigure(cfg.getBool("advanced.native_vrs_ps_measure",false),nativePsMeasureLog);
     vrsCoverageConfigure(cfg.getBool("advanced.vrs_coverage_diagnostic",false));
     vrsWorkReferenceConfigure(cfg.getBool("advanced.vrs_work_reference",false));
@@ -8735,7 +8747,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode, bool nativeImmedia
     // contract (including foreign writers and consumer handoffs) can be armed.
     bool cohortHooks=false;
     if(installCohort){
-        const bool extra=native_vrs::installCohortBarrierHooks<witnessBarrier<false>,witnessBarrier<true>>(ctx,issueSlot);
+        const bool extra=native_vrs::installCohortBarrierHooks<witnessBarrier<false>,witnessBarrier<true>,witnessQueryReadBarrier>(ctx,issueSlot);
         cohortHooks=extra && s.witnessBatchHooks && witnessBeginHook && witnessEndHook &&
             s.realPSSetConstantBuffers && s.realVSSetConstantBuffers && s.realPSSetShaderResources && s.realVSSetShaderResources &&
             s.realPSSetShader && s.realVSSetShader && s.realRSSetViewports && s.realOMSetBlendState && s.realUnmap &&
@@ -8912,6 +8924,7 @@ extern "C" void* edvr_selftest_binding(unsigned int slot, uint32_t* generation) 
 namespace edvr {
 
 void shutdownVScreenFixes() {
+    engineVelocityWitnessTimingConfigure(false); // metadata only; teardown may run under the loader lock
     // An off-thread teardown cannot drain the immediate context. Lifecycle
     // admission must guarantee the owning render thread drains before teardown.
     if(!vScreenDrainWitnessCohort())return;
