@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace edvr::native_vrs {
@@ -60,17 +61,39 @@ void issueWitnessDraw(Api& api, const WitnessDraw& draw) {
 // The native owner supplies an immutable state receipt with retained graphics
 // resources. Generations change before writes and setters; the queue does not
 // prove that a complete set of barriers has been installed.
+// The guard SRV can keep its identity while a new copy replaces its bytes.
+struct WitnessGuardSnapshot {
+    const void* view=nullptr;
+    uint64_t publication=0;
+    bool valid() const noexcept {return (view!=nullptr)==(publication!=0);}
+    bool operator==(const WitnessGuardSnapshot& b) const noexcept {return view==b.view && publication==b.publication;}
+};
+// Only the render owner publishes; a serialized foreign handoff can read
+// the generation without touching engine-owned objects or issuing GPU calls.
+class WitnessGuardPublication {
+    std::atomic<uint64_t> generation_{0};
+public:
+    uint64_t current() const noexcept {return generation_.load(std::memory_order_acquire);}
+    template<class Drain,class Copy> bool replace(Drain drain,Copy copy) {
+        const auto old=current();
+        if(old==UINT64_MAX || !drain())return false;
+        copy();
+        generation_.store(old+1,std::memory_order_release);
+        return true;
+    }
+};
 struct WitnessCohortKey {
     const void *context = nullptr, *eyeTarget = nullptr, *depthTarget = nullptr, *state = nullptr;
     uint64_t frame = 0, inputs = 0, pipeline = 0;
     unsigned eye = 2;
+    WitnessGuardSnapshot guard{};
 
     bool valid() const noexcept {
-        return context && eyeTarget && depthTarget && state && frame && inputs && pipeline && eye < 2;
+        return context && eyeTarget && depthTarget && state && frame && inputs && pipeline && eye < 2 && guard.valid();
     }
     bool operator==(const WitnessCohortKey& b) const noexcept {
         return context == b.context && eyeTarget == b.eyeTarget && depthTarget == b.depthTarget &&
-               state == b.state && frame == b.frame && inputs == b.inputs && pipeline == b.pipeline && eye == b.eye;
+               state == b.state && frame == b.frame && inputs == b.inputs && pipeline == b.pipeline && eye == b.eye && guard==b.guard;
     }
 };
 

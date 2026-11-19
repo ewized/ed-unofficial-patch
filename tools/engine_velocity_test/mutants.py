@@ -70,7 +70,7 @@ MUTATIONS = [
     ("lazy-guard-kept-ignores-t3-generation",
      "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen;",
      "const bool keptBound = g_bound.guardSrv3.Get() == privateSrv;", "guard G1"),
-    ("lazy-guard-nonguard-draw-keeps-t3", "if (!guardOverlay && g_bound.guardSrv3) guardRestoreT3(ctx);", "", "flat lazy"),
+    ("lazy-guard-nonguard-draw-keeps-t3", "if (!guardOverlay && g_bound.guardSrv3 && !guardRestoreT3(ctx)) return;", "", "flat lazy"),
     ("lazy-guard-flushes-at-every-overlay-draw", " && !(e.overlayGroup && e.overlayBaseSrv)) {\n        ++g_draw.flatFlushBy",
      ") {\n        ++g_draw.flatFlushBy", "guard G5"),
     ("lazy-guard-ends-eager", "    if (!g_flatLazy) {\n        std::lock_guard<std::recursive_mutex> lock(g_mutex);",

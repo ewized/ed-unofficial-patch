@@ -44,6 +44,26 @@ inline void witnessReplayCases(void (*check)(bool, const char*)) {
     check(cohort.append(key, {}) == Answer::Drain, "unsupported draw cannot bypass pending draws");
     check(cohort.size() == 4, "rejected appends leave the original commands pending");
 
+    WitnessCohort guardQueue;
+    WitnessGuardPublication published;
+    unsigned copies=0;
+    check(!published.replace([]{return false;},[&]{++copies;}) && !copies && !published.current(),
+          "pending original blocks snapshot mutation and publication");
+    check(published.replace([]{return true;},[&]{++copies;}) && copies==1 && published.current()==1,
+          "an ordered snapshot copy publishes exactly once");
+    auto overlay=key;overlay.guard={&objects[4],published.current()};
+    check(guardQueue.append(overlay,commands[0])==Answer::Appended &&
+          guardQueue.append(overlay,commands[1])==Answer::Appended,"guard snapshot publication shared by consecutive draws");
+    auto refill=overlay;++refill.guard.publication;
+    check(guardQueue.append(refill,commands[2])==Answer::Drain && guardQueue.size()==2,
+          "same private SRV with new bytes must drain its old guarded draws");
+    auto swapped=overlay;swapped.guard.view=&objects[2];
+    check(guardQueue.append(swapped,commands[2])==Answer::Drain &&
+          guardQueue.append(key,commands[2])==Answer::Drain,"private t3 swap or restore drains before a following draw");
+    guardQueue.retire();
+    overlay.guard.publication=0;
+    check(guardQueue.append(overlay,commands[0])==Answer::Refused,"unpublished guarded snapshot cannot start a cohort");
+
     struct Samples {
         unsigned n = 0;
         bool exact = true;

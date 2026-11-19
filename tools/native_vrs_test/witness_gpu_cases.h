@@ -51,9 +51,9 @@ struct V { float4 pos:SV_POSITION; nointerpolation uint slot:SLOTID; float2 uv:T
 V vs(uint vertex:SV_VertexID){
  uint triIndex=vertex/3, corner=vertex%3;
  float2 xy=corner==0?float2(-1,-1):corner==1?float2(-1,1):float2(1,-1);
- if(triIndex==1 || triIndex==5)xy=float2(-xy.x,-xy.y);
+ if(triIndex==1 || triIndex==5 || triIndex==7)xy=float2(-xy.x,-xy.y);
  V o;o.pos=float4(xy,0.375+xy.x*0.0625+xy.y*0.125+(triIndex==2?0.25:triIndex>=4?0.125:0),1);
- o.slot=triIndex>=4?6:triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
+ o.slot=triIndex>=6?7:triIndex>=4?6:triIndex+1;o.uv=xy;o.skin=float4(xy,triIndex+1,1);return o;
 }
 cbuffer Material : register(b0) {float bias;};
 float ps(float4 pos:SV_POSITION,nointerpolation uint slot:SLOTID,float2 uv:TEXCOORD):SV_TARGET {
@@ -104,11 +104,17 @@ Witness referencePs(V i){
         substrate[y*side+x]={region==0?13.f:region==1?15.f:-1.f,.375f+nx*.0625f+ny*.125f};
     }
     D3D11_TEXTURE2D_DESC sd{};target[0].tex[1]->GetDesc(&sd);
-    sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;sd.Usage=D3D11_USAGE_IMMUTABLE;
+    sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;sd.Usage=D3D11_USAGE_DEFAULT;
+    std::vector<Marker> replacement=substrate;
+    for(auto& pixel:replacement)pixel.code=pixel.code==13.f?15.f:13.f;
     D3D11_SUBRESOURCE_DATA data{substrate.data(),UINT(side*sizeof(Marker)),0};
-    ComPtr<ID3D11Texture2D> snapshot,guardOutput[2],skinBefore[2];ComPtr<ID3D11ShaderResourceView> guardSrv;
+    ComPtr<ID3D11Texture2D> snapshot,refill,guardOutput[2],beforeRefill[2],skinBefore[2];ComPtr<ID3D11ShaderResourceView> guardSrv;
     if(FAILED(dev->CreateTexture2D(&sd,&data,&snapshot))||
        FAILED(dev->CreateShaderResourceView(snapshot.Get(),nullptr,&guardSrv)))return failure(__LINE__);
+    if(grouped){
+        data.pSysMem=replacement.data();
+        if(FAILED(dev->CreateTexture2D(&sd,&data,&refill)))return failure(__LINE__);
+    }
     D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
     dd.DepthFunc=D3D11_COMPARISON_LESS;dd.StencilEnable=TRUE;dd.StencilReadMask=dd.StencilWriteMask=255;
     dd.FrontFace.StencilFunc=D3D11_COMPARISON_ALWAYS;dd.FrontFace.StencilPassOp=D3D11_STENCIL_OP_INCR_SAT;
@@ -131,7 +137,7 @@ Witness referencePs(V i){
     // D3D11 functional spec 8.16: SV_VertexID restarts at zero on every Draw.
     // DrawIndexed feeds the index-buffer value to the shader, so each later
     // issue actually selects its coplanar or guarded triangles.
-    uint16_t indices[18];for(unsigned i=0;i<18;++i)indices[i]=static_cast<uint16_t>(i);
+    uint16_t indices[24];for(unsigned i=0;i<24;++i)indices[i]=static_cast<uint16_t>(i);
     D3D11_BUFFER_DESC ib{};ib.ByteWidth=sizeof(indices);ib.BindFlags=D3D11_BIND_INDEX_BUFFER;ib.Usage=D3D11_USAGE_IMMUTABLE;
     D3D11_SUBRESOURCE_DATA indexData{indices,0,0};ComPtr<ID3D11Buffer> indexBuffer;
     if(FAILED(dev->CreateBuffer(&ib,&indexData,&indexBuffer)))return failure(__LINE__);
@@ -300,7 +306,86 @@ Witness referencePs(V i){
         ctx->OMSetDepthStencilState(overlay.Get(),0);ctx->OMSetBlendState(guardBlend.Get(),nullptr,~0u);
         ctx->PSSetShader(guardedCombined.Get(),nullptr,0);
         ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,guardSrv.GetAddressOf());
-        if(!pass)ctx->DrawIndexed(6,12,0);
+        if(grouped){
+            using namespace edvr::native_vrs;
+            // Preserve the first publication's pixels before another copy
+            // into the very same private texture. Both groups overlap fully;
+            // reversing even the two descriptors changes the final owner.
+            constexpr unsigned slot=edvr::kEngineVelocityOverlaySnapshotSlot;
+            ID3D11ShaderResourceView* empty=nullptr;
+            WitnessGuardPublication generation;
+            if(!generation.replace([]{return true;},[&]{
+                ctx->PSSetShaderResources(slot,1,&empty);
+                ctx->UpdateSubresource(snapshot.Get(),0,nullptr,substrate.data(),UINT(side*sizeof(Marker)),0);
+                ctx->PSSetShaderResources(slot,1,guardSrv.GetAddressOf());
+            }))return failure(__LINE__);
+            D3D11_TEXTURE2D_DESC read{};guardOutput[pass]->GetDesc(&read);
+            read.BindFlags=0;read.Usage=D3D11_USAGE_STAGING;read.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            if(FAILED(dev->CreateTexture2D(&read,nullptr,&beforeRefill[pass])))return failure(__LINE__);
+            auto replaceBytes=[&]{
+                ctx->CopyResource(beforeRefill[pass].Get(),guardOutput[pass].Get());
+                ctx->PSSetShaderResources(slot,1,&empty);
+                ctx->CopyResource(snapshot.Get(),refill.Get());
+                ctx->PSSetShaderResources(slot,1,guardSrv.GetAddressOf());
+            };
+            for(unsigned publication=1;publication<=2;++publication){
+                const WitnessGuardSnapshot stamp{guardSrv.Get(),generation.current()};
+                if(stamp.publication!=publication)return failure(__LINE__);
+                const WitnessDraw draws[]={WitnessDraw::indexed(6,publication==1?18:12,0),
+                                           WitnessDraw::indexed(6,publication==1?12:18,0)};
+                if(!split){
+                    for(auto& draw:draws)issueWitnessDraw(*ctx,draw);
+                    if(publication==1 && !generation.replace([]{return true;},replaceBytes))return failure(__LINE__);
+                    continue;
+                }
+                auto captureState=[&](WitnessPipeline& held,ID3D11BlendState* b){
+                    return held.capture(ctx,t.color.Get(),t.depth.Get(),guardRtv.Get(),t.skin.Get(),vs.Get(),
+                        guardedCombined.Get(),guardedFine.Get(),ps.Get(),b);
+                };
+                if(publication==1){
+                    D3D11_DEPTH_STENCIL_DESC writes{};overlay->GetDesc(&writes);
+                    writes.StencilEnable=TRUE;writes.StencilWriteMask=255;
+                    writes.BackFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;
+                    ComPtr<ID3D11DepthStencilState> stencilWriter;
+                    if(FAILED(dev->CreateDepthStencilState(&writes,&stencilWriter)))return failure(__LINE__);
+                    WitnessPipeline stencilState,skinState,restoredT3;
+                    ctx->OMSetDepthStencilState(stencilWriter.Get(),0);
+                    if(!captureState(stencilState,guardBlend.Get()) || stencilState.permitsGuard(stamp,slot))return failure(__LINE__);
+                    ctx->OMSetDepthStencilState(overlay.Get(),0);ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
+                    if(!captureState(skinState,blend.Get()) || skinState.permitsGuard(stamp,slot))return failure(__LINE__);
+                    ctx->OMSetBlendState(guardBlend.Get(),nullptr,~0u);ctx->PSSetShaderResources(slot,1,&empty);
+                    if(!captureState(restoredT3,guardBlend.Get()) || restoredT3.permitsGuard(stamp,slot))return failure(__LINE__);
+                    ctx->PSSetShaderResources(slot,1,guardSrv.GetAddressOf());
+                }
+                WitnessPipeline held;
+                if(!captureState(held,guardBlend.Get()) || !held.permitsGuard(stamp,slot) ||
+                   !rate(RateStep::StrongFull,t.color.Get(),t.depth.Get()))return failure(__LINE__);
+                WitnessCohort queue;
+                const WitnessCohortKey key{ctx,t.color.Get(),t.depth.Get(),&held,1,1,1,0,stamp};
+                for(auto& draw:draws)if(queue.append(key,draw)!=WitnessCohortAppend::Appended)return failure(__LINE__);
+                auto later=key;++later.guard.publication;
+                if(queue.append(later,draws[0])!=WitnessCohortAppend::Drain)return failure(__LINE__);
+                unsigned foreignIssues=0;bool refused=false;
+                std::thread foreign([&]{
+                    refused=!replayPrearmedOriginals(queue,ctx,true,[&](const WitnessDraw&){++foreignIssues;},later.guard);
+                });
+                foreign.join();
+                if(!refused || foreignIssues || queue.size()!=2)return failure(__LINE__);
+                auto replay=[&]{
+                    unsigned nFine=0,nMaterial=0;bool order=true,strong=true;
+                    const bool done=replayWitnessCohort(queue,held,mirror,2+publication,8+(publication-1)*2,counts,api,
+                        [&](const WitnessDraw& draw,bool material){
+                            if(material){order&=nFine==2 && nMaterial<2 && draw.start==draws[nMaterial].start;++nMaterial;}
+                            else{order&=nMaterial==0 && nFine<2 && draw.start==draws[nFine].start;++nFine;}
+                            issueWitnessDraw(*ctx,draw);
+                        },[&](unsigned i){return rate(i?RateStep::ContinueMaterial:RateStep::Material,t.color.Get(),t.depth.Get());},
+                        [&]{strong=rate(RateStep::StrongFull,t.color.Get(),t.depth.Get());});
+                    if(!done || !strong || !order || nMaterial!=2)return false;
+                    queue.retire();return true;
+                };
+                if(!(publication==1 ? generation.replace(replay,replaceBytes) : replay()))return failure(__LINE__);
+            }
+        }else if(!pass)ctx->DrawIndexed(6,12,0);
         else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),guardRtv.Get(),t.skin.Get(),
             vs.Get(),guardedCombined.Get(),guardedFine.Get(),ps.Get(),guardBlend.Get(),mirror,3,5,true,counts,
             [&](bool){ctx->DrawIndexed(6,12,0);},[&]{return rate(RateStep::Material,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
@@ -401,16 +486,32 @@ Witness referencePs(V i){
                 if(std::memcmp(&depthWitness[i],pixels[0].data()+pos,4))
                     return pixelFailure("MRT6 depth vs scene depth",x,y,markerOwner[i],pixels[0].data()+pos,&depthWitness[i],4);}
             if(k==4){
-                const auto& under=substrate[pos/8];
+                const auto& under=grouped?replacement[i]:substrate[i];
                 float sceneDepth;std::memcpy(&sceneDepth,&depthWitness[pos/8],4);
-                const float expected=under.code==13.f?sceneDepth:sceneDepth+.125f;
+                const float owner=grouped?15.f:13.f;
+                const float expected=under.code==owner?sceneDepth:sceneDepth+.125f;
                 if(under.depth!=sceneDepth)return pixelFailure("guard fixture substrate depth",x,y,under.code,&sceneDepth,&under.depth,4);
-                const float marker[]={13.f,expected};
-                if(value[0]!=13.f||value[1]!=expected)return pixelFailure("guarded marker vs substrate",x,y,under.code,marker,value,sizeof(marker));
+                const float marker[]={owner,expected};
+                if(value[0]!=owner||value[1]!=expected)return pixelFailure("guarded marker vs substrate",x,y,under.code,marker,value,sizeof(marker));
             }
         }
     }
-    if(counts.paired==(grouped?7u:4u) && counts.copies==4 && counts.reused==(grouped?4u:1u) && counts.rateRefused==1 &&
+    if(grouped)for(unsigned pass=0;pass<2;++pass){
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(FAILED(ctx->Map(beforeRefill[pass].Get(),0,D3D11_MAP_READ,0,&mapped)))return failure(__LINE__);
+        bool exact=true;
+        for(UINT y=0;y<side && exact;++y)for(UINT x=0;x<side;++x){
+            const auto& base=substrate[y*side+x];
+            const float expected[]={13.f,base.code==13.f?base.depth:base.depth+.125f};
+            const auto* got=static_cast<const BYTE*>(mapped.pData)+y*mapped.RowPitch+x*sizeof(Marker);
+            if(std::memcmp(expected,got,sizeof(expected))){
+                exact=pixelFailure("guard before same-SRV refill",x,y,base.code,expected,got,sizeof(expected));break;
+            }
+        }
+        ctx->Unmap(beforeRefill[pass].Get(),0);
+        if(!exact)return false;
+    }
+    if(counts.paired==(grouped?10u:4u) && counts.copies==(grouped?5u:4u) && counts.reused==(grouped?6u:1u) && counts.rateRefused==1 &&
        distinctMaterial==hardware && sawNear && sawTie && sawSlope && sawStencil)return true;
     std::fprintf(stderr,"witness totals paired=%llu copies=%llu reused=%llu rateRefused=%llu materialDiff=%d hardware=%d slot5=%d slot9=%d slope=%d stencil21=%d\n",
         counts.paired,counts.copies,counts.reused,counts.rateRefused,distinctMaterial,hardware,sawNear,sawTie,sawSlope,sawStencil);

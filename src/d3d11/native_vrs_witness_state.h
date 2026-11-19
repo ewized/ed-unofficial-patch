@@ -78,6 +78,30 @@ struct WitnessPipeline {
     WitnessBindings<ID3D11RenderTargetView,8> rt;
     WitnessPtr<ID3D11DepthStencilView> depth;
 
+    // t3 is retained by psInputs. Guard draws can be reordered into separate
+    // fine/material runs only under the published snapshot and without writes
+    // to either the original depth/stencil or the underlying skin plane.
+    bool permitsGuard(WitnessGuardSnapshot guard,unsigned slot) const noexcept {
+        if(!guard.valid() || !guard.view || slot>=psInputs.resources || psInputs.srv.slots[slot]!=guard.view ||
+           !depthState || !depth || !blend)return false;
+        D3D11_DEPTH_STENCIL_DESC ds{};depthState->GetDesc(&ds);
+        if(!ds.DepthEnable || ds.DepthFunc!=D3D11_COMPARISON_GREATER_EQUAL || ds.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO)return false;
+        D3D11_DEPTH_STENCIL_VIEW_DESC view{};depth->GetDesc(&view);
+        // The existing private mirror path accepts only the base, writable
+        // view. Prove effective read-only behavior from the actual OM state.
+        if(view.Flags || view.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice)return false;
+        const bool stencil=view.Format==DXGI_FORMAT_D24_UNORM_S8_UINT || view.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        if(!stencil && view.Format!=DXGI_FORMAT_D16_UNORM && view.Format!=DXGI_FORMAT_D32_FLOAT)return false;
+        if(stencil && ds.StencilEnable && ds.StencilWriteMask){
+            auto keeps=[](const D3D11_DEPTH_STENCILOP_DESC& face){return face.StencilFailOp==D3D11_STENCIL_OP_KEEP &&
+                face.StencilDepthFailOp==D3D11_STENCIL_OP_KEEP && face.StencilPassOp==D3D11_STENCIL_OP_KEEP;};
+            if(!keeps(ds.FrontFace) || !keeps(ds.BackFace))return false;
+        }
+        if(!rt.slots[7])return true;
+        D3D11_BLEND_DESC b{};blend->GetDesc(&b);
+        return b.IndependentBlendEnable && b.RenderTarget[7].RenderTargetWriteMask==0;
+    }
+
     // Capture once per cohort. The owner's complete, pre-change generations
     // compare this snapshot on subsequent appends. A pending cohort leaves
     // this physical pipeline untouched until its synchronous replay.
@@ -127,9 +151,9 @@ struct WitnessPipeline {
 // draws on its current thread. Admission established disabled VRS and a null
 // rate map before the first append. No native state call belongs here.
 template<class Replay>
-bool replayPrearmedOriginals(WitnessCohort& queue,ID3D11DeviceContext* ctx,bool strongFull,Replay replay){
+bool replayPrearmedOriginals(WitnessCohort& queue,ID3D11DeviceContext* ctx,bool strongFull,Replay replay,WitnessGuardSnapshot current={}){
     if(queue.empty())return true;
-    if(!strongFull || !ctx || queue.key().context!=ctx)return false;
+    if(!strongFull || !ctx || queue.key().context!=ctx || !(queue.key().guard==current))return false;
     for(unsigned i=0;i<queue.size();++i)replay(queue.data()[i]);
     queue.retire();return true;
 }

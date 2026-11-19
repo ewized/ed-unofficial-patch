@@ -143,9 +143,9 @@ void printStatus(const char* stage){
 template<class Compile,class Rate>
 bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile compile,Rate& rate,bool grouped=false) {
     using witness_gpu::RateStep;
-    constexpr UINT patch=8,stages=6;
-    const char* const names[stages]={"combined_guard","split_overlap","split_coplanar",
-        "combined_fallback","split_after_reset","split_guard"};
+    constexpr UINT patch=8;const UINT stages=grouped?7:6;
+    const char* const names[]={"combined_guard","split_overlap","split_coplanar",
+        "combined_fallback","split_after_reset","split_guard","guard_after_refill"};
     D3D11_TEXTURE2D_DESC td{};td.Width=stages*patch;td.Height=patch;
     td.ArraySize=td.MipLevels=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32_FLOAT;
     td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -161,16 +161,16 @@ bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile com
     auto probe=[&](RateStep step,ID3D11RenderTargetView* target,ID3D11DepthStencilView* depth){
         if(step==RateStep::BeginPass){
             if(pass==1)capture(0);
-            if(pass==2)capture(5);
+            if(pass==2)capture(stages-1);
             color.Reset();target->GetResource(&color);++pass;
         }else if(step==RateStep::PrepareWitness){
-            if(preparations>0 && preparations<5)capture(preparations);
+            if(preparations>0 && preparations<stages-1)capture(preparations);
             ++preparations;
         }
         return rate(step,target,depth);
     };
     const bool exact=witness_gpu::run(device,context,compile,probe,true,grouped);
-    bool footprints=captured==(1u<<stages)-1 && preparations==5;
+    bool footprints=captured==(1u<<stages)-1 && preparations==stages-1;
     D3D11_MAPPED_SUBRESOURCE mapped{};
     hr(context->Map(samples.Get(),0,D3D11_MAP_READ,0,&mapped),"diagnostic material readback");
     const auto pixel=[&](UINT x,UINT y){
@@ -195,7 +195,7 @@ bool verifyWitness(ID3D11Device* device,ID3D11DeviceContext* context,Compile com
         }
         valid=valid && low<high;
         if(grouped){
-            constexpr float biases[stages]={16,0,4,8,12,16};
+            constexpr float biases[]={16,0,4,8,12,16,16};
             valid=valid && low>biases[stage]-3 && high<biases[stage];
         }
         footprints=footprints && valid;
@@ -449,10 +449,11 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
         witnessOff.retainedWitnessReactivations-finalStatus.retainedWitnessReactivations==verifiedReactivations;
     std::printf("{\"verified_same_eye_witness_reactivations\":%llu,\"transitions_exact\":%s}\n",verifiedReactivations,transitionsExact?"true":"false");
     std::printf("{\"split_sloped_overlap_coplanar_depth_stencil_slot_skin_exact\":%s}\n",witness?"true":"false");
-    const bool cohort=cohortPixels && heldMaterials==2 && lateCohortRefused && handoffRatesUnchanged && directBarrier;
+    const bool cohort=cohortPixels && heldMaterials==4 && lateCohortRefused && handoffRatesUnchanged && directBarrier;
     std::printf("{\"handoff_no_vendor_setters_or_owner_transfer\":%s}\n",handoffRatesUnchanged?"true":"false");
     std::printf("{\"cohort_ordered_motion_skin_depth_stencil_and_refusal_exact\":%s,\"coarse_continuations_without_setters\":%u,\"cohort_midrun_epoch_refused\":%s}\n",
         cohort?"true":"false",heldMaterials,lateCohortRefused?"true":"false");
+    std::printf("{\"guarded_cohort_snapshot_refill_and_order_exact\":%s}\n",cohort?"true":"false");
     const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&uniformWitness&&otherEyeRetained&&witness&&receiptRefusals&&lateEpochRefused&&cohort;
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
