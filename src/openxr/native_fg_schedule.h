@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/native_frame_generation.h"
+#include "native_fg_bootstrap.h"
 #include <openxr/openxr.h>
 #include <algorithm>
 #include <cmath>
@@ -7,8 +8,7 @@
 namespace edvr::openxr::fgschedule {
 inline uint64_t nextCredit(uint64_t grantedTick,unsigned multiplier) {return grantedTick+multiplier;}
 inline unsigned firstPhase(const EdvrFgBatch& batch,uint64_t displayedEndpoint) {
-  return batch.generatedCount&&displayedEndpoint&&batch.previousSequence==displayedEndpoint&&
-    batch.currentSequence>displayedEndpoint?1u:0u;
+  return fgbootstrap::firstPhase(batch.previousSequence,batch.currentSequence,batch.generatedCount,displayedEndpoint);
 }
 inline unsigned nextPhase(unsigned phase,unsigned generatedCount) {
   return phase&&phase<generatedCount?phase+1u:0u;

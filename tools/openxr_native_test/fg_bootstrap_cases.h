@@ -77,6 +77,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
   launch_fixture::Fixture fixture;auto& h=fixture.host;
   ExclusiveExecutor executor; // This fixture alone owns both WARP context roles.
   check(fixture.initialized&&SUCCEEDED(h.captured.initializeShared(producer.Get(),device.Get(),&executor))&&SUCCEEDED(h.fgFallback.initialize(device.Get()))&&
+    SUCCEEDED(h.fgPendingNative.initialize(device.Get()))&&
     SUCCEEDED(h.frameGeneration.images().phases[0].initialize(device.Get())),"FG bootstrap: actual host/local capture owners");
   h.fgConfig=7;h.fgNativePixels=true;h.frameSpace=h.seated.frame().space;
   h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
@@ -87,6 +88,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
   ComPtr<ID3D11Texture2D> sources[2];
   check(SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[0]))&&SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[1])),"FG bootstrap: distinct native eyes");
   if(!sources[0]||!sources[1])return;
+  constexpr XrDuration period=11111111;
   const auto nativePair=[&](uint64_t sequence,bool right=true) {
     fixture.fake.frameTime=1000000000+XrTime(sequence)*22222222;
     check(h.boundary.waitAndBegin()==XR_SUCCESS,"FG bootstrap: actual frame clock");
@@ -97,7 +99,10 @@ template<class Check> void runFgBootstrapCases(Check check) {
       const vr::Texture_t texture{sources[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
       check(h.captured.capture(vr::EVREye(eye),&texture,nullptr,vr::Submit_Default,true,nullptr,true)==vr::VRCompositorError_None,"FG bootstrap: real native eye capture");
     }
-    h.fgRefreshNativeFallback(epoch,h.captured.completePending()==S_OK);
+    if(h.captured.completePending()==S_OK) {
+      h.fgStageNativeFallback(epoch);
+      h.fgRefreshNativeFallback(fixture.fake.frameTime);
+    }
   };
   const auto pixel=[&](unsigned eye) {
     auto desc=td;desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
@@ -112,6 +117,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
     noEmpty=noEmpty&&h.fgFallbackUsable(fixture.fake.frameTime);
     monotonic=monotonic&&h.fgFallbackTime>=displayedTime;
     displayedTime=h.fgFallbackTime;h.fgDisplayedSequence=h.fgFallbackSequence;
+    h.fgBootstrap.displayNative(h.fgFallbackSequence);
   }
   check(noEmpty&&fixture.fake.frameTime-1022222222>1500000000,"FG bootstrap: fresh native fallback prevents empty projections beyond 1.5 seconds");
   check(monotonic&&h.fgFallbackSequence==70&&pixel(0)==0xff000046u&&pixel(1)==0xff010046u,"FG bootstrap: newer stereo bytes/pose publish together without time reversal");
@@ -119,7 +125,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
   // Start an independent complete-pair/handoff case from a known endpoint,
   // even when the old-code negative above deliberately retained endpoint 1.
   h.fgFallbackValid=false;h.fgDisplayedSequence=0;nativePair(70);
-  h.fgDisplayedSequence=70;displayedTime=h.fgFallbackTime;
+  h.fgDisplayedSequence=70;h.fgBootstrap.displayNative(70);displayedTime=h.fgFallbackTime;
   h.captured.reset();nativePair(71,false);
   check(h.fgFallbackSequence==70&&pixel(0)==0xff000046u&&pixel(1)==0xff010046u,"FG bootstrap: failed second-eye capture retains complete previous pair");
   EdvrFgStatus report{};report.generation=epoch.generation;report.configGeneration=epoch.config;report.historyGeneration=epoch.history;
@@ -136,18 +142,29 @@ template<class Check> void runFgBootstrapCases(Check check) {
     if(variant==4)images.metadata.currentPoseDisplayTime=fixture.fake.frameTime+1;
     if(variant==5){images.metadata.currentPoseDisplayTime=1;images.metadata.previousPoseDisplayTime=1;}
     if(variant==6){images.metadata.generatedCount=0;images.metadata.phaseMask=1;}
-    images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,true);
-    check(h.fgBootstrap.refreshing(),"FG bootstrap: stale/future/wrong epoch/native-only output cannot stop refresh");
+    images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
+    h.fgBootstrap.completeNative(72,h.fgTick);
+    check(h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: stale/future/wrong epoch/native-only output cannot delay refresh");
+    h.fgBootstrap.displayNative(72);
   }
-  images.ready=true;images.metadata=candidate;h.fgPrepareImages(report,fixture.fake.frameTime,true);
-  check(!h.fgBootstrap.refreshing()&&!images.ready,"FG bootstrap: valid generated batch behind watermark ends refresh before discard");
+  images.ready=true;images.metadata=batch(69,70);
+  h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
+  check(!images.ready,"FG bootstrap: a timely batch behind the watermark proves synthesis but cannot be displayed");
   nativePair(72);
-  check(h.fgFallbackSequence==70,"FG bootstrap: native endpoint stops advancing so generated pairs can catch up");
-  images.metadata=batch(70,71);images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,true);
+  check(h.fgFallbackSequence==70&&!h.fgBootstrap.refreshDue(h.fgTick),
+    "FG bootstrap: defer a new native endpoint for this slot after a timely synthesis proof");
+  images.metadata=batch(70,71);images.ready=true;h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
   check(images.ready&&images.next==1&&fgschedule::phaseTime(images.metadata,images.next)>displayedTime,
     "FG bootstrap: generated phase catches up without backward presentation or native starvation");
+  images.ready=false;++h.fgTick;
+  h.activeFrameSequence=73; // Credit 73 already advanced live geometry.
+  h.fgRefreshNativeFallback(fixture.fake.frameTime+period);
+  check(h.fgFallbackSequence==72&&h.fgFallbackTime==fixture.fake.frameTime&&
+    pixel(0)==0xff000048u&&pixel(1)==0xff010048u,
+    "FG bootstrap: missed generation slot promotes the complete staged stereo pair, not the outstanding credit");
   h.fgBootstrap.sync({epoch.generation,epoch.config,epoch.reference,epoch.history+1});
-  check(h.fgBootstrap.refreshing(),"FG bootstrap: new history re-enters native refresh");
+  h.fgBootstrap.completeNative(72,h.fgTick);
+  check(h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: new history re-enters native refresh");
   // Drive the actual import client with a real, unsignalled shared WARP
   // fence. No provider GPU reads/retirement may occur, and no ready proof is
   // manufactured just because the metadata says generatedCount=1.
@@ -184,15 +201,16 @@ template<class Check> void runFgBootstrapCases(Check check) {
     h.fgBootstrap.sync(epoch);
     check(h.frameGeneration.poll(epoch.generation,epoch.reference,epoch.config,2,4,4,fixture.fake.frameTime)==S_FALSE&&
       provider.taken&&!images.ready,"FG bootstrap: pending provider fence cannot publish ready images");
-    h.fgPrepareImages(report,fixture.fake.frameTime,true);
-    check(h.fgBootstrap.refreshing()&&provider.retired==0,"FG bootstrap: pending import cannot end native refresh or start provider reads");
+    h.fgPrepareImages(report,fixture.fake.frameTime,period,true);
+    h.fgBootstrap.completeNative(72,h.fgTick);
+    check(h.fgBootstrap.refreshDue(h.fgTick)&&provider.retired==0,"FG bootstrap: pending import cannot delay native refresh or start provider reads");
   }
   if(acquired)check(h.frameGeneration.close()==S_OK&&provider.discarded==(provider.taken?1u:0u)&&provider.released==provider.discarded,
     "FG bootstrap: pending import discarded/released without early GPU retirement");
   for(auto handle:textureHandles)if(handle)CloseHandle(handle);
   if(fenceHandle)CloseHandle(fenceHandle);provider.allowed=false;
-  h.fgBootstrap.clear();check(!h.fgBootstrap.refreshing(),"FG bootstrap: Off clears refresh");
+  h.fgBootstrap.clear();check(!h.fgBootstrap.refreshDue(h.fgTick),"FG bootstrap: Off clears refresh");
   h.boundary.clear();check(h.captured.shutdownShared()==S_OK,"FG bootstrap: shared capture retirement");
-  h.captured.shutdown();h.fgFallback.shutdown();images.phases[0].shutdown();
+  h.captured.shutdown();h.fgPendingNative.shutdown();h.fgFallback.shutdown();images.phases[0].shutdown();
 }
 } // namespace edvr::openxr::test

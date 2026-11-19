@@ -304,6 +304,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint32_t fgLastDisableReason=0;
   XrTime fgLastSourceTime=0;XrDuration fgLastAge=0;unsigned fgLastPhase=0;
   EyeCapture fgFallback;
+  EyeCapture fgPendingNative;
+  struct FgPendingNativePose {
+    fgbootstrap::Epoch epoch{};
+    uint64_t sequence=0;
+    XrTime time=0;
+    XrSpace space=XR_NULL_HANDLE;
+    XrView views[2]{};
+  } fgPendingNativePose;
   EyeCapture fgWorldFallback,fgUiFallback;
   bool fgSplitFallbackValid=false;
   XrView fgFallbackViews[2]{};
@@ -4472,7 +4480,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     ShutdownTrace captureStage("host_capture_release",tracing);
     skybox.shutdown();captured.shutdown();previousPair.shutdown();fgFallback.shutdown();
-    fgWorldFallback.shutdown();fgUiFallback.shutdown();captureStage.end(true);
+    fgPendingNative.shutdown();fgWorldFallback.shutdown();fgUiFallback.shutdown();captureStage.end(true);
     ShutdownTrace stereoStage("host_stereo_shutdown",tracing);
     const auto stereoResult=stereo.shutdown();
     clean=result("destroy_swapchains",stereoResult)&&clean;stereoStage.end(stereoResult==XR_SUCCESS);

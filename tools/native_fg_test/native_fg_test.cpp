@@ -3,6 +3,7 @@
 #include "../../src/openxr/native_fg_lifecycle.h"
 #include "../../src/openxr/owner_service.h"
 #include "../../src/d3d11/frame_generation_auto_policy.h"
+#include "fg_cadence_cases.h"
 #include "hud_sampling_cases.h"
 #include "hud_projection_cases.h"
 #include <atomic>
@@ -168,6 +169,7 @@ int main(int argc,char** argv) {
   if(argc==2&&std::strcmp(argv[1],"--dry-run")==0){std::puts("native_fg_test: CPU-only scheduler/credit contracts; no graphics/runtime");return 0;}
   if(argc!=2||std::strcmp(argv[1],"--self-test")!=0)return 2;
   schedule();credits();creditGate();lifecycle();automaticPolicy();
+  test::runFgCadenceCases(check);
   edvr::openxr::fgtest::runFgHudSamplingCases(check);
   edvr::openxr::fgtest::runFgUiOverlayCases(check);
   std::printf("native_fg_test: %u checks, %u failures\n",checks,failed);return failed?1:0;

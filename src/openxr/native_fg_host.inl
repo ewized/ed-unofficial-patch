@@ -55,6 +55,7 @@
   void fgDisable(uint32_t reason,const RuntimeGate::Lease& operation) {
     fgLastDisableReason=reason;
     fgBootstrap.clear();
+    fgPendingNativePose={};
     fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
     fgNativeOutstanding=false;fgAcceptedEyes=0;fgFallbackValid=false;fgDisplayedSequence=0;fgHistory=0;
     fgSplitFallbackValid=false;
@@ -111,34 +112,46 @@
     if(status.generation!=runtimeGeneration||status.configGeneration!=fgConfig)return {};
     return {runtimeGeneration,fgConfig,poses.read().originGeneration,status.historyGeneration};
   }
-  void fgRefreshNativeFallback(const fgbootstrap::Epoch& epoch,bool pairedReady) {
-    if(!pairedReady||!epoch.valid()||epoch.generation!=runtimeGeneration||epoch.config!=fgConfig||
+  void fgStageNativeFallback(const fgbootstrap::Epoch& epoch) {
+    if(!epoch.valid()||epoch.generation!=runtimeGeneration||epoch.config!=fgConfig||
        epoch.reference!=poses.read().originGeneration)return;
     fgBootstrap.sync(epoch);
-    auto& images=frameGeneration.images();
     const XrTime sourceTime=frameGeometry.displayTime;
-    if(!fgBootstrap.refreshing()||images.ready||frameWithheld||!fgNativePixels||!frameGeometryAvailable||
-       !frameSpace||!activeFrameSequence||activeFrameSequence<=fgDisplayedSequence||sourceTime<=0||
+    if(frameWithheld||!fgNativePixels||!frameGeometryAvailable||!frameSpace||
+       activeFrameSequence<=fgDisplayedSequence||activeFrameSequence<=fgBootstrap.completedSequence()||sourceTime<=0||
        sourceTime>boundary.frame().predictedDisplayTime||
        (fgFallbackValid&&(activeFrameSequence<=fgFallbackSequence||sourceTime<=fgFallbackTime)))return;
-    // The local native-endpoint import buffer is idle during bootstrap. Copy
-    // BOTH eyes there before exchanging it with the complete displayed pair;
-    // a partial capture must not corrupt the previous valid fallback.
-    auto& complete=images.phases[0];
+    // Keep the complete native pair independently of the next credit and of
+    // the import buffers. A partial capture cannot replace the shown pair.
+    fgPendingNativePose={};
     for(unsigned eye=0;eye<2;++eye) {
       const vr::Texture_t source{captured.texture(vr::EVREye(eye)),vr::API_DirectX,captured.colorSpace(vr::EVREye(eye))};
       const auto region=captured.bounds(vr::EVREye(eye));
-      if(complete.capture(vr::EVREye(eye),&source,&region)!=vr::VRCompositorError_None)return;
+      if(fgPendingNative.capture(vr::EVREye(eye),&source,&region)!=vr::VRCompositorError_None)return;
     }
-    if(!complete.exchangeBuffers(fgFallback))return;
-    fgSplitFallbackValid=false;
+    fgPendingNativePose.epoch=epoch;
+    fgPendingNativePose.space=frameSpace;
+    fgPendingNativePose.time=sourceTime;
+    fgPendingNativePose.sequence=activeFrameSequence;
     for(unsigned eye=0;eye<2;++eye) {
-      fgFallbackViews[eye]=frameViews[eye];fgFallbackViews[eye].pose=seatxf::toNatural(frameOrigin,frameViews[eye].pose);
+      auto& view=fgPendingNativePose.views[eye];
+      view=frameViews[eye];view.pose=seatxf::toNatural(frameOrigin,frameViews[eye].pose);
     }
-    fgFallbackSpace=frameSpace;fgFallbackTime=sourceTime;fgFallbackSequence=activeFrameSequence;
-    fgFallbackReference=epoch.reference;fgFallbackValid=true;
+    fgBootstrap.completeNative(activeFrameSequence,fgTick);
   }
-  void fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,bool imported) {
+  void fgRefreshNativeFallback(XrTime displayTime) {
+    const auto& source=fgPendingNativePose;
+    if(!fgBootstrap.refreshDue(fgTick)||!(source.epoch==fgBootstrap.epoch())||
+       source.sequence<=fgDisplayedSequence||source.time>displayTime||
+       changes.crosses(source.time,displayTime)||source.space!=seated.frame().space||
+       !fgPendingNative.exchangeBuffers(fgFallback))return;
+    fgBootstrap.displayNative(source.sequence);
+    fgSplitFallbackValid=false;
+    for(unsigned eye=0;eye<2;++eye)fgFallbackViews[eye]=source.views[eye];
+    fgFallbackSpace=source.space;fgFallbackTime=source.time;fgFallbackSequence=source.sequence;
+    fgFallbackReference=source.epoch.reference;fgFallbackValid=true;
+  }
+  void fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,XrDuration period,bool imported) {
     auto& images=frameGeneration.images();
     if(images.ready&&(images.metadata.generation!=runtimeGeneration||images.metadata.referenceGeneration!=poses.read().originGeneration||
        images.metadata.configGeneration!=fgConfig||images.metadata.historyGeneration!=status.historyGeneration||
@@ -147,12 +160,20 @@
       images.ready=false;++fgRefused;
     }
     if(images.ready) {
-      // An imported generated batch proves this epoch's producer is warm even
-      // when native fallback already displayed its endpoint. Freeze native
-      // advancement now so subsequent generated endpoints can catch up.
-      fgBootstrap.observe(images.metadata,true);
+      // A timely imported result proves that synthesis works in this epoch,
+      // even if native fallback already presented that particular endpoint.
+      const auto& b=images.metadata;
+      if(imported) {
+        const bool timely=fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1);
+        if(b.generatedCount&&timely)fgBootstrap.observe(b,true);
+        else fgBootstrap.miss();
+      }
       if(images.metadata.currentSequence<=fgDisplayedSequence)images.ready=false;
       else if(imported)images.next=fgschedule::firstPhase(images.metadata,fgDisplayedSequence);
+      if(images.ready&&images.next&&
+         !fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
+        images.next=0;fgBootstrap.miss();
+      }
     }
   }
   bool fgFallbackUsable(XrTime displayTime) const {
@@ -260,6 +281,7 @@
     if(!fgEnabled.load(std::memory_order_acquire)) {
       if(state.frameOpen()||pendingFrameEndFinish)return false;
       if(frameGeneration.initializeConsumer(graphics.device(),graphics.context())!=S_OK||fgFallback.initialize(graphics.device())!=S_OK||
+         fgPendingNative.initialize(graphics.device())!=S_OK||
          fgWorldFallback.initialize(graphics.device())!=S_OK||fgUiFallback.initialize(graphics.device())!=S_OK){++fgRefused;return false;}
       fgMultiplier=status.requestedMultiplier;fgConfig=status.configGeneration;fgNextCredit=fgTick;
       fgSeedNativeFallback();
@@ -283,17 +305,7 @@
       // before its prepared presentation; no extra XR frame is invented.
       return true;
     }
-    const bool creditDue=fgCredit&&!fgNativeOutstanding&&fgTick>=fgNextCredit;
     const Frame tick=boundary.frame();
-    if(creditDue) {
-      auto request=std::move(fgCredit);const uint64_t before=lastPublishedFrameSequence;
-      fgPreparingCredit=true;fgNativePixels=false;
-      fgRunCredit(request,operation);fgPreparingCredit=false;
-      fgNativeOutstanding=lastPublishedFrameSequence>before&&poses.read().sequence==activeFrameSequence&&frameGeometryAvailable;
-      fgAcceptedEyes=0;fgNextCredit=fgschedule::nextCredit(fgTick,fgMultiplier);
-      if(fgNativeOutstanding)++fgCredits;
-    }
-    if(!state.frameOpen())return true; // a refused credit closed its frame
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     bool hasUi=false;
     bool pixels=false,generated=false,newNative=false;
@@ -308,7 +320,35 @@
       }
       imported=images.ready;
     }
-    fgPrepareImages(status,tick.predictedDisplayTime,imported);
+    // The runtime can report a predicted period at application cadence. Use
+    // its separately published display frequency when available.
+    const XrDuration period=instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
+      ? XrDuration(1000000000./instrumentDisplayHz+.5) : tick.predictedDisplayPeriod;
+    fgPrepareImages(status,tick.predictedDisplayTime,period,imported);
+    const bool generatedSlot=requested&&tick.shouldRender&&images.ready&&images.next&&comfortFade()<=0.f;
+    if(images.ready&&!generatedSlot) {
+      if(images.next)fgBootstrap.miss();
+      images.next=0;
+      // Don't let a suppressed, late or native-only batch take precedence
+      // over a newer completion already available on the native path.
+      if((fgFallbackValid&&fgFallbackSequence>images.metadata.currentSequence)||
+         (fgBootstrap.refreshDue(fgTick)&&fgBootstrap.completedSequence()>images.metadata.currentSequence))images.ready=false;
+    }
+    if(tick.shouldRender&&!images.ready&&fgBootstrap.refreshDue(fgTick)) {
+      fgBootstrap.miss();
+      fgRefreshNativeFallback(tick.predictedDisplayTime);
+    }
+    // Poll and choose this slot before releasing the caller. A missing phase
+    // releases the credit immediately; an old nextCredit cannot throttle it.
+    if(fgCredit&&!fgNativeOutstanding&&fgbootstrap::creditDue(fgTick,fgNextCredit,generatedSlot)) {
+      auto request=std::move(fgCredit);const uint64_t before=lastPublishedFrameSequence;
+      fgPreparingCredit=true;fgNativePixels=false;
+      fgRunCredit(request,operation);fgPreparingCredit=false;
+      fgNativeOutstanding=lastPublishedFrameSequence>before&&poses.read().sequence==activeFrameSequence&&frameGeometryAvailable;
+      fgAcceptedEyes=0;
+      if(fgNativeOutstanding){fgNextCredit=fgschedule::nextCredit(fgTick,fgMultiplier);++fgCredits;}
+    }
+    if(!state.frameOpen())return true; // a refused credit closed its frame
     if(tick.shouldRender&&images.ready) {
       const auto& b=images.metadata;
       // A comfort fade must cover the full image. Use the already-composited
@@ -331,6 +371,7 @@
           fgFallbackSpace=seated.frame().space;
           fgFallbackTime=b.currentPoseDisplayTime;fgFallbackReference=b.referenceGeneration;
           fgFallbackSequence=b.currentSequence;fgDisplayedSequence=b.currentSequence;fgHistory=b.historyGeneration;images.ready=false;
+          fgBootstrap.displayNative(b.currentSequence);
         }
       } else {images.ready=false;++fgRefused;publishFatalFailure(drawn,"native_fg_stereo");return true;}
     }
@@ -345,7 +386,7 @@
       pixels=true;
       fgLastPhase=0;fgLastSourceTime=fgFallbackTime;fgLastAge=tick.predictedDisplayTime-fgFallbackTime;
       generated=false;newNative=fgDisplayedSequence!=fgFallbackSequence;
-      if(pixels)fgDisplayedSequence=fgFallbackSequence;
+      if(pixels){fgDisplayedSequence=fgFallbackSequence;fgBootstrap.displayNative(fgFallbackSequence);}
     }
     const auto kind=!pixels?edvr::NativePresentationKind::Empty:
       generated?edvr::NativePresentationKind::Generated:
@@ -370,9 +411,11 @@
       // Preserve the shared capture's existing completion/retirement cadence
       // even after bootstrap stops making extra fallback copies.
       const bool pairedReady=!frameWithheld&&fgNativePixels&&captured.completePending(nullptr,&transferWall)==S_OK;
-      if(pairedReady&&fgBootstrap.refreshing()) {
+      if(pairedReady) {
         EdvrFgStatus fallbackStatus{};
-        if(frameGeneration.status(fallbackStatus)==S_OK)fgRefreshNativeFallback(fgBootstrapEpoch(fallbackStatus),pairedReady);
+        if(frameGeneration.status(fallbackStatus)==S_OK) {
+          fgStageNativeFallback(fgBootstrapEpoch(fallbackStatus));
+        }
       }
       fgNativeOutstanding=false;fgAcceptedEyes=0;
     }

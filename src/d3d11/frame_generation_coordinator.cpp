@@ -168,6 +168,8 @@ struct Coordinator {
     std::atomic<bool> closed{false}, workerStarted{false};
     bool devicePinned = false;
     std::atomic<uint32_t> state{EDVR_FG_OFF}, failure{None}, active{0};
+    std::atomic<uint64_t> terminalConfig{0};
+    std::atomic<uint32_t> terminalReason{None};
     std::atomic<uint64_t> history{1}, sourcePairs{0}, generatedPairs{0}, suppressedPairs{0}, refusedPairs{0}, busyPairs{0}, latestSource{0}, latestReady{0}, attemptedSource{0};
     std::mutex metadataMutex;
     EdvrFgSource source{}, previousSource{};
@@ -208,6 +210,21 @@ void refuse(Coordinator& c, Failure failure) noexcept {
             uint32_t(failure), (unsigned long long)c.attemptedSource.load(),
             (unsigned long long)c.history.load(), (unsigned long long)count);
 }
+bool terminalFor(const Coordinator& c,uint64_t config) noexcept {
+    return config && c.terminalConfig.load(std::memory_order_acquire)==config;
+}
+void terminalFault(Coordinator& c,uint64_t config,Failure reason) noexcept {
+    if (!config || c.closed.load()) return;
+    // A fault belongs to the backend's configuration. A racing user selection
+    // has a different generation and must be allowed to create a new backend.
+    c.terminalReason.store(reason,std::memory_order_relaxed);
+    c.terminalConfig.store(config,std::memory_order_release);
+    ++c.refusedPairs;
+}
+bool terminalNgx(FrameGenerationNgxCompletion completion,const FrameGenerationNgxStatus& status) noexcept {
+    return completion==FrameGenerationNgxCompletion::Expired ||
+        completion==FrameGenerationNgxCompletion::DeviceRemoved || status.failed || status.quarantined;
+}
 void refuseOutput(Coordinator& c,const FrameGenerationOutputStatus& status) noexcept {
     // A full, healthy output ring needs the consumer to keep draining leases.
     // Preserve the existing backend retirement; only classify this exact
@@ -223,7 +240,8 @@ void abortCapture(Coordinator& c, Failure failure) noexcept {
     c.transaction = false; c.rejected = true; c.capture = {}; refuse(c, failure);
 }
 bool enabled(Coordinator* c) noexcept {
-    return c && !c->closed.load(std::memory_order_acquire) && requested.load(std::memory_order_acquire) != 0;
+    return c && !c->closed.load(std::memory_order_acquire) &&
+        requested.load(std::memory_order_acquire) != 0 && !terminalFor(*c,configuration.load());
 }
 bool owner(Coordinator& c) noexcept {return c.renderThread && c.renderThread == GetCurrentThreadId();}
 bool paths(Coordinator& c) {
@@ -272,10 +290,26 @@ void worker(Coordinator* c) noexcept {
     std::unique_ptr<FrameGenerationOutput> output;
     std::shared_ptr<Producer> configured;
     unsigned multiplier = 0, diagnosticFailures = 0;
+    const auto discardBackend = [&](uint64_t config,Failure why) {
+        terminalFault(*c,config,why);
+        c->active=0;
+        clearUnexported(*c);
+        if (output) drainOutput(*output);
+        if (ngx) ngx->drain(2000);
+        output.reset(); ngx.reset(); configured.reset(); multiplier=0;
+    };
     try {
         for (;;) {
-            if (output) output->collect();
-            if (ngx) ngx->collect();
+            if (ngx && !ngx->collect() && terminalNgx(FrameGenerationNgxCompletion::Empty,ngx->status())) {
+                const auto s=ngx->status();
+                Log::get().note("native fg: terminal NGX collection fault, failure=%u hr=0x%08x; native cadence until reselected.",
+                    uint32_t(s.failure),unsigned(s.lastHresult));
+                discardBackend(configured->config,Ngx);
+            }
+            if (output && !output->collect()) {
+                const auto s=output->status();
+                if (s.failed || s.quarantined) discardBackend(configured->config,Output);
+            }
             Work work;
             {
                 std::unique_lock<std::mutex> lock(c->queueMutex);
@@ -283,14 +317,14 @@ void worker(Coordinator* c) noexcept {
                 if (c->queued.empty()) {if (c->closed.load()) break; else continue;}
                 work = std::move(c->queued.front()); c->queued.pop_front();
             }
-            if (c->closed.load() || work.source.current.configGeneration != configuration.load() ||
-                work.source.historyGeneration != c->history.load() || !requested.load()) {
+            if (!enabled(c) || work.source.current.configGeneration != configuration.load() ||
+                work.source.historyGeneration != c->history.load()) {
                 work.input->cancel(); continue;
             }
             if (configured != work.producer || multiplier != work.source.multiplier) {
                 clearUnexported(*c);
                 if ((output && !drainOutput(*output)) || (ngx && !ngx->drain(2000))) {
-                    work.input->cancel(); c->state = EDVR_FG_FAILED; refuse(*c, Output); break;
+                    work.input->cancel(); discardBackend(work.producer->config,Output); continue;
                 }
                 output.reset(); ngx.reset(); configured = work.producer; multiplier = work.source.multiplier;
                 ngx = std::make_unique<FrameGenerationNgx>(); output = std::make_unique<FrameGenerationOutput>();
@@ -319,13 +353,13 @@ void worker(Coordinator* c) noexcept {
                         uint32_t(s.failure),uint32_t(s.initStage),uint32_t(s.failedInitStage),s.failedInitEye,
                         s.lastNgxResult,unsigned(s.lastHresult),unsigned(s.available),s.maximumGenerated,
                         unsigned(init.privateNgxDevice),unsigned(init.ngxAlreadyInitialized));
-                    work.input->cancel(); c->state = EDVR_FG_FAILED; refuse(*c, Ngx); break;
+                    work.input->cancel(); discardBackend(work.producer->config,Ngx); continue;
                 }
                 if (!output->initialize(true, init.device, init.width, init.height)) {
                     const auto s = output->status();
                     Log::get().note("native fg: output initialization failed failure=%u hr=0x%08x quarantined=%u.",
                         uint32_t(s.failure),unsigned(s.lastHresult),unsigned(s.quarantined));
-                    work.input->cancel(); c->state = EDVR_FG_FAILED; refuse(*c, Output); break;
+                    work.input->cancel(); discardBackend(work.producer->config,Output); continue;
                 }
                 c->active = multiplier; c->state = EDVR_FG_ARMING;
                 Log::get().note("native fg: worker initialized multiplier=%u source=%ux%u guides=%ux%u route=official-helper/shared-native-pair mv_units=input-pixels mv_scale=reciprocal-guide-size jitter_units=clip-space", multiplier, init.width, init.height, init.guideWidth, init.guideHeight);
@@ -349,6 +383,13 @@ void worker(Coordinator* c) noexcept {
             while (completion == FrameGenerationNgxCompletion::Pending) {
                 if (output) output->collect();
                 Sleep(1); completion = ticket.poll();
+            }
+            const auto ngxStatus=ngx->status();
+            if (terminalNgx(completion,ngxStatus)) {
+                retireBackendOnly(work,ticket);
+                Log::get().note("native fg: terminal NGX evaluation fault, completion=%u failure=%u ngx=0x%08x hr=0x%08x; native cadence until reselected.",
+                    unsigned(completion),uint32_t(ngxStatus.failure),ngxStatus.lastNgxResult,unsigned(ngxStatus.lastHresult));
+                discardBackend(work.producer->config,Ngx);continue;
             }
             if (work.source.current.configGeneration != configuration.load() || work.source.historyGeneration != c->history.load() ||
                 c->closed.load() || !requested.load()) {
@@ -379,12 +420,15 @@ void worker(Coordinator* c) noexcept {
                         (unsigned long long)input.sequence,uint32_t(outputStatus.failure),unsigned(outputStatus.lastHresult),
                         unsigned(outputStatus.quarantined),uint32_t(completion));
                 }
-                retireBackendOnly(work, ticket); refuseOutput(*c, outputStatus); continue;
+                retireBackendOnly(work, ticket);
+                if (outputStatus.failed || outputStatus.quarantined) discardBackend(work.producer->config,Output);
+                else refuseOutput(*c, outputStatus);
+                continue;
             }
             if (!published.finalFence || !published.finalValue || !work.input->retire(published.finalFence, published.finalValue)) {
                 Log::get().note("native fg: source retirement failed sequence=%llu final_fence=%u final_value=%llu; source remains quarantined.",
                     (unsigned long long)input.sequence,unsigned(published.finalFence!=nullptr),(unsigned long long)published.finalValue);
-                c->state = EDVR_FG_FAILED; refuse(*c, Output); break;
+                discardBackend(work.producer->config,Output);continue;
             }
             if (completion == FrameGenerationNgxCompletion::Ready) ++c->generatedPairs; else ++c->suppressedPairs;
             {
@@ -397,7 +441,7 @@ void worker(Coordinator* c) noexcept {
         clearUnexported(*c);
         if (output) drainOutput(*output);
         if (ngx) ngx->drain(2000);
-    } catch (...) {c->state = EDVR_FG_FAILED; refuse(*c, Output);}
+    } catch (...) {terminalFault(*c,configured?configured->config:configuration.load(),Output);}
     // Destruction remains on the component owner thread. Only after every
     // destructor has finished may a nonblocking close report completion.
     output.reset(); ngx.reset(); configured.reset();
@@ -416,9 +460,12 @@ HRESULT WINAPI status(void* pointer, EdvrFgStatus* out) {
     auto* c = identify(pointer);
     if (!c || !out || out->size != sizeof(*out) || out->version != 1) return E_INVALIDARG;
     *out = {}; out->size = sizeof(*out); out->version = 1;
-    out->requestedMultiplier = requested.load(); out->activeMultiplier = c->active.load();
-    out->state = !out->requestedMultiplier ? EDVR_FG_OFF : c->state.load(); out->lastFailure = c->failure.load();
-    out->generation = c->generation; out->configGeneration = configuration.load(); out->historyGeneration = c->history.load();
+    out->configGeneration = configuration.load();
+    const bool fault=terminalFor(*c,out->configGeneration);
+    out->requestedMultiplier = requested.load(); out->activeMultiplier = fault?0:c->active.load();
+    out->state = !out->requestedMultiplier ? EDVR_FG_OFF : fault?EDVR_FG_FAILED:c->state.load();
+    out->lastFailure = fault?c->terminalReason.load():c->failure.load();
+    out->generation = c->generation; out->historyGeneration = c->history.load();
     out->sourcePairs = c->sourcePairs.load(); out->generatedPairs = c->generatedPairs.load();
     out->suppressedPairs = c->suppressedPairs.load(); out->refusedPairs = c->refusedPairs.load(); out->busyPairs = c->busyPairs.load();
     out->latestSourceSequence = c->latestSource.load(); out->latestReadySequence = c->latestReady.load();
@@ -526,8 +573,9 @@ void nativeFgAutoObserve(const fg_auto::Sample& sample) noexcept {
         // UNAVAILABLE is the existing recoverable native-fallback route. The
         // XR owner keeps announcing sources until a supported pair recovers;
         // toggling Auto Off here would fight that recovery on every warmup.
-        qualified.fault=qualified.fault||(requested.load()!=0&&c->state.load()==EDVR_FG_FAILED);
-        qualified.fatal=qualified.fatal||c->closed.load()||c->state.load()==EDVR_FG_FAILED;
+        const bool terminal=terminalFor(*c,configuration.load())||c->state.load()==EDVR_FG_FAILED;
+        qualified.fault=qualified.fault||(requested.load()!=0&&terminal);
+        qualified.fatal=qualified.fatal||c->closed.load()||terminal;
     }
     const auto before=requested.load();const auto selected=autoPolicy.observe(qualified);
     if(selected!=before){
@@ -643,7 +691,7 @@ void nativeFgCaptureGuides(ID3D11DeviceContext* context, const NativeFgGuides& g
             FrameGenerationInteropInit init;
             init.enabled = true; init.device11 = c->device; init.context = context; init.renderThreadId = c->renderThread;
             init.colorWidth = made->width; init.colorHeight = made->height; init.guideWidth = made->guideWidth; init.guideHeight = made->guideHeight;
-            if (!made->interop.initialize(init) || !made->color.initialize(true, c->device, context, c->renderThread) || !startWorker(*c)) {
+            if (!made->interop.initialize(init) || !made->color.initialize(true, c->device, context, c->renderThread)) {
                 abortCapture(*c, Interop); return;
             }
             // The worker may retain the previous producer until new work is
@@ -652,6 +700,7 @@ void nativeFgCaptureGuides(ID3D11DeviceContext* context, const NativeFgGuides& g
             if (!uiLayerFgRetireStorage(context)) {abortCapture(*c, Ui); return;}
             c->producer = std::move(made);
         }
+        if (!startWorker(*c)) {abortCapture(*c, Interop); return;}
         if (!c->transaction) {
             c->capture.producer = c->producer;
             if (!c->producer->interop.begin(context, c->captureSequence, c->captureHistory)) {++c->busyPairs; abortCapture(*c, Busy); return;}
@@ -877,6 +926,22 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
     nativeFgSetRequestedMultiplier(5);table.getStatus(table.context,&report);check(report.requestedMultiplier==0 && report.state==EDVR_FG_OFF);
     nativeFgSetRequestedMultiplier(3);table.getStatus(table.context,&report);
     check(report.requestedMultiplier==3 && report.state==EDVR_FG_ARMING && !report.activeMultiplier);
+    FrameGenerationNgxStatus ngxStatus;
+    check(!terminalNgx(FrameGenerationNgxCompletion::Suppressed,ngxStatus));
+    check(!terminalNgx(FrameGenerationNgxCompletion::FailedEvaluation,ngxStatus));
+    check(terminalNgx(FrameGenerationNgxCompletion::Expired,ngxStatus));
+    check(terminalNgx(FrameGenerationNgxCompletion::DeviceRemoved,ngxStatus));
+    ngxStatus.failed=true;
+    check(terminalNgx(FrameGenerationNgxCompletion::Empty,ngxStatus)); // sticky collect/submit refusal
+    const auto failedConfig=report.configGeneration;
+    terminalFault(*c,failedConfig,Ngx);
+    check(table.getStatus(table.context,&report)==S_OK&&report.state==EDVR_FG_FAILED&&
+        report.lastFailure==Ngx&&!report.activeMultiplier);
+    check(table.beginSource(table.context,&source)==S_FALSE&&table.poll(table.context,&batch)==S_FALSE);
+    nativeFgSetRequestedMultiplier(0);nativeFgSetRequestedMultiplier(3);
+    terminalFault(*c,failedConfig,Ngx); // a late result from the old owner
+    check(table.getStatus(table.context,&report)==S_OK&&report.state==EDVR_FG_ARMING&&
+        report.configGeneration!=failedConfig);
     nativeFgSetAutoMode();table.getStatus(table.context,&report);
     const auto autoConfiguration=report.configGeneration;
     const auto* sameProducer=c->producer.get();
