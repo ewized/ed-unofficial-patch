@@ -2,8 +2,8 @@
 
 ## Status
 
-- **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Headset validation pending.
-- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. The blue highlight distinguishes 2x2 and 4x4 zones. GPU testing at `97cdd5e5` confirmed 1x1, 2x2 and 4x4 shading under simulated gaze and measured fewer pixel shader invocations. In-game FPS, physical eye tracking and perceived image quality were not measured.
+- **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
+- **VRS material coverage:** scene material eligibility uses current eye/depth/viewport and UI exclusions instead of a two-shader allowlist. GPU testing at `3d287e87` confirmed 1x1, 2x2 and 4x4 shading and exact fine motion data under simulated gaze. Live hangar counters confirmed expanded material coverage and depth-copy reuse. In-game FPS gains, physical eye tracking and perceived image quality were not measured.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -20,7 +20,7 @@
     `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
     (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
     since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
-  - Native VRS is on Performance; Monitor and FPS readouts count actual native/generated XR submissions and Auto mode. Live VR validation remains pending.
+  - Native VRS is on Performance; Monitor and FPS readouts count actual native/generated XR submissions and Auto mode. Simulator validation passed at `3d287e87`; physical headset checks remain pending.
   - Single-line overlay: fits its text, keeps its font size across OpenXR
     resolutions, shows application GPU/CPU timings. Full desktop gates
     passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
@@ -954,7 +954,8 @@ minimal full-rate witness pass against a private depth/stencil surface.
 Their material pass then runs at the requested rate without overwriting
 the fine motion data. Adjacent compatible draws can reuse the depth copy;
 intervening writers invalidate it. A late rate refusal restores the original
-combined draw. Windows and GPU validation of this split remains pending.
+combined draw. Windows/WARP and RTX 5090 validation passed at `3d287e87`,
+including sloped overlap, coplanar ties, stencil, skin and guarded overlays.
 
 HUD/menu draws, screen resolves, lighting passes, cutouts, explicit shader
 depth or sample-mask outputs, UAV side effects and unproven state remain
@@ -967,6 +968,25 @@ does not expose an 8x8 rate. **VRS zone highlight** leaves the centre clear,
 uses light blue for 2x2 and stronger blue for 4x4. It shows the acknowledged
 zone map, not which draw produced every final pixel. Rasterized edges can
 stay sharp even when material pixel shading is coarse.
+
+### Simulator validation (2026-11-19)
+
+Commit `3d287e87` passed the full native Windows build: 211 native jobs
+and 79 Python gates. The WARP and RTX fixtures compare fine motion data
+against an independently compiled full-rate HLSL shader, bit for bit.
+The hardware fixture also verifies separate eye maps, gaze movement and
+restoration of full rate after disabling VRS. Its lower material pixel
+shader invocation count does not establish a net frame-time benefit: the
+split adds vertex/raster work, private depth storage and driver calls.
+
+In the live main-menu hangar, both eyes evaluated Balanced at 2228 by
+1253 into 3840 by 2160 output. F8 displayed the DLSS quality selector.
+Narrow used sharp radius 0.080 and transition radius 0.240. Counters
+recorded accepted materials outside the former shader list and paired
+fine-motion/coarse-material draws, with depth-copy reuse and no driver,
+state, shader, query or rate refusals in that scene. Cockpit perception,
+physical gaze calibration and matched-scene performance remain manual
+validation work; this session did not automate a flight.
 
 Monitor adds a **GENERATED** tile with generated FPS and an **FG MODE** tile
 with the runtime mode and Auto selection (1x means native cadence). Full session totals and the Auto
