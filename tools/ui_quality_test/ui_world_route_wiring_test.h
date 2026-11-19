@@ -313,6 +313,24 @@ void testWiringVscreen() {
     for (const WirePin& p : vscreenCurvedPins(text)) check(p.ok, p.what);
 }
 
+// Check the successful layer-only branch in its own braces. Accounting can run
+// there, but a treated bit or return belonging to the ordinary pass cannot count.
+constexpr const char* kLayerFloor = "floorOutput(*s,eye,w,h,outW,outH);";
+constexpr const char* kLayerBranch = "if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){";
+constexpr const char* kLayerHistory = "if(s->verdictPending[eye])";
+constexpr const char* kOrdinaryPass = "void*raw=edvrTemporalAa(";
+
+bool layerOnlyWired(const std::string& treat) {
+    const size_t branch = treat.find(kLayerBranch);
+    if (branch == std::string::npos || treat.find(kLayerFloor) >= branch) return false;
+    const size_t open = branch + std::strlen(kLayerBranch) - 1, close = afterui::closingBrace(treat, open);
+    const size_t history = treat.find(kLayerHistory), pass = treat.find(kOrdinaryPass);
+    if (!(close < history && history < pass && pass != std::string::npos)) return false;
+    const std::string body = treat.substr(open + 1, close - open - 1);
+    const size_t exit = body.find("return");
+    return has(body, "s->treated[eye]=true;") && exit != std::string::npos && body.substr(exit) == "returnS_OK;";
+}
+
 void testWiringDoor() {
     const std::string temporalText = readText("src/d3d11/native_temporal.cpp");
     check(!temporalText.empty(), "src/d3d11/native_temporal.cpp is readable from the working directory");
@@ -322,10 +340,14 @@ void testWiringDoor() {
           "begin(): the eye shift is advertised only while no map is open and the route does not own the next frame (the gate gains one lock-free read)");
     check(countOf(afterui::squeeze(temporalText), "vrWorldRouteOwnsNextFrame()") == 1, "...and that is the only place native_temporal asks");
     const std::string treat = bodyOf(temporalText, "HRESULT WINAPI treat(void* p,uint64_t seq,", "native_temporal treat()");
-    reportOrder(inOrder(treat, {"floorOutput(*s,eye,w,h,outW,outH);", "if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){s->treated[eye]=true;returnS_OK;}",
-                                "s->verdictPending[eye]", "void*raw=edvrTemporalAa("},
-                        &missing),
-                missing, "treat(): the layer-only branch sits after the output sizing (the served floor's cut included) and before the history and the pass, and answers S_OK");
+    check(layerOnlyWired(treat), "treat(): after output sizing and before history and the pass, the layer-only branch marks the eye treated and returns S_OK");
+    const std::string floor = kLayerFloor, branch = kLayerBranch, ordinaryPath = std::string(kLayerHistory) + "{}" + kOrdinaryPass + "source);";
+    const std::string landing = "s->treated[eye]=true;record({});returnS_OK;}";
+    check(layerOnlyWired(floor + branch + landing + ordinaryPath), "control: unrelated bookkeeping inside the layer-only branch is allowed");
+    check(!layerOnlyWired(floor + branch + "returnS_OK;}s->treated[eye]=true;" + ordinaryPath), "control: a treated bit outside the branch does not count");
+    check(!layerOnlyWired(floor + branch + "s->treated[eye]=true;returnS_FALSE;}" + ordinaryPath), "control: a layer-only S_FALSE is caught");
+    check(!layerOnlyWired(branch + landing + floor + ordinaryPath), "control: a branch before the served-floor cut is caught");
+    check(!layerOnlyWired(floor + ordinaryPath + branch + landing), "control: a branch after history and the pass is caught");
     check(!has(treat.substr(0, treat.find("void*raw=edvrTemporalAa(")), "s->continuity[eye]=") && !has(treat.substr(0, treat.find("if(layerOnlyTreat(")), "hst.valid=true"),
           "...and leaves the eye's continuity alone (a later eye-route frame finds it broken and resets the history)");
     const std::string helper = bodyOf(temporalText, "bool layerOnlyTreat(State& s,", "layerOnlyTreat");
