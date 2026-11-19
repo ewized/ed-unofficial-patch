@@ -209,6 +209,81 @@ int wmain(int argc, wchar_t** argv) {
               on.lowLatencyMode && !on.lowLatencyBoost && boost.lowLatencyMode && boost.lowLatencyBoost &&
               !boost.minimumIntervalUs && !boost.useMarkersToOptimize && !boost.useMinQueueTime,
               "Reflex V1 parameters enable driver mode without a limiter or marker optimization");
+        using edvr::native_reflex::detail::GetSleepStatus;
+        using edvr::native_reflex::detail::SetSleepMode;
+        using edvr::native_reflex::detail::requestMode;
+        GetSleepStatus external{};
+        unsigned reads = 0, writes = 0;
+        int readCode = 0, setCode = 0;
+        auto read = [&](GetSleepStatus& result) {
+            ++reads;
+            check(result.version == 0x00010088, "getter uses NV_GET_SLEEP_STATUS_PARAMS_VER1");
+            result = external;
+            return readCode;
+        };
+        auto set = [&](SetSleepMode& params) {
+            ++writes;
+            if (!setCode) external.lowLatencyMode = params.lowLatencyMode;
+            return setCode;
+        };
+        external.lowLatencyMode = 1;
+        auto retained = requestMode(Mode::Boost, false, read, set);
+        check(!writes && retained.externalPolicy && retained.setStatus != 0 && edvr::native_reflex::detail::observed(retained) == edvr::native_reflex::DriverMode::On,
+              "an existing device policy is reported separately and never overridden, even to add Boost");
+        external.lowLatencyMode = 0; external.sleepIntervalUs = 16000;
+        requestMode(Mode::On, false, read, set);
+        external.sleepIntervalUs = 0; external.useGameSleep = 1;
+        requestMode(Mode::On, false, read, set);
+        external.useGameSleep = 0; readCode = -1;
+        requestMode(Mode::On, false, read, set);
+        check(!writes && reads == 4, "an existing sleep interval, game sleep, or unreadable baseline prevents a write");
+        readCode = 0; setCode = -104;
+        auto refused = requestMode(Mode::On, false, read, set);
+        check(writes == 1 && refused.apiResolved && refused.setStatus == -104 && refused.getStatus != 0,
+              "API resolution does not imply mode acceptance or an effective post-set reading");
+        setCode = 0;
+        auto applied = requestMode(Mode::Boost, false, read, set);
+        auto released = requestMode(Mode::Off, true, read, set);
+        check(writes == 3 && reads == 8 && applied.setStatus == 0 && applied.readback.lowLatencyMode &&
+              released.getStatus == 0 && !released.readback.lowLatencyMode, "EDVR can reverse its own request and observe the driver");
+        applied.transportReady = true;
+        edvr::native_reflex::publishStatus(edvr::native_reflex::detail::snapshot(Mode::Boost, edvr::native_reflex::RequestState::Accepted, applied));
+        const auto displayed = edvr::native_reflex::status();
+        check(displayed.requested == Mode::Boost && displayed.driver == edvr::native_reflex::DriverMode::On &&
+              displayed.apiAvailable && displayed.markerTransportReady && !displayed.gameSleepObserved && !displayed.fullBoundaryAvailable,
+              "driver enable and marker transport availability do not attest to Boost clocks, Sleep or full frame integration");
+        edvr::native_reflex::publishStatus({});
+        using edvr::native_reflex::FrameEvents;
+        using edvr::native_reflex::Marker;
+        constexpr auto packet = edvr::native_reflex::detail::markerParameters((uint64_t{1} << 42) + 7, Marker::InputSample);
+        check(packet.version == 0x00010058 && packet.frameId == (uint64_t{1} << 42) + 7 && uint32_t(packet.marker) == 6 &&
+              !packet.reserved0 && !packet.reserved[55], "V1 input marker preserves the native 64-bit ID and zeros the reserved fields");
+        FrameEvents events;
+        unsigned sleeps = 0, marks = 0; uint64_t markedId = 0;
+        auto sleep = [&] { ++sleeps; return true; };
+        auto mark = [&](uint64_t id, Marker) { ++marks; markedId = id; return true; };
+        check(!events.event(1, Marker::PresentStart, mark) && !marks && !sleeps,
+              "a standalone Present or generated XR tick cannot create a Reflex simulation receipt");
+        check(events.beforeInput(1, sleep, mark) && !events.beforeInput(1, sleep, mark) && sleeps == 1 && marks == 1,
+              "one pre-input Sleep and simulation start per distinct source frame");
+        check(!events.event(1, Marker::RenderStart, mark) && !events.event(2, Marker::InputSample, mark) &&
+              events.event(1, Marker::InputSample, mark) && !events.event(1, Marker::InputSample, mark) &&
+              events.event(1, Marker::SimulationEnd, mark) && events.event(1, Marker::RenderStart, mark) &&
+              events.event(1, Marker::RenderEnd, mark) && events.event(1, Marker::PresentStart, mark) &&
+              events.event(1, Marker::PresentEnd, mark) && marks == 7 && markedId == 1,
+              "all seven markers share one source ID, in order, with no duplicate input or misplaced rendering");
+        check(events.beforeInput(2, sleep, mark) && !events.event(2, Marker::SimulationEnd, [](uint64_t, Marker) {return false;}) &&
+              !events.event(2, Marker::RenderStart, mark) && !events.beforeInput(2, sleep, mark) && sleeps == 2,
+              "a rejected marker drops the rest of the frame and cannot replay Sleep");
+        check(!events.beforeInput(3, [] {return false;}, mark) && !events.beforeInput(3, sleep, mark) && marks == 8 &&
+              events.beforeInput(4, sleep, mark), "failed Sleep produces no markers; the next source frame can recover");
+        events.invalidate();
+        check(!events.event(4, Marker::SimulationEnd, mark) && !events.beforeInput(4, sleep, mark),
+              "channel invalidation revokes incomplete evidence without recycling a native frame ID");
+        check(events.beforeInput(5, sleep, mark) && events.event(5, Marker::SimulationEnd, mark) &&
+              events.event(5, Marker::RenderStart, mark) && events.beforeInput(6, sleep, mark) &&
+              events.event(5, Marker::RenderEnd, mark) && markedId == 5 && events.event(6, Marker::InputSample, mark) && markedId == 6,
+              "render events keep their source ID when simulation of a newer frame overlaps");
         ModeHistory reflex;
         check(reflex.change(Mode::Off) && !reflex.requiresDriver() && !reflex.observing() &&
               !reflex.change(Mode::Off),
