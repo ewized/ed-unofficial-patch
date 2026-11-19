@@ -11,6 +11,7 @@
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
 #include "../../src/d3d11/native_reflex_nvapi.h"
 #include "reflex_trace_checks.h"
+#include "reflex_auto_cases.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -201,6 +202,7 @@ int wmain(int argc, wchar_t** argv) {
     };
 
     reflex_trace_checks::run(check);
+    reflex_auto_cases::run(check);
     {
         using edvr::native_reflex::Mode;
         using edvr::native_reflex::ModeHistory;
@@ -380,11 +382,39 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameRequest request{
         sizeof(request), EDVR_NATIVE_FRAME_VERSION_1, device.Get(), 41};
     EdvrNativeFrameTable table{sizeof(table), EDVR_NATIVE_FRAME_VERSION_1};
+    // Test the runtime seam without calling NVAPI: this fixture's provider
+    // has an unavailable driver stub. Omit nvidia_reflex to test its default.
+    edvr::Config::get().set("fix.frame_generation", "auto");
     std::puts("native_frame_test: acquiring");
     check(edvrAcquireNativeFrame(&request, &table) == S_OK && table.context &&
               table.beginFrame && table.reservedCall && table.latchSubmit &&
               table.invalidate && table.close,
           "acquire exports complete table");
+    {
+        using namespace edvr::native_reflex;
+        check(status().requested == Mode::On && status().request == RequestState::Refused &&
+                  !status().fullBoundaryAvailable,
+              "missing low latency setting requests driver On on acquire with FG Auto, without SDK timing");
+        auto& cfg = edvr::Config::get();
+        cfg.set("fix.frame_generation", "off");
+        updateOnGamePresent(device.Get());
+        check(status().requested == Mode::Off && status().request == RequestState::Untouched,
+              "FG selection alone refreshes the effective request on the producer");
+        cfg.set("fix.frame_generation", "4x");
+        updateOnGamePresent(device.Get());
+        check(status().requested == Mode::On, "fixed FG re-enables Auto's driver request");
+        const auto profile = edvr::runtimeProfileValue();
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        updateOnGamePresent(device.Get());
+        check(status().requested == Mode::Off, "switching to flat withdraws Auto's request without an INI edit");
+        edvr::runtimeProfileSet(profile);
+        cfg.set("fix.nvidia_reflex", "off");
+        updateOnGamePresent(device.Get());
+        check(status().requested == Mode::Off, "saved Off overrides selected FG");
+        cfg.set("fix.nvidia_reflex", "auto");
+        cfg.set("fix.frame_generation", "off");
+        updateOnGamePresent(device.Get());
+    }
     EdvrNativeFrameTable blockedTable{sizeof(blockedTable),
                                       EDVR_NATIVE_FRAME_VERSION_1};
     check(edvrAcquireNativeFrame(&request, &blockedTable) == E_PENDING,

@@ -314,9 +314,15 @@ ambiguous timing retains the strict nominal time limit. This tracks runtime
 predictions, not physical scanout. It adds no waiting slot or native-credit
 delay. See the [OpenXR frame-loop contract](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#frame-loop).
 
-For VR latency experiments, `fix.nvidia_reflex` accepts `off` (default), `on`, and `boost`.
-The setting requests NVIDIA's low-latency mode on the game's D3D11 device. `boost` also requests
-higher GPU clocks. OpenXR continues to pace headset frames. Default Off leaves the driver untouched.
+VR's Performance page has **NVIDIA low latency** (`fix.nvidia_reflex`), with
+`auto` (the new/missing-key default), `off`, `on`, and `boost`. Auto requests
+driver On while VR Frame generation is selected as Auto, 2x, 3x or 4x. It
+keeps that request through temporary native cadence and warming periods.
+An existing explicit Off remains Off; On and Boost remain independent
+requests. Boost also requests higher GPU clocks. OpenXR continues to pace
+headset frames. An Off choice that never owned an enable leaves the driver
+untouched. Returning Auto to Off withdraws its own request through the
+existing device ownership checks.
 For an accepted mode change, the graphics log records the immediate result (`native_reflex`) and
 read-only driver status after 4, 16, and 64 successful game Presents (`native_reflex_readback`).
 The final observation gives the effective low-latency state at that point. Driver policy can override the
@@ -324,6 +330,15 @@ request. If the final Off reading is still enabled or unknown, the session tries
 normal close. The Boost flag in the log identifies the request. Check GPU clocks and power for
 its effect, and measure headset responsiveness separately from submission rates.
 [NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
+
+This control requests a driver mode. It does not provide a qualified Reflex
+SDK Sleep/marker timeline. The direct NGX API can run FG independently, but
+NVIDIA's product integration guidelines require the Reflex SDK and its
+enablement with FG. Current scene/input and first-render attribution is
+unresolved, so full SDK timing remains disabled and FG remains experimental.
+Driver readback alone cannot qualify it. Boost is optional; DLSS Super
+Resolution and VRS do not depend on this driver setting. See the
+[guidelines shipped with the pinned NGX SDK](https://github.com/NVIDIA/DLSS/blob/374959484e79a640feaba44c93ac8cfb0a03f5b5/doc/RTX%20UI%20Developer%20Guidelines.pdf).
 
 ### XeSS Frame Generation rows (2026-11-12)
 

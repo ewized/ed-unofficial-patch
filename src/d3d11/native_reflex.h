@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../common/native_fg_multiplier.h"
+
 #include <cstdint>
 #include <atomic>
 
@@ -8,6 +10,16 @@ struct ID3D11Device;
 namespace edvr::native_reflex {
 
 enum class Mode : uint8_t { Off, On, Boost };
+
+// Auto is a setting, not a driver mode. Follow the saved VR FG selection
+// rather than its active multiplier, which drops to 1x during pauses.
+constexpr Mode driverModeForSelection(std::string_view choice, NativeFgSelection fg, bool vr) noexcept {
+    if (!vr) return Mode::Off;
+    const auto equal = native_fg_detail::equalSetting;
+    if (equal(choice, "on")) return Mode::On;
+    if (equal(choice, "boost")) return Mode::Boost;
+    return equal(choice, "auto") && fg.enabled() ? Mode::On : Mode::Off;
+}
 
 enum class RequestState : uint8_t { NoSession, Untouched, Accepted, ExternalPolicy, Refused };
 enum class DriverMode : uint8_t { Unknown, Off, On };

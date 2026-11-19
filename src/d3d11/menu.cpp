@@ -2026,7 +2026,7 @@ Page makePage(const MenuPageDef& d) {
         case MenuPageSource::Settings:
             addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
             if (d.token && !strcmp(d.token, "performance") && d.tier == MenuPageTier::Fix) {
-                moveRowAfter(p,"experimental","eye_tracked_foveation","fix","frame_generation");
+                moveRowAfter(p,"experimental","eye_tracked_foveation","fix","nvidia_reflex");
                 moveRowAfter(p,"experimental","foveation_focus","experimental","eye_tracked_foveation");
                 moveRowAfter(p,"experimental","foveation_highlight","experimental","foveation_focus");
                 addNativePerformanceStatus(p);

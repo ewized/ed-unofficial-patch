@@ -80,11 +80,15 @@ uint64_t reflexConfigStamp() {
 // still notify the next Present if it changed while the key was being read.
 bool refreshReflex(State& state, uint64_t stamp) {
     using namespace edvr::native_reflex;
+    const auto& cfg = edvr::Config::get();
     Mode mode = Mode::Off;
     if (stamp & 1) {
-        const auto value = edvr::Config::get().getString("fix.nvidia_reflex", "off");
-        if (_stricmp(value.c_str(), "boost") == 0) mode = Mode::Boost;
-        else if (_stricmp(value.c_str(), "on") == 0) mode = Mode::On;
+        const auto choice = cfg.getString("fix.nvidia_reflex", "auto");
+        const auto fg = edvr::nativeFgSelection(cfg.getString("fix.frame_generation", "off"));
+        // The two settings have separate reads. Don't change driver state
+        // for a mixed snapshot if an edit landed between them.
+        if (reflexConfigStamp() != stamp) return false;
+        mode = driverModeForSelection(choice, fg, true);
     }
     if (!updateMode(state.reflex, state.device, mode, state.generation)) return false;
     if (state.reflex.observing()) t_reflexPresentsAfterRequest = 0;
