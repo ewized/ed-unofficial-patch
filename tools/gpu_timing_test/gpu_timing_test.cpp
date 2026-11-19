@@ -341,14 +341,14 @@ void witnessTimingCases(Device& d) {
     check(app.bind(d.dev.Get(),ctx) && app.create(0) && app.begin(0) && app.timestamp(0,0),"application scope for witness sample");
     const auto allocations=f.ops.creates;
     WitnessMirror depth;
-    depth.width=3840;depth.height=2160;depth.format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    depth.textureDesc.Width=3840;depth.textureDesc.Height=2160;depth.format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     unsigned selected=0;
     f.ops.expectWitnessQueries=true;
     for(unsigned row=0;row<probe.plan.strata;++row){
         for(unsigned n=0;n<32;++n){
             WitnessObservation sample(probe,WitnessRoute(row/2),1,(row&1)!=0);
             if(sample.sample)++selected;
-            sample.validated(depth,(row&1)!=0);
+            sample.validated(depth,(row&1)!=0,false);
             if(row&1)sample.stage(WitnessPhase::Copy);
             sample.stage(WitnessPhase::Fine);
             sample.stage(WitnessPhase::CoarseBind);

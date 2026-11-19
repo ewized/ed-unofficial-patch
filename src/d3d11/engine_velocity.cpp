@@ -2822,7 +2822,7 @@ void engineVelocityFlushWitnessCohort(ID3D11DeviceContext* ctx){
     std::optional<native_vrs::WitnessObservation> obs;
     if(g_witnessTiming.active(ctx))
         obs.emplace(g_witnessTiming,native_vrs::witnessRoute(true,false,length),length,
-            native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.epoch,batch.firstDraw,true),s.depthState.Get());
+            !s.depthAccess.original && native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.epoch,batch.firstDraw,true));
     native_vrs::replayWitnessCohort(batch.draws,s,eye.witnessMirror,batch.epoch,batch.firstDraw,g_witnessCounts,api,
         [&](const native_vrs::WitnessDraw& d,bool material){input.replay(ctx,d,material);},
         [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong,obs?&*obs:nullptr);
@@ -2952,16 +2952,17 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
     auto* vertex=g_bound.patchedVs?g_bound.patchedVs:g_bound.sourceVs;
     if(queueWitness(issue,eye.slotsRtv.Get(),skin,vertex,found->second.Get())){prior.queued=true;return true;}
     if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+    const auto depthAccess=native_vrs::WitnessDepthAccess::bound(ctx,issue.depth);
     const bool observe=vrsCohortActive(ctx);
     std::optional<native_vrs::WitnessObservation> obs;
     if(g_witnessTiming.active(ctx))
         obs.emplace(g_witnessTiming,native_vrs::witnessRoute(false,g_bound.guardSrv3.Get()!=nullptr,1),1,
-            native_vrs::witnessNeedsCopy(eye.witnessMirror,issue.depth,issue.epoch,issue.drawNumber,issue.reuse));
+            !depthAccess.original && native_vrs::witnessNeedsCopy(eye.witnessMirror,issue.depth,issue.epoch,issue.drawNumber,issue.reuse));
     const auto paired=(observe||obs)?g_witnessCounts.paired:0,copies=observe?g_witnessCounts.copies:0;
     const bool issued=native_vrs::splitWitness(api,ctx,issue.color,issue.depth,eye.slotsRtv.Get(),skin,
         vertex,g_bound.patchedPs,found->second.Get(),g_bound.originalPs,
         g_bound.derivedBlend.Get(),eye.witnessMirror,issue.epoch,issue.drawNumber,issue.reuse,g_witnessCounts,
-        [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);},obs?&*obs:nullptr);
+        [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);},obs?&*obs:nullptr,&depthAccess);
     if(obs)obs->finish(g_witnessCounts.paired-paired);
     // A late refusal also issues material, through the combined shader.
     // Only the completed fine/coarse pair can contribute to a candidate run.
@@ -2974,8 +2975,8 @@ bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
 void engineVelocityReportWitness(){
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const auto& n=g_witnessCounts;
-    Log::get().note("native VRS motion: paired=%llu depth_copies=%llu depth_reuse=%llu state_refused=%llu shader_refused=%llu query_refused=%llu rate_refused=%llu",
-        n.paired,n.copies,n.reused,n.stateRefused,n.shaderRefused,n.queryRefused,n.rateRefused);
+    Log::get().note("native VRS motion: paired=%llu depth_copies=%llu depth_reuse=%llu readonly_original_runs=%llu readonly_original_draws=%llu state_refused=%llu shader_refused=%llu query_refused=%llu rate_refused=%llu",
+        n.paired,n.copies,n.reused,n.readOnlyOriginalRuns,n.readOnlyOriginalDraws,n.stateRefused,n.shaderRefused,n.queryRefused,n.rateRefused);
     const auto& b=g_witnessCohort;
     std::lock_guard<std::recursive_mutex> queueLock(g_witnessCohort.mutex);
     Log::get().note("native VRS witness cohorts: batches=%llu multi_draw=%llu materials=%llu combined_fallback=%llu invalid_frames=%llu capture_refused=%llu longest=%llu handoff_runs=%llu handoff_originals=%llu guarded_batches=%llu guarded_multi=%llu guarded_materials=%llu guarded_paired=%llu guarded_longest=%llu",

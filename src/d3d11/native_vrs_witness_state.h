@@ -73,6 +73,7 @@ struct WitnessPipeline {
     D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
     UINT viewportCount=UINT(std::size(viewport)),scissorCount=UINT(std::size(scissors));
     WitnessPtr<ID3D11DepthStencilState> depthState;
+    WitnessDepthAccess depthAccess;
     UINT stencil=0,sampleMask=0;FLOAT factors[4]{};
     WitnessPtr<ID3D11BlendState> blend;
     WitnessBindings<ID3D11RenderTargetView,8> rt;
@@ -87,16 +88,7 @@ struct WitnessPipeline {
         D3D11_DEPTH_STENCIL_DESC ds{};depthState->GetDesc(&ds);
         if(!ds.DepthEnable || ds.DepthFunc!=D3D11_COMPARISON_GREATER_EQUAL || ds.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO)return false;
         D3D11_DEPTH_STENCIL_VIEW_DESC view{};depth->GetDesc(&view);
-        // The existing private mirror path accepts only the base, writable
-        // view. Prove effective read-only behavior from the actual OM state.
-        if(view.Flags || view.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice)return false;
-        const bool stencil=view.Format==DXGI_FORMAT_D24_UNORM_S8_UINT || view.Format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        if(!stencil && view.Format!=DXGI_FORMAT_D16_UNORM && view.Format!=DXGI_FORMAT_D32_FLOAT)return false;
-        if(stencil && ds.StencilEnable && ds.StencilWriteMask){
-            auto keeps=[](const D3D11_DEPTH_STENCILOP_DESC& face){return face.StencilFailOp==D3D11_STENCIL_OP_KEEP &&
-                face.StencilDepthFailOp==D3D11_STENCIL_OP_KEEP && face.StencilPassOp==D3D11_STENCIL_OP_KEEP;};
-            if(!keeps(ds.FrontFace) || !keeps(ds.BackFace))return false;
-        }
+        if(depthAccess.original!=depth.Get() || view.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice)return false;
         if(!rt.slots[7])return true;
         D3D11_BLEND_DESC b{};blend->GetDesc(&b);
         return b.IndependentBlendEnable && b.RenderTarget[7].RenderTargetWriteMask==0;
@@ -126,6 +118,7 @@ struct WitnessPipeline {
         ctx->OMGetRenderTargets(8,rt.slots,&depth);
         ctx->OMGetBlendState(&blend,factors,&sampleMask);ctx->OMGetDepthStencilState(&depthState,&stencil);
         if(depth.Get()!=dsv||rt.slots[0]!=color||rt.slots[6]!=marker||rt.slots[7]!=skin||blend.Get()!=blendState)return false;
+        depthAccess=WitnessDepthAccess(depth.Get(),depthState.Get());
         for(auto* v:rt.slots)if(!witnessLocalView(v,mapped))return false;
         if(!witnessLocalView(depth.Get(),mapped))return false;
         ctx->IAGetInputLayout(&layout);ctx->IAGetPrimitiveTopology(&topology);
@@ -164,7 +157,7 @@ bool replayWitnessCohort(const WitnessCohort& queue,WitnessPipeline& s,WitnessMi
     if(queue.empty())return false;
     auto draw=[&](unsigned i,bool m){issue(queue.data()[i],m);};
     const bool replayed=splitWitnessRun(api,s.context.Get(),s.rt.slots[0],s.depth.Get(),s.rt.slots[6],s.rt.slots[7],
-        s.vertex.Get(),s.combined.Get(),s.fine.Get(),s.material.Get(),s.blend.Get(),mirror,epoch,first,true,
+        s.vertex.Get(),s.combined.Get(),s.fine.Get(),s.material.Get(),s.blend.Get(),s.depthAccess,mirror,epoch,first,true,
         counts,queue.size(),draw,[&](unsigned i){if(coarse(i))return true;strong();return false;},observer);
     if(!replayed){
         strong();

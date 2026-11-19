@@ -3,6 +3,7 @@
 #include "../../src/d3d11/native_vrs_witness_state.h"
 #include "../../src/d3d11/dxbc_engine_velocity.h"
 #include "witness_pixel_reference.h"
+#include "witness_original_depth_cases.h"
 #include <d3dcompiler.h>
 #include <vector>
 #include <cstdio>
@@ -206,10 +207,17 @@ Witness referencePs(V i){
         }
         auto fineRate=[&]{return rate(RateStep::PrepareWitness,t.color.Get(),t.depth.Get());};
         struct Api{
-            ID3D11DeviceContext* ctx;decltype(fineRate)& restored;
+            ID3D11DeviceContext* ctx;decltype(fineRate)& restored;ID3D11DepthStencilView* guardOriginal=nullptr;
+            unsigned guardBinds=0;bool guardExact=true;
             bool full(){return restored();}
             void pixel(ID3D11PixelShader* p){ctx->PSSetShader(p,nullptr,0);}
-            void targets(UINT n,ID3D11RenderTargetView* const* v,ID3D11DepthStencilView* d){ctx->OMSetRenderTargets(n,v,d);}
+            void targets(UINT n,ID3D11RenderTargetView* const* v,ID3D11DepthStencilView* d){
+                ctx->OMSetRenderTargets(n,v,d);
+                if(guardOriginal){
+                    ComPtr<ID3D11DepthStencilView> actual;ctx->OMGetRenderTargets(0,nullptr,&actual);
+                    guardExact&=actual.Get()==guardOriginal;++guardBinds;
+                }
+            }
             void copy(ID3D11Resource* d,ID3D11Resource* s){ctx->CopyResource(d,s);}
         } api{ctx,fineRate};
         for(unsigned step=0;step<4;++step){
@@ -306,6 +314,7 @@ Witness referencePs(V i){
         ctx->OMSetDepthStencilState(overlay.Get(),0);ctx->OMSetBlendState(guardBlend.Get(),nullptr,~0u);
         ctx->PSSetShader(guardedCombined.Get(),nullptr,0);
         ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,guardSrv.GetAddressOf());
+        if(split)api.guardOriginal=t.depth.Get();
         if(grouped){
             using namespace edvr::native_vrs;
             // Preserve the first publication's pixels before another copy
@@ -389,6 +398,7 @@ Witness referencePs(V i){
         else if(!edvr::native_vrs::splitWitness(api,ctx,t.color.Get(),t.depth.Get(),guardRtv.Get(),t.skin.Get(),
             vs.Get(),guardedCombined.Get(),guardedFine.Get(),ps.Get(),guardBlend.Get(),mirror,3,5,true,counts,
             [&](bool){ctx->DrawIndexed(6,12,0);},[&]{return rate(RateStep::Material,t.color.Get(),t.depth.Get());}))return failure(__LINE__);
+        if(split && (!api.guardExact || api.guardBinds!=(grouped?6u:3u)))return failure(__LINE__);
         ID3D11ShaderResourceView* empty=nullptr;ctx->PSSetShaderResources(edvr::kEngineVelocityOverlaySnapshotSlot,1,&empty);
     }
     ctx->OMSetRenderTargets(0,nullptr,nullptr);ctx->ClearState();
@@ -511,10 +521,24 @@ Witness referencePs(V i){
         ctx->Unmap(beforeRefill[pass].Get(),0);
         if(!exact)return false;
     }
-    if(counts.paired==(grouped?10u:4u) && counts.copies==(grouped?5u:4u) && counts.reused==(grouped?6u:1u) && counts.rateRefused==1 &&
-       distinctMaterial==hardware && sawNear && sawTie && sawSlope && sawStencil)return true;
-    std::fprintf(stderr,"witness totals paired=%llu copies=%llu reused=%llu rateRefused=%llu materialDiff=%d hardware=%d slot5=%d slot9=%d slope=%d stencil21=%d\n",
-        counts.paired,counts.copies,counts.reused,counts.rateRefused,distinctMaterial,hardware,sawNear,sawTie,sawSlope,sawStencil);
+    if(counts.paired==(grouped?10u:4u) && counts.copies==3 && counts.reused==(grouped?4u:1u) && counts.rateRefused==1 &&
+       counts.readOnlyOriginalRuns==(grouped?2u:1u) && counts.readOnlyOriginalDraws==(grouped?4u:1u) &&
+       distinctMaterial==hardware && sawNear && sawTie && sawSlope && sawStencil){
+        if(grouped){
+            if(!rate(RateStep::StrongFull,target[0].color.Get(),target[0].depth.Get()))return failure(__LINE__);
+            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);ctx->VSSetShader(vs.Get(),nullptr,0);
+            ctx->RSSetViewports(1,&viewport);ctx->RSSetState(raster.Get());ctx->OMSetBlendState(blend.Get(),nullptr,~0u);
+            const bool exact=originalDepthCases(dev,ctx,target,vs.Get(),combined.Get(),fine.Get(),ps.Get(),blend.Get());
+            ctx->ClearState();
+            std::printf("{\"readonly_original_dsv_transitions_and_pixels_exact\":%s}\n",exact?"true":"false");
+            if(!exact)return failure(__LINE__);
+        }
+        return true;
+    }
+    std::fprintf(stderr,"witness totals paired=%llu copies=%llu reused=%llu readonly_runs/draws=%llu/%llu rateRefused=%llu materialDiff=%d hardware=%d slot5=%d slot9=%d slope=%d stencil21=%d\n",
+        counts.paired,counts.copies,counts.reused,counts.readOnlyOriginalRuns,counts.readOnlyOriginalDraws,
+        counts.rateRefused,distinctMaterial,hardware,sawNear,sawTie,sawSlope,sawStencil);
     return false;
 }
 }

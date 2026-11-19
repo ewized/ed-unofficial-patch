@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** production batching is active in `62c1b3aa`. Completed stationary on-foot windows measured median application GPU time of 10.641 ms off, 18.768 ms on and 10.312 ms off again. This reduces the earlier 55.6 ms ON result but still regresses. The temporary default-off `log.vrs_witness_timing` probe passed native checks and completed a capture in `fa343259`; guarded synchronous replay is the next measured target.
+- **VRS performance investigation:** guarded batching is active in `460f7b84`. A 30-second ON sample measured 13.619 ms GPU against adjacent completed OFF windows of 10.251 and 10.371 ms; the ON drain was interrupted, so the completed-only comparison is incomplete. VRS still regresses. A read-only original-depth route is implemented for native and game checks; it preserves the private mirror for writers.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -301,6 +301,15 @@ repeated XR submissions. The selected multiplier alone does not establish genera
 
 See the [NVIDIA DLSS-G options](https://github.com/NVIDIA-RTX/Streamline/blob/main/include/sl_dlss_g.h) for the
 multiplier convention. EDVR queries its NVIDIA NGX runtime for available capacity.
+
+In a four-second stationary Surface Operation capture on `460f7b84`, 180
+generated submissions alternated with 180 exact native endpoints, with no
+repeats, late phases or behind-watermark imports. Observed rates were
+44.84 generated and 45.09 native submissions per second. Of 178 generated
+phases with complete in-window timing chains, 72 would have failed the
+previous nominal time comparison at those same recorded timestamps. The
+driver already reported low latency On. This is a short VRS-off simulator
+observation, not a physical scanout or active-combat benchmark.
 
 An interpolation phase has a bounded source-age horizon. When its original
 pose timestamp and every intervening owner wait are present in the same
@@ -1164,6 +1173,24 @@ target outputs, and retained pipeline capture and guard permission both
 passed. The parser now accepts the exact semantic name regardless of ASCII
 case while retaining output-index and instruction exclusions. This corrects
 compatibility; its effect on retail shader admission is not yet measured.
+
+On `460f7b84`, production paired 1,557,213 guarded materials in 97,904
+cohorts, including 34,895 with multiple draws and a maximum of 64. The ON
+window collected 30 seconds and 1,688 valid CPU/GPU samples with no invalid
+or missing results. Switching Off interrupted its drain at 1,406 of 2,000
+ms, leaving its status `scope-changed`. Its GPU median was 13.619 ms;
+adjacent completed OFF windows measured 10.251 and 10.371 ms. This remains
+a regression, and the historical difference from the earlier 18.768 ms
+result does not isolate the contribution of guarded batching.
+
+The next bounded optimization uses the already-bound scene DSV for fine
+witnesses only when both depth and stencil are provably unwritable. It
+avoids private DSV switches and, where needed, unbind/copy commands. Depth
+writes, including an `EQUAL` comparison with writes enabled, retain the
+mirror. A read-only run can extend an already-matched mirror receipt;
+it cannot establish one. The native differential checks actual view
+identity, copy and transition counts, and exact pixels through writable,
+read-only, mutation and refusal transitions. Game benefit remains unmeasured.
 
 ### Simulator validation (2026-11-19)
 

@@ -71,8 +71,8 @@ struct WitnessTiming {
         ++cpuSamplesThisFrame;return true;
     }
     void recordCopy(const WitnessMirror& m) noexcept {
-        for(auto& d:depths)if(!d.copies || (d.format==m.format && d.width==m.width && d.height==m.height)){
-            d.format=m.format;d.width=m.width;d.height=m.height;++d.copies;
+        for(auto& d:depths)if(!d.copies || (d.format==m.format && d.width==m.textureDesc.Width && d.height==m.textureDesc.Height)){
+            d.format=m.format;d.width=m.textureDesc.Width;d.height=m.textureDesc.Height;++d.copies;
             unsigned bpp=0;
             switch(m.format){
             case DXGI_FORMAT_D16_UNORM:bpp=2;break;
@@ -189,13 +189,10 @@ struct WitnessObservation final : WitnessObserver {
     WitnessTiming& t;
     const unsigned length,row;
     WitnessTiming::Sample* sample=nullptr;
-    ID3D11DepthStencilState* captured;
-    bool cohort;
     uint64_t startedCpu=0;
     unsigned phase=WitnessTiming::phases;
-    WitnessObservation(WitnessTiming& timing,WitnessRoute route,unsigned count,bool needsCopy,ID3D11DepthStencilState* ds=nullptr)
-        :t(timing),length(count),row(2*unsigned(route)+unsigned(needsCopy)),captured(ds),
-         cohort(route!=WitnessRoute::SyncGuard && route!=WitnessRoute::SyncOther){
+    WitnessObservation(WitnessTiming& timing,WitnessRoute route,unsigned count,bool needsCopy)
+        :t(timing),length(count),row(2*unsigned(route)+unsigned(needsCopy)){
         const auto pick=t.plan.event(row);
         if(t.mode!=WitnessTiming::Mode::Collect)return;
         auto& r=t.rows[row];++r.events;r.draws+=length;r.beyond+=pick.outside;
@@ -225,24 +222,12 @@ struct WitnessObservation final : WitnessObserver {
         if(!sample->pending[phase])++t.rows[row].time[phase].missed;
         startedCpu=WitnessTiming::ticks();
     }
-    void validated(const WitnessMirror& m,bool copied) noexcept override {
+    void validated(const WitnessMirror& m,bool copied,bool readOnly) noexcept override {
         if(t.mode!=WitnessTiming::Mode::Collect)return;
         auto& r=t.rows[row];++r.validated;
         if(copied)t.recordCopy(m);
         if(!sample)return;
-        WitnessPtr<ID3D11DepthStencilState> current;
-        if(!cohort)t.owner->OMGetDepthStencilState(&current,nullptr);
-        auto* state=cohort?captured:current.Get();
-        D3D11_DEPTH_STENCIL_DESC d{};
-        d.DepthEnable=TRUE;d.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
-        if(state)state->GetDesc(&d);
-        auto writes=[](const D3D11_DEPTH_STENCILOP_DESC& op){
-            return op.StencilFailOp!=D3D11_STENCIL_OP_KEEP || op.StencilDepthFailOp!=D3D11_STENCIL_OP_KEEP || op.StencilPassOp!=D3D11_STENCIL_OP_KEEP;
-        };
-        // The production mirror accepts only single-sample DSVs with flags==0.
-        const bool stencil=m.format==DXGI_FORMAT_D24_UNORM_S8_UINT || m.format==DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        sample->readOnly=witnessDepthOnlyReads(d.DepthEnable!=FALSE,d.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO,false,
-            d.StencilEnable!=FALSE,d.StencilWriteMask!=0,writes(d.FrontFace)||writes(d.BackFace),false,stencil);
+        sample->readOnly=readOnly;
         if(sample->readOnly){++r.readOnly;r.readOnlyWeight+=sample->weight;r.readOnlyDrawWeight+=length*sample->weight;}
         else{++r.writable;r.writableWeight+=sample->weight;}
     }

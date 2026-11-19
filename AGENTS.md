@@ -258,6 +258,9 @@ minutes after a flight finally reproduced the effect being chased.
 - **Do not name anything `near` or `far` in C++.** `windows.h` defines both
   as empty macros, so `Case far = spot;` compiles as `Case = spot;` and the
   error does not name the cause. Write `nearZ`, `farPlane`, `outOfRange`.
+- Windows RPC headers also define `small` as `char`. Use a descriptive name
+  such as `testPeriod`; native compilation caught this in a cadence fixture
+  that had passed a portable compiler.
 - **Trace a new instrument end to end before flying it.** A summary path
   that set its finished flag before calling the report was dead on
   arrival; a fix that returned early shadowed the probe meant to measure
