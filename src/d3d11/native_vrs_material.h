@@ -6,6 +6,19 @@
 
 namespace edvr::native_vrs {
 
+// FXC preserves the spelling of system semantics in the SM5 output signature.
+// A mixed-case SV_Target is the same render target to D3D11.
+constexpr bool materialColorOutput(std::string_view name,uint32_t index) noexcept {
+    constexpr std::string_view target="SV_TARGET";
+    if(index>3 || name.size()!=target.size())return false;
+    for(size_t i=0;i<target.size();++i){
+        const char c=name[i];
+        const int upper=c>='a' && c<='z' ? c-('a'-'A') : c;
+        if(upper!=target[i])return false;
+    }
+    return true;
+}
+
 // Read-only subset of the retail SM5 DXBC format in dxbc_container.h. This
 // runs on successful game PS creation, including when VRS is toggled on later.
 // The receipt covers color outputs and read-only instructions. Draw-time
@@ -38,7 +51,7 @@ inline bool compatibleScenePixelShader(const void* bytecode, size_t size) noexce
                 if (tag == "OSGN") {
                     // No explicit depth, sample mask, or motion/stencil ownership outputs.
                     const std::string_view semantic(name, static_cast<size_t>(end - name));
-                    if (semantic != "SV_TARGET" || word(row + 4) > 3) return false;
+                    if (!materialColorOutput(semantic,word(row + 4))) return false;
                     color |= word(row + 4) == 0;
                 }
             }

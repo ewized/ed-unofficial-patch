@@ -1157,6 +1157,14 @@ the synchronous path. The native differential fixture checks overlapping
 guards in both orders across a refill; production admission counters and
 game timing are required before claiming a benefit from this extension.
 
+The first native guard integration case in `1f0be4dc` isolated a shader
+compatibility error: its valid `SV_Target0` through `SV_Target3` outputs
+were rejected by an uppercase-only semantic-name check. Reflection reported
+target outputs, and retained pipeline capture and guard permission both
+passed. The parser now accepts the exact semantic name regardless of ASCII
+case while retaining output-index and instruction exclusions. This corrects
+compatibility; its effect on retail shader admission is not yet measured.
+
 ### Simulator validation (2026-11-19)
 
 Commit `3d287e87` passed the full native Windows build: 211 native jobs

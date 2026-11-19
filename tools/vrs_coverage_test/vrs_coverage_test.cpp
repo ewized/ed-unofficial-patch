@@ -123,6 +123,14 @@ int main(int argc,char** argv){
      return sceneMaterialCandidate(material,vs,ps);
  };
  const SceneMaterialDraw leftMaterial{0,1,true,false,true,true,false,24},rightMaterial{1,1,true,false,true,true,false,26};
+ using edvr::native_vrs::materialColorOutput;
+ check(materialColorOutput("SV_Target",0) && materialColorOutput("sV_tArGeT",3),
+       "SM5 render-target output spelling is ASCII case insensitive");
+ check(!materialColorOutput("SV_Target",4) && !materialColorOutput("SV_Target0",0) && !materialColorOutput("SV_Targe",0) &&
+       !materialColorOutput("SV_TargetX",0) && !materialColorOutput("SV_TargeU",0),
+       "render-target semantic length, complete spelling and MRT index are exact");
+ check(!materialColorOutput("SV_Depth",0) && !materialColorOutput("SV_Coverage",0) && !materialColorOutput("SV_StencilRef",0),
+       "depth, sample mask and stencil remain outside material outputs");
  const auto capturedMaterial=[&](const char* file){
      std::ifstream stream(std::string(argv[1])+"/tools/flat_temporal_test/fixtures/"+file,std::ios::binary);
      const std::string bytes{std::istreambuf_iterator<char>(stream),{}};
