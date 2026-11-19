@@ -2024,6 +2024,8 @@ AUDIT_NOT_ADDRESSES = (
     ("d3d11/perf_monitor.cpp", (0x150E828,), "an NVAPI function id"),
     ("d3d11/native_vrs.cpp", (0x0150E828,),
      "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h, pinned SDK 51e5aae4; not an Elite RVA"),
+    ("d3d11/native_vrs_material_receipt.h", (0x028950D5,),
+     "Data1 of the private COM GUID for material shader receipts; not an Elite RVA"),
     ("d3d11/native_reflex_nvapi.h", (0x0150E828,),
      "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h"),
     ("d3d11/openvr026_official/openvr.h", (0x01000000, 0x01FFFFFF, 0x02000000),
