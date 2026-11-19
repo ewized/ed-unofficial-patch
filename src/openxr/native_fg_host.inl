@@ -177,7 +177,7 @@
       const auto& b=images.metadata;
       if(b.currentSequence<=fgDisplayedSequence) {
         if(imported)fgBootstrap.observeBehind(b,
-          fgbootstrap::interpolationFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1));
+          fgBootstrap.phaseFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1));
         images.ready=false;
         return Outcome::BehindWatermark;
       }
@@ -357,6 +357,11 @@
       fgDisable(4,operation);return true;
     }
     fgBootstrap.sync(fgBootstrapEpoch(status));
+    // Only the independently queried refresh rate can classify app-frame
+    // intervals against panel cadence. Keep wall-age admission otherwise.
+    const XrDuration panelPeriod=instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
+      ? XrDuration(1000000000./instrumentDisplayHz+.5) : 0;
+    fgBootstrap.syncDisplayPeriod(panelPeriod);
     if(!state.frameOpen()) {
       if(!poseSeatReady()){fgCancelCredit();return true;}
       const XrResult waited=boundary.waitAndBegin(FramePacing::Runtime);
@@ -364,6 +369,9 @@
         publishFatalFailure(waited,"native_fg_wait");fgCancelCredit();return true;
       }
       ++fgTick;
+      const auto waitedFrame=boundary.frame();
+      fgBootstrap.noteSlot(fgTick,waited==XR_SUCCESS?waitedFrame.predictedDisplayTime:0,
+        waitedFrame.predictedDisplayPeriod,panelPeriod);
       // Return to the same owner's queue with this real runtime frame open.
       // Native submits/Wait registration queued during xrWaitFrame now run
       // before its prepared presentation; no extra XR frame is invented.
@@ -400,8 +408,7 @@
     }
     // The runtime can report a predicted period at application cadence. Use
     // its separately published display frequency when available.
-    const XrDuration period=instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
-      ? XrDuration(1000000000./instrumentDisplayHz+.5) : tick.predictedDisplayPeriod;
+    const XrDuration period=panelPeriod?panelPeriod:tick.predictedDisplayPeriod;
     if(tracingHandoff&&images.ready) {
       row.previous=images.metadata.previousSequence;row.current=images.metadata.currentSequence;
       row.sourceTime=images.metadata.currentPoseDisplayTime;

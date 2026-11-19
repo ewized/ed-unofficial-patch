@@ -159,6 +159,14 @@ template<class Check> void runFgBootstrapCases(Check check) {
   images.metadata=batch(70,71);images.ready=true;h.fgPrepareImages(report,firstPoll+period,period,true);
   check(images.ready&&images.next==1&&fgschedule::phaseTime(images.metadata,images.next)>displayedTime,
     "FG bootstrap: generated phase catches up without backward presentation or native starvation");
+  const XrTime poseTime=images.metadata.currentPoseDisplayTime;
+  const XrTime finalOpportunity=poseTime+3*period+67;
+  h.fgBootstrap.noteSlot(1,poseTime,period,period);
+  h.fgBootstrap.noteSlot(2,poseTime+period,period,period);
+  h.fgBootstrap.noteSlot(3,poseTime+2*period,period,period);
+  h.fgBootstrap.noteSlot(4,finalOpportunity,2*period,period);
+  check(h.fgPrepareImages(report,finalOpportunity,period,true)==fghandoff::Images::Generated&&images.next==1,
+    "FG bootstrap: actual host admits a phase on the last proven runtime opportunity");
   images.ready=false;++h.fgTick;
   h.activeFrameSequence=73; // Credit 73 already advanced live geometry.
   h.fgBootstrap.abandonNativeAttempt();

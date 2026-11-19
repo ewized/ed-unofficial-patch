@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/native_fg_multiplier.h"
+#include "native_fg_timeline.h"
 #include <cstdint>
 #include <limits>
 
@@ -35,6 +36,7 @@ inline bool interpolationFits(int64_t now,int64_t sourceTime,int64_t period,
 
 class Bootstrap {
   Epoch epoch_{};
+  Timeline timeline_{};
   bool generated_=false,trialSpent_=false,attempted_=false;
   uint64_t completed_=0,firstPending_=0,displayed_=0,previousDisplayed_=0;
   uint64_t bootstrapEndpoint_=0,committed_=0;
@@ -49,6 +51,20 @@ public:
   void clear(){*this={};}
   void sync(const Epoch& epoch){if(!(epoch==epoch_)){clear();epoch_=epoch;}}
   const Epoch& epoch() const {return epoch_;}
+  void syncDisplayPeriod(int64_t panelPeriod){timeline_.syncPeriod(panelPeriod);}
+  void noteSlot(uint64_t tick,int64_t displayTime,int64_t nextPeriod,int64_t panelPeriod) {
+    if(epoch_.valid())timeline_.note(tick,displayTime,nextPeriod,panelPeriod);
+  }
+  bool phaseFits(int64_t displayTime,int64_t sourceTime,int64_t period,unsigned multiplier,unsigned phase,
+                 int64_t nextPeriod=0) const {
+    if(displayTime<sourceTime||sourceTime<=0||period<=0||!nativeFgFixedMultiplier(multiplier)||
+       !phase||phase>=multiplier||nextPeriod<0||displayTime>(std::numeric_limits<int64_t>::max)()-nextPeriod)return false;
+    // With a proven runtime timeline the horizon is measured in predicted
+    // display opportunities. Dynamic predictions can straddle the nominal
+    // time limit for the same opportunity. Other sources keep the wall cap.
+    if(const auto slots=timeline_.opportunities(sourceTime,displayTime,period,nextPeriod))return *slots<=multiplier+phase;
+    return interpolationFits(displayTime+nextPeriod,sourceTime,period,multiplier,phase);
+  }
   uint64_t completedSequence() const {return completed_;}
   void completeNative(uint64_t sequence) {
     if(!epoch_.valid()||sequence<=completed_)return;
@@ -77,8 +93,7 @@ public:
     if(attempted_||!displayed||(!generated_&&(trialSpent_||bootstrapEndpoint_!=displayed))||
        completed_<=displayed||completed_-displayed!=1||
        firstPending_!=completed_||latestQueued!=completed_||latestExported>=completed_||
-       nextPeriod<=0||displayTime<=0||displayTime>(std::numeric_limits<int64_t>::max)()-nextPeriod||
-       !interpolationFits(displayTime+nextPeriod,sourceTime,admissionPeriod,multiplier,1))return false;
+       nextPeriod<=0||!phaseFits(displayTime,sourceTime,admissionPeriod,multiplier,1,nextPeriod))return false;
     attempted_=true;
     trialSpent_=true;
     return true;
@@ -86,7 +101,7 @@ public:
   void miss(){generated_=false;bootstrapEndpoint_=0;}
   void abandonNativeAttempt(){if(attempted_)miss();}
   bool acceptPhase(int64_t displayTime,int64_t sourceTime,int64_t period,unsigned multiplier,unsigned phase) {
-    const bool timely=interpolationFits(displayTime,sourceTime,period,multiplier,phase);
+    const bool timely=phaseFits(displayTime,sourceTime,period,multiplier,phase);
     // An unheld late result misses its own slot. A spent trial additionally
     // loses pacing proof when it fails to deliver within that same deadline.
     if(!timely)abandonNativeAttempt();

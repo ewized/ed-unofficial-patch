@@ -4,7 +4,7 @@
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
-- **VRS performance investigation:** production batching is active in `62c1b3aa`. Completed stationary on-foot windows measured median application GPU time of 10.641 ms off, 18.768 ms on and 10.312 ms off again. This reduces the earlier 55.6 ms ON result but still regresses. A temporary default-off `log.vrs_witness_timing` probe measures replay stages; its native checks and game capture are pending.
+- **VRS performance investigation:** production batching is active in `62c1b3aa`. Completed stationary on-foot windows measured median application GPU time of 10.641 ms off, 18.768 ms on and 10.312 ms off again. This reduces the earlier 55.6 ms ON result but still regresses. The temporary default-off `log.vrs_witness_timing` probe passed native checks and completed a capture in `fa343259`; guarded synchronous replay is the next measured target.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -301,6 +301,18 @@ repeated XR submissions. The selected multiplier alone does not establish genera
 
 See the [NVIDIA DLSS-G options](https://github.com/NVIDIA-RTX/Streamline/blob/main/include/sl_dlss_g.h) for the
 multiplier convention. EDVR queries its NVIDIA NGX runtime for available capacity.
+
+An interpolation phase has a bounded source-age horizon. When its original
+pose timestamp and every intervening owner wait are present in the same
+session/configuration/reference/history and refresh-rate epoch, admission
+counts runtime-predicted display opportunities. OpenXR can adjust those
+predictions, so a nominal nanosecond cutoff can otherwise reject the final
+allowed opportunity. Each observed step must agree with the preceding
+forecast, and the total elapsed span must agree with their accumulated
+opportunity count. A skipped interval consumes its full count. Unknown or
+ambiguous timing retains the strict nominal time limit. This tracks runtime
+predictions, not physical scanout. It adds no waiting slot or native-credit
+delay. See the [OpenXR frame-loop contract](https://registry.khronos.org/OpenXR/specs/1.1/html/xrspec.html#frame-loop).
 
 For VR latency experiments, `fix.nvidia_reflex` accepts `off` (default), `on`, and `boost`.
 The setting requests NVIDIA's low-latency mode on the game's D3D11 device. `boost` also requests
@@ -1103,6 +1115,32 @@ with mean application GPU time over the same frames. The unassigned
 remainder also includes other rendering and sampling error and cannot be
 attributed to prearm. Disable the probe after collection; it is not a
 performance optimization.
+
+The completed `fa343259` capture covered 1,251 frames. Its 6,208 sampled GPU
+intervals all returned results, with no ring exhaustion. Guarded materials
+were 12.34% of material draws but contributed an estimated 6.371 ms/frame
+of gross replay GPU time: 0.719 preparation, 0.106 depth copy, 2.520 fine
+witness, 2.131 coarse binding and 0.895 material/restoration. All 281 sampled
+guard states were effectively read-only for depth and stencil. Sampling
+covered 99.31% of guard event ranks. These figures identify a route to
+investigate; they do not predict a saving from batching it.
+
+Across all routes, 15.53% of event ranks exceeded the sampler's preceding
+frame envelope; singleton/no-copy draws accounted for most of that
+unmeasured tail. No estimate extrapolates it. The capture counted 37,275
+3840-by-2160 D32S8 depth copies, carrying 2,473,390,080,000 logical bytes.
+This is format payload, not measured physical memory traffic. Read-only
+copy intervals accounted for an estimated 0.211 ms/frame, so skipping
+those copies alone is a weaker first target than guarded replay.
+
+Guarded cohorts require an unchanged private overlay publication, captured
+input and pipeline receipts, nonwriting depth and stencil, and a disabled
+skin write mask. Refilling the same snapshot resource drains earlier draws
+before publishing a new generation. Guard restoration, eye replacement
+and consumers also drain pending work. Writable or unproven guards retain
+the synchronous path. The native differential fixture checks overlapping
+guards in both orders across a refill; production admission counters and
+game timing are required before claiming a benefit from this extension.
 
 ### Simulator validation (2026-11-19)
 

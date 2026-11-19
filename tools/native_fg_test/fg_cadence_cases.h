@@ -2,8 +2,84 @@
 #include "../../src/openxr/native_fg_bootstrap.h"
 
 namespace edvr::openxr::test {
+template<class Check> void runFgRuntimeOpportunityCases(Check check) {
+  using namespace fgbootstrap;
+  constexpr int64_t poseTime=1000000000,period=11111111,runtimePeriod=11111100;
+  constexpr int64_t before=poseTime+22221200,due=poseTime+33333400;
+  constexpr Epoch epoch{1,2,3,4};
+  // Exact prediction sequence from fa343 slots 858–861. The final wait
+  // moves the predicted timestamp by 1.1 us from the preceding forecast.
+  const auto capture=[&](Bootstrap& timeline) {
+    timeline.clear();timeline.sync(epoch);
+    timeline.noteSlot(858,poseTime,runtimePeriod,period);
+    timeline.noteSlot(859,poseTime+11110400,runtimePeriod,period);
+    timeline.noteSlot(860,before,runtimePeriod,period);
+  };
+  Bootstrap timeline;
+  capture(timeline);
+  check(timeline.phaseFits(before,poseTime,period,2,1,runtimePeriod),"FG forecasts at most the original opportunity horizon");
+  timeline.noteSlot(861,due,runtimePeriod,period);
+  check(!interpolationFits(due,poseTime,period,2,1)&&timeline.acceptPhase(due,poseTime,period,2,1),
+    "FG exact third opportunity survives dynamic runtime re-prediction");
+  check(!timeline.phaseFits(due,poseTime-1,period,2,1),"FG unknown source time keeps strict wall age");
+  check(!timeline.phaseFits(due,poseTime,period,2,1,runtimePeriod),"FG forecasts no phase after the original final opportunity");
+
+  // fa343 slot 1081: two owner waits cross four predicted display
+  // opportunities because each earlier wait projected a double interval.
+  Bootstrap skipped;skipped.sync(epoch);
+  skipped.noteSlot(1079,poseTime,2*runtimePeriod,period);
+  skipped.noteSlot(1080,poseTime+2*runtimePeriod,2*runtimePeriod,period);
+  check(!skipped.phaseFits(poseTime+2*runtimePeriod,poseTime,period,2,1,2*runtimePeriod),
+    "FG double-period forecast cannot create a hold for a skipped opportunity");
+  skipped.noteSlot(1081,poseTime+4*runtimePeriod,2*runtimePeriod,period);
+  check(!skipped.acceptPhase(poseTime+4*runtimePeriod,poseTime,period,2,1),
+    "FG rejects four opportunities during two double-period waits");
+
+  constexpr int64_t small=1000;
+  Bootstrap drift;drift.sync(epoch);
+  for(uint64_t i=1;i<=4;++i)drift.noteSlot(i,poseTime+int64_t(i-1)*1400,small,small);
+  check(!drift.phaseFits(poseTime+4200,poseTime,small,2,1),"FG a chain cannot accumulate timing drift into an extra opportunity");
+  drift.noteSlot(5,poseTime+5700,small,small);
+  check(!drift.phaseFits(poseTime+5700,poseTime+1400,small,2,1),"FG exact half-interval ambiguity retains strict wall age");
+  Bootstrap later;later.sync(epoch);
+  for(uint64_t i=1;i<=8;++i)later.noteSlot(i,poseTime+int64_t(i-1)*1001,small,small);
+  check(later.phaseFits(poseTime+7007,poseTime,small,4,3)&&!later.phaseFits(poseTime+7007,poseTime,small,4,2),
+    "FG bounded history retains the last legal 4x phase and enforces each phase's horizon");
+
+  const Epoch cuts[]{{2,2,3,4},{1,5,3,4},{1,2,6,4},{1,2,3,7}};
+  for(const auto& cut:cuts) {
+    capture(timeline);timeline.sync(cut);timeline.noteSlot(861,due,runtimePeriod,period);
+    check(!timeline.phaseFits(due,poseTime,period,2,1),"FG generation/config/reference/history change retires the old timeline");
+  }
+  capture(timeline);
+  timeline.syncDisplayPeriod(period+1);
+  timeline.noteSlot(861,due,runtimePeriod,period+1);
+  check(!timeline.phaseFits(due,poseTime,period+1,2,1),"FG refresh rate change retires the old timeline");
+  const int64_t unknownPeriods[]{0,-period,(std::numeric_limits<int64_t>::min)()};
+  for(const int64_t unknownPeriod:unknownPeriods) {
+    capture(timeline);timeline.noteSlot(861,due,runtimePeriod,unknownPeriod);
+    check(!timeline.phaseFits(due,poseTime,period,2,1),"FG invalid or unknown refresh period cannot prove opportunity age");
+  }
+  const uint64_t invalidTicks[]{859,860,862};
+  for(const uint64_t tick:invalidTicks) {
+    capture(timeline);timeline.noteSlot(tick,due,runtimePeriod,period);
+    check(!timeline.phaseFits(due,poseTime,period,2,1),"FG reordered, repeated or missing runtime slot retains strict wall age");
+  }
+  capture(timeline);timeline.noteSlot(861,before-1,runtimePeriod,period);
+  timeline.noteSlot(862,due,runtimePeriod,period);
+  check(!timeline.phaseFits(due,poseTime,period,2,1),"FG nonmonotonic prediction breaks the chain");
+  capture(timeline);timeline.noteSlot(861,0,runtimePeriod,period);
+  timeline.noteSlot(862,due,runtimePeriod,period);
+  check(!timeline.phaseFits(due,poseTime,period,2,1),"FG missing successful runtime prediction breaks the chain");
+  constexpr int64_t max=(std::numeric_limits<int64_t>::max)(),min=(std::numeric_limits<int64_t>::min)();
+  check(!timeline.phaseFits(max-1,max-2,period,2,1,runtimePeriod)&&
+        !timeline.phaseFits(due,min,period,2,1)&&!timeline.phaseFits(due,poseTime,period,2,1,min)&&
+        !timeline.phaseFits(due,poseTime,period,2,1,max),"FG checked age arithmetic rejects extreme timestamps and forecasts");
+}
+
 template<class Check> void runFgCadenceCases(Check check) {
   using namespace fgbootstrap;
+  runFgRuntimeOpportunityCases(check);
   constexpr int64_t period=11111111;
   const Epoch epoch{1,2,3,4};
   struct Batch {
