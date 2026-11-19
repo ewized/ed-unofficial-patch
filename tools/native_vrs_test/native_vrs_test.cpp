@@ -88,7 +88,7 @@ int main(){
     const float malformed[4]{1,1,-1,1},badSource[4]{0,1,0,0},nanShift[2]{NAN,0};
     check(!projectGaze(0,0,source,malformed,zero,gx,gy)&&!projectGaze(0,0,badSource,same,zero,gx,gy)&&
           !projectGaze(0,0,source,same,nanShift,gx,gy),"malformed projection or jitter cannot become valid gaze");
-    const auto p=palette();check(p[0]==5&&p[1]==8&&p[2]==11,"official shading enum values");
+    const auto p=palette(ViewportRates::Foveated);check(p[0]==5&&p[1]==8&&p[2]==11,"official shading enum values");
     check(std::all_of(p.begin(),p.end(),[](uint32_t value){return value==5||value==8||value==11;}),"every palette entry avoids CULL");
     std::vector<uint8_t> left(256),right(256);
     check(buildMap(left.data(),left.size(),256,256,-.5f,.5f,true,.15f,.45f),"left eye map builds");
@@ -142,6 +142,19 @@ int main(){
     check(r.calls[3].rates&&r.calls[3].version==0x10010&&r.calls[3].count==1&&r.calls[3].enabled,"actual production enabled descriptor");
     check(r.calls[3].palette[0]==5&&r.calls[3].palette[1]==8&&r.calls[3].palette[2]==11,"actual adapter passes public palette");
     check(std::all_of(r.calls[3].palette,r.calls[3].palette+16,[](uint32_t value){return value!=0;}),"actual adapter has no CULL entry");
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::WitnessLeft,DriverOp::Left,DriverOp::WitnessLeft,DriverOp::Full});
+    const auto& uniform=r.calls[4];
+    check(r.count==9&&uniform.rates&&uniform.version==0x10010&&uniform.count==1&&uniform.enabled&&
+          std::all_of(uniform.palette,uniform.palette+16,[](uint32_t rate){return rate==kFullRate;})&&
+          r.calls[5].rates&&r.calls[5].enabled&&std::equal(p.begin(),p.end(),r.calls[5].palette),
+          "private witness and material use enabled viewports with all-1x1 and foveated palettes on the same view");
+    check(r.publicationCount==6&&r.publications[2].vendorKnown&&!r.publications[2].fullKnown&&!r.publications[2].coarseKnown&&
+          r.calls[7].rates&&r.calls[7].count==0&&!r.calls[8].rates&&!r.calls[8].resource&&r.fullKnown,
+          "public boundary globally disables and unbinds after the private witness");
+    r=run({DriverOp::Full,DriverOp::Left,DriverOp::FailRate,DriverOp::WitnessLeft});
+    check(r.count==7&&r.calls[4].result==-9&&r.calls[5].rates&&r.calls[5].count==0&&
+          !r.calls[6].rates&&!r.calls[6].resource&&r.fullKnown&&!r.coarseKnown&&r.refused,
+          "failed private palette change latches refusal and recovers the strong full-rate state");
     r=run({DriverOp::Full,DriverOp::Left,DriverOp::Invalidate});
     check(r.count==6&&r.fullKnown&&!r.coarseKnown,"cache invalidation forces both reset calls");
     r=run({DriverOp::Full,DriverOp::FailRate,DriverOp::Left});

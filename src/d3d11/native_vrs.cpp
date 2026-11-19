@@ -26,6 +26,7 @@ std::atomic<bool> g_nativeVrsLive{false};
 std::atomic<bool> g_nativeVrsPsMeasureLive{false};
 namespace {
 using Microsoft::WRL::ComPtr;
+using native_vrs::ViewportRates;
 // Public NVAPI V1 ABI, NVIDIA/nvapi 51e5aae4, nvapi.h lines 17169..17338
 // (MIT). IDs are the public nvapi_interface.h values. No detours/code hooks.
 struct ViewportRate {uint8_t enabled,padding[3];uint32_t palette[16];};
@@ -110,7 +111,7 @@ void publish(const State& s) noexcept {
     auto& a=shared();
     a.vendorKnown.store(s.cache.ratesKnown&&s.cache.bindingKnown,std::memory_order_relaxed);
     a.fullKnown.store(s.cache.fullRateKnown(),std::memory_order_relaxed);
-    a.coarseKnown.store(s.cache.ratesKnown&&s.cache.enabled&&s.cache.bindingKnown&&s.cache.binding!=0,std::memory_order_relaxed);
+    a.coarseKnown.store(s.cache.active(s.cache.binding),std::memory_order_relaxed);
 #ifdef EDVR_NATIVE_VRS_TEST
     if(publicationCapture){
         auto& result=*publicationCapture;const size_t index=result.publicationCount++;
@@ -135,9 +136,10 @@ void refuse(State& s,NativeVrsFailure failure,int status=0) noexcept {
 void callResult(int result) noexcept {
     if(result){++shared().errors;shared().lastDriver.store(result,std::memory_order_relaxed);}
 }
-int setRates(State& s,bool enabled) {
+int setRates(State& s,ViewportRates mode) {
+    const bool enabled=mode!=ViewportRates::Disabled;
     ViewportRate viewport{};viewport.enabled=enabled?1:0;
-    const auto table=native_vrs::palette();
+    const auto table=native_vrs::palette(mode);
     for(unsigned i=0;i<table.size();++i)viewport.palette[i]=table[i];
     RateDesc desc{0x10010,enabled?1u:0u,enabled?&viewport:nullptr};
     int result=kCallFault;++shared().rates;
@@ -158,7 +160,7 @@ bool fullRate(State& s) {
     // full rate unless both reset calls were actually acknowledged.
     if(s.failed&&s.lastRecovery==s.frame){publish(s);return false;}
     const bool ok=native_vrs::applyFullRate(s.cache,
-        [&](bool on){return setRates(s,on);},[&](uintptr_t view){return setResource(s,view);});
+        [&](ViewportRates mode){return setRates(s,mode);},[&](uintptr_t view){return setResource(s,view);});
     if(!ok){s.lastRecovery=s.frame;refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));}
     publish(s);return ok;
 }
@@ -231,8 +233,16 @@ bool discover(State& s) {
 }
 bool activateMap(State& s,uintptr_t view) {
     if(s.failed){fullRate(s);return false;}
-    const bool ok=native_vrs::applyCoarse(s.cache,view,[&](bool on){return setRates(s,on);},[&](uintptr_t v){return setResource(s,v);});
+    const bool ok=native_vrs::applyCoarse(s.cache,view,[&](ViewportRates mode){return setRates(s,mode);},[&](uintptr_t v){return setResource(s,v);});
     if(!ok){refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));fullRate(s);return false;}
+    publish(s);return true;
+}
+bool prepareWitnessRate(State& s,uintptr_t view) {
+    if(!s.cache.active(view))return fullRate(s);
+    if(!native_vrs::pauseForWitness(s.cache,view,[&](ViewportRates mode){return setRates(s,mode);})){
+        refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));
+        fullRate(s);return false;
+    }
     publish(s);return true;
 }
 bool targetDimensions(State& s,EyeMap& map,ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv,
@@ -466,13 +476,7 @@ bool nativeVrsPrepareWitness(ID3D11DeviceContext* context,unsigned eye,ID3D11Ren
         syncInvalidation(s);
         if(s.failed || !prepareMap(s,eye,rtv,dsv,projection))return false;
         const auto view=reinterpret_cast<uintptr_t>(s.eyes[eye].view.Get());
-        if(s.cache.active(view)){
-            if(!native_vrs::pauseForWitness(s.cache,view,[&](bool on){return setRates(s,on);})){
-                refuse(s,NativeVrsFailure::DriverCall,shared().lastDriver.load(std::memory_order_relaxed));
-                fullRate(s);return false;
-            }
-            publish(s);
-        }else if(!fullRate(s))return false;
+        if(!prepareWitnessRate(s,view))return false;
         if(nativeVrsWitnessReady(context))return true;
         fullRate(s);return false;
     }catch(...){refuse(s,NativeVrsFailure::MapCreate,kCallFault);fullRate(s);return false;}
@@ -685,6 +689,7 @@ DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
             case DriverOp::Full:nativeVrsFullRate(context);break;
             case DriverOp::Left:activateMap(s,0x100);break;
             case DriverOp::Right:activateMap(s,0x200);break;
+            case DriverOp::WitnessLeft:prepareWitnessRate(s,0x100);break;
             case DriverOp::Invalidate:nativeVrsInvalidate(context);break;
             case DriverOp::NextFrame:s.frame=++emittedOrdinal;break;
             case DriverOp::FailRate:c.nextRate=-9;break;
@@ -700,7 +705,7 @@ DriverResult runDriverFixture(const DriverOp* operations,size_t count) {
             case DriverOp::TickForeignThread:{std::thread foreign([&]{nativeVrsTick(context,emittedOrdinal+1000);});foreign.join();break;}
         }
     }
-    c.result.fullKnown=s.cache.fullRateKnown();c.result.coarseKnown=s.cache.ratesKnown&&s.cache.enabled&&s.cache.bindingKnown&&s.cache.binding;
+    c.result.fullKnown=s.cache.fullRateKnown();c.result.coarseKnown=s.cache.active(s.cache.binding);
     c.result.refused=a.refused.load();c.result.failure=a.failure.load();c.result.configured=a.enabled.load();
     c.result.live=nativeVrsLive();c.result.coarseRequested=nativeVrsCoarseRequested();
     c.result.frameOrdinal=s.frame;c.result.providerPolls=a.polls.load();

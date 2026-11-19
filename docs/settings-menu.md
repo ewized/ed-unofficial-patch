@@ -3,8 +3,8 @@
 ## Status
 
 - **DLSS quality:** VR's Performance page offers Custom, DLAA, Quality, Balanced, and Performance with native OpenXR. Named choices change the render input size after a game restart. Balanced was checked live with a simulated headset at `3d287e87`; physical headset validation remains pending.
-- **VRS material coverage:** no material-family or input-semantic allowlist is used. Broad coverage is the normal behavior, with independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions, and this behavior is retained. Automated validation of that build and matched-scene performance remain unmeasured.
-- **VRS performance investigation:** on-foot slowdown reported with broad coverage. A `f93ef4e6` VRS-on window recorded 57.035 ms median application CPU elapsed time and approximately 242,000 NVAPI rate/resource setters per second; nearby off windows were faster but were not controlled scene matches. A scoped retained-map witness path is under comparison; freshness and UI barriers remain unchanged.
+- **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
+- **VRS performance investigation:** in a stationary on-foot tutorial, median application GPU time rose from about 9.7 ms to 54.6 ms with VRS on. Retaining the rate-map binding during fine motion draws in `61c50e14` substantially reduced resource setter calls, but GPU time stayed at 54.6 ms. See the on-foot measurements below.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
 - **2026-10-17 pre-RC3 R1:** separate add-on save completions; failures retain
   session state and report uncertain persistence. Focused checks 131/0, mutation proof 42/42. Full build PASS, 170.6 s; dated entry below.
@@ -977,6 +977,20 @@ without running automated tests. Manual feedback reported no visual
 regressions, and broad coverage is retained as the normal behavior. This
 feedback does not establish a measured FPS improvement or physical gaze
 calibration. The independent UI and fine-motion protections remain in place.
+
+### On-foot performance with broad material coverage
+
+The simulated headset stayed stationary in the Surface Operation tutorial.
+On `f93ef4e6`, median application GPU times were 9.664 ms with VRS off,
+54.618 ms with VRS on, and 9.743 ms after turning it off again. Median
+application CPU time with VRS on was 22.85 ms.
+
+On `61c50e14`, the fine motion draw kept the same eye's rate-map view
+bound. Median application GPU time was 9.674 ms off and 54.639 ms on.
+Median application CPU time was 5.632 ms off and 21.421 ms on. The
+resource setter count fell substantially, ruling out repeated map binding
+as the dominant GPU cost in this scene. The cost of replaying geometry and
+changing viewport shading rates between the paired draws remains open.
 
 ### Simulator validation (2026-11-19)
 

@@ -102,7 +102,7 @@ void nativeVrsPsAfter(ID3D11DeviceContext*,const NativeVrsPsToken&)noexcept;
 #ifdef EDVR_NATIVE_VRS_TEST
 namespace native_vrs::testing {
 enum class DriverOp:uint8_t {
-    Full,Left,Right,Invalidate,NextFrame,FailRate,FailResource,Reconfigure,
+    Full,Left,Right,WitnessLeft,Invalidate,NextFrame,FailRate,FailResource,Reconfigure,
     Off,TickNext,TickCurrent,TickZero,TickRegressed,TickForeignContext,TickForeignThread,FlatTickNext
 };
 struct DriverCall {

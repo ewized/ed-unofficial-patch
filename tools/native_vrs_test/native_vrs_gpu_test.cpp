@@ -96,7 +96,7 @@ struct Result {
     ComPtr<ID3D11Texture2D> staging;
     ComPtr<ID3D11Query> query,done;
     D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
-    std::array<float,block*block> pixels{};
+    std::array<float,block*block> pixels{},centerPixels{},outerPixels{};
     unsigned repeatX=0,repeatY=0,equal2x2=0;
     bool gradient=false,centerFullRate=false,outerFourByFour=false;
 };
@@ -159,7 +159,7 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     // Three disjoint patches preserve the original middle-ring observation
     // and independently check the full-rate centre and 4x4 outer region.
     td.Width=3*block;td.Height=block;td.Format=DXGI_FORMAT_R32_FLOAT;td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    std::array<Result,7> results;
+    std::array<Result,9> results;
     for(auto& result:results){hr(device->CreateTexture2D(&td,nullptr,&result.staging),"CreateReadback");
         D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS,0};hr(device->CreateQuery(&qd,&result.query),"CreateStatsQuery");
         qd.Query=D3D11_QUERY_EVENT;hr(device->CreateQuery(&qd,&result.done),"CreateEventQuery");}
@@ -191,6 +191,12 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     edvr::NativeVrsProjection projection{1,{-1.f,1.f,-1.f,1.f},{0.f,0.f}};
     const bool accepted=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
     submit(results[1]);const auto coarseStatus=edvr::nativeVrsStatus();
+    // Exercise both palettes on an identical eye map. Keep the original
+    // public full-rate, gaze-movement and OFF controls independent.
+    const bool uniformReady=edvr::nativeVrsPrepareWitness(context.Get(),0,rtv.Get(),dsv.Get(),projection);
+    const auto uniformStatus=edvr::nativeVrsStatus();submit(results[7]);
+    const bool patternResumed=edvr::nativeVrsBeforeWorld(context.Get(),0,rtv.Get(),dsv.Get(),&projection);
+    const auto resumedStatus=edvr::nativeVrsStatus();submit(results[8]);
     const bool eye1Accepted=edvr::nativeVrsBeforeWorld(context.Get(),1,rtv.Get(),dsv.Get(),&projection);
     submit(results[2]);
     edvr::nativeVrsTick(context.Get(),2);projection.sequence=2;
@@ -203,7 +209,7 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const auto finalStatus=edvr::nativeVrsStatus();context->Flush();
     printStatus("after_off_tick");
     std::printf("{\"coarse_accepted\":%s,\"coarse_acknowledged\":%s,\"coarse_mapUpdates\":[%llu,%llu]}\n",accepted?"true":"false",coarseStatus.coarseAcknowledged?"true":"false",static_cast<unsigned long long>(coarseStatus.mapUpdates[0]),static_cast<unsigned long long>(coarseStatus.mapUpdates[1]));
-    const char* names[]={"full_baseline","eye0_center_patch_coarse","eye1_patch_fine","eye0_moved_patch_fine","full_after","coarse_before_off","off_after"};
+    const char* names[]={"full_baseline","eye0_center_patch_coarse","eye1_patch_fine","eye0_moved_patch_fine","full_after","coarse_before_off","off_after","private_uniform_1x1","resumed_foveated"};
     for(size_t i=0;i<results.size();++i){auto& result=results[i];waitQuery(context.Get(),result.query.Get(),result.stats);
         BOOL completed=FALSE;waitQuery(context.Get(),result.done.Get(),completed);require(completed!=FALSE,"event completed");
         D3D11_MAPPED_SUBRESOURCE mapped{};const ULONGLONG mapDeadline=GetTickCount64()+waitMs;
@@ -218,6 +224,7 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
             std::memcpy(outer.pixels.data()+y*block,row+2*block*sizeof(float),block*sizeof(float));
         }
         context->Unmap(result.staging.Get(),0);measurePixels(result);measurePixels(center);measurePixels(outer);
+        result.centerPixels=center.pixels;result.outerPixels=outer.pixels;
         result.centerFullRate=center.gradient&&!center.repeatX&&!center.repeatY&&!center.equal2x2;
         result.outerFourByFour=outer.gradient&&outer.repeatX==192&&outer.repeatY==192&&outer.equal2x2==64;
         std::printf("{\"case\":\"%s\",\"center_full_rate\":%s,\"outer_4x4\":%s,\"outer_repeat_x\":%u,\"outer_repeat_y\":%u}\n",names[i],result.centerFullRate?"true":"false",result.outerFourByFour?"true":"false",outer.repeatX,outer.repeatY);
@@ -228,6 +235,17 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
     const bool replication=full.gradient&&!full.repeatX&&!full.repeatY&&!full.equal2x2&&coarse.gradient&&coarse.equal2x2>=60&&coarse.repeatX>=120&&coarse.repeatY>=120;
     const bool ringFootprints=full.centerFullRate&&!full.outerFourByFour&&coarse.centerFullRate&&
         coarse.repeatX==128&&coarse.repeatY==128&&coarse.outerFourByFour;
+    auto samePixels=[](const Result& a,const Result& b){
+        return a.pixels==b.pixels&&a.centerPixels==b.centerPixels&&a.outerPixels==b.outerPixels;
+    };
+    const bool uniformWitness=uniformReady&&patternResumed&&uniformStatus.vendorStateKnown&&
+        !uniformStatus.fullRateAcknowledged&&!uniformStatus.coarseAcknowledged&&resumedStatus.coarseAcknowledged&&
+        uniformStatus.rateSets==coarseStatus.rateSets+1&&resumedStatus.rateSets==uniformStatus.rateSets+1&&
+        uniformStatus.resourceSets==coarseStatus.resourceSets&&resumedStatus.resourceSets==coarseStatus.resourceSets&&
+        samePixels(results[7],full)&&samePixels(results[8],coarse)&&
+        results[7].stats.PSInvocations==full.stats.PSInvocations&&results[8].stats.PSInvocations==coarse.stats.PSInvocations&&
+        ringFootprints&&replication;
+    std::printf("{\"uniform_witness_fine_then_foveated_pixels_exact\":%s}\n",uniformWitness?"true":"false");
     bool restored=finalStatus.fullRateAcknowledged&&!finalStatus.coarseAcknowledged&&!finalStatus.configured;
     restored&=rearmed&&preOff.coarseAcknowledged&&results[5].outerFourByFour&&results[5].stats.PSInvocations<full.stats.PSInvocations;
     for(unsigned i:{4u,6u})restored&=results[i].stats.PSInvocations==full.stats.PSInvocations&&results[i].gradient&&!results[i].repeatX&&!results[i].repeatY&&!results[i].equal2x2&&!results[i].outerFourByFour;
@@ -273,7 +291,7 @@ float ps(Vertex i):SV_Target0{return i.uv.x+2*i.uv.y;}
         witnessOff.retainedWitnessReactivations-finalStatus.retainedWitnessReactivations==verifiedReactivations;
     std::printf("{\"verified_same_eye_witness_reactivations\":%llu,\"transitions_exact\":%s}\n",verifiedReactivations,transitionsExact?"true":"false");
     std::printf("{\"split_sloped_overlap_coplanar_depth_stencil_slot_skin_exact\":%s}\n",witness?"true":"false");
-    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&witness;
+    const bool success=owner&&topology&&replication&&reduced&&restored&&distinctEyesAndMovement&&ringFootprints&&uniformWitness&&witness;
     std::printf("{\"center_1x1_middle_2x2_outer_4x4_verified\":%s}\n",ringFootprints?"true":"false");
     std::printf("{\"distinct_per_eye_and_moved_eye0_verified\":%s,\"mapUpdates_after_movement\":[%llu,%llu],\"provider_polls\":%llu}\n",distinctEyesAndMovement?"true":"false",static_cast<unsigned long long>(movedStatus.mapUpdates[0]),static_cast<unsigned long long>(movedStatus.mapUpdates[1]),static_cast<unsigned long long>(movedStatus.providerPolls));
     std::printf("{\"success\":%s,\"real_owner_path\":true,\"simulated_provider\":true,\"game_world_claim\":false,\"physical_gaze_claim\":false,\"performance_claim\":false,\"topology_valid\":%s,\"coarse_replication_verified\":%s,\"PSInvocations_reduced\":%s,\"full_after_and_off_restored\":%s}\n",success?"true":"false",topology?"true":"false",replication?"true":"false",reduced?"true":"false",restored?"true":"false");

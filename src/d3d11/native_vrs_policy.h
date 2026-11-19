@@ -69,9 +69,12 @@ inline bool freshReceipt(uint64_t now,uint64_t receipt,uint64_t frequency) noexc
     // This is host receipt age, not an unavailable sensor timestamp.
     return now&&receipt&&frequency&&now>=receipt&&now-receipt<=frequency/20;
 }
-inline std::array<uint32_t,16> palette() noexcept {
+enum class ViewportRates {Disabled,Uniform1x1,Foveated};
+inline std::array<uint32_t,16> palette(ViewportRates mode) noexcept {
     std::array<uint32_t,16> result{};
-    result.fill(kFullRate);result[1]=kRate2x2;result[2]=kRate4x4;return result;
+    result.fill(kFullRate);
+    if(mode==ViewportRates::Foveated){result[1]=kRate2x2;result[2]=kRate4x4;}
+    return result;
 }
 
 // Map bytes are palette indices, never NV_PIXEL_X0_CULL_RASTER_PIXELS.
@@ -105,29 +108,33 @@ inline bool buildMap(uint8_t* output,size_t capacity,unsigned worldWidth,unsigne
 // immediate context. Unknown command lists/ClearState/foreign ownership must
 // invalidate it. An error never acknowledges a state transition.
 struct VendorStateCache {
-    bool ratesKnown=false,enabled=false,bindingKnown=false;
+    bool ratesKnown=false,bindingKnown=false;
+    ViewportRates mode=ViewportRates::Disabled;
     uintptr_t binding=0;
-    void invalidate() noexcept {ratesKnown=enabled=bindingKnown=false;binding=0;}
-    bool fullRateKnown()const noexcept {return ratesKnown&&!enabled&&bindingKnown&&!binding;}
-    bool active(uintptr_t view)const noexcept {return ratesKnown&&enabled&&bindingKnown&&view&&binding==view;}
-    bool retainedForWitness(uintptr_t view)const noexcept {return ratesKnown&&!enabled&&bindingKnown&&view&&binding==view;}
-    bool acceptRates(int result,bool on) noexcept {
-        if(result){invalidate();return false;}ratesKnown=true;enabled=on;return true;
+    void invalidate() noexcept {ratesKnown=bindingKnown=false;binding=0;}
+    bool hasRates(ViewportRates requested)const noexcept {return ratesKnown&&mode==requested;}
+    bool fullRateKnown()const noexcept {return hasRates(ViewportRates::Disabled)&&bindingKnown&&!binding;}
+    bool active(uintptr_t view)const noexcept {return hasRates(ViewportRates::Foveated)&&bindingKnown&&view&&binding==view;}
+    bool retainedForWitness(uintptr_t view)const noexcept {return hasRates(ViewportRates::Uniform1x1)&&bindingKnown&&view&&binding==view;}
+    bool acceptRates(int result,ViewportRates requested) noexcept {
+        if(result){invalidate();return false;}ratesKnown=true;mode=requested;return true;
     }
     bool acceptResource(int result,uintptr_t view) noexcept {
         if(result){invalidate();return false;}bindingKnown=true;binding=view;return true;
     }
 };
-// NV_D3D11_VIEWPORTS_SHADING_RATE_DESC_V1::numViewports == 0 globally
-// disables VRS. Only the private witness may retain its current eye's SRRV.
+// NVAPI's viewport shadingRateTable maps every SRRV index to a rate.
+// The private witness keeps its acknowledged eye view and maps every index
+// to NV_PIXEL_X1_PER_RASTER_PIXEL. Public full rate requires a global
+// disable (numViewports == 0) and a null SRRV.
 template<class Rates>
 bool pauseForWitness(VendorStateCache& cache,uintptr_t view,Rates&& rates) {
-    return cache.active(view) && cache.acceptRates(rates(false),false);
+    return cache.active(view) && cache.acceptRates(rates(ViewportRates::Uniform1x1),ViewportRates::Uniform1x1);
 }
 template<class Rates,class Resource>
 bool applyFullRate(VendorStateCache& cache,Rates&& rates,Resource&& resource) {
     bool ok=true;
-    if(!cache.ratesKnown||cache.enabled)ok=cache.acceptRates(rates(false),false);
+    if(!cache.hasRates(ViewportRates::Disabled))ok=cache.acceptRates(rates(ViewportRates::Disabled),ViewportRates::Disabled);
     if(!cache.bindingKnown||cache.binding)ok=cache.acceptResource(resource(0),0)&&ok;
     return ok&&cache.fullRateKnown();
 }
@@ -135,7 +142,7 @@ template<class Rates,class Resource>
 bool applyCoarse(VendorStateCache& cache,uintptr_t view,Rates&& rates,Resource&& resource) {
     if(!view)return false;
     if((!cache.bindingKnown||cache.binding!=view)&&!cache.acceptResource(resource(view),view))return false;
-    if((!cache.ratesKnown||!cache.enabled)&&!cache.acceptRates(rates(true),true))return false;
+    if(!cache.hasRates(ViewportRates::Foveated)&&!cache.acceptRates(rates(ViewportRates::Foveated),ViewportRates::Foveated))return false;
     return cache.active(view);
 }
 } // namespace edvr::native_vrs
