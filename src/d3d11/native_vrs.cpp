@@ -3,6 +3,7 @@
 #include "native_vrs_ps_measure.h"
 #include "native_gaze.h"
 #include "native_gaze_readiness.h"
+#include "native_render_labels.h"
 #include "vrs_coverage_policy.h"
 #include "../common/guard.h"
 #include <windows.h>
@@ -53,7 +54,7 @@ struct Shared {
     std::atomic<float> hq{.15f},mid{.45f};
     std::atomic<ID3D11DeviceContext*> owner{nullptr};
     std::atomic<DWORD> thread{0};
-    std::atomic<bool> driverReady{false},refused{false},magicAbsent{false};
+    std::atomic<bool> driverReady{false},refused{false},magicAbsent{false},gazeProviderQueried{false};
     std::atomic<bool> vendorKnown{false},fullKnown{false},coarseKnown{false};
     std::atomic<NativeVrsFailure> failure{NativeVrsFailure::Disabled};
     std::atomic<int32_t> lastDriver{0};
@@ -421,7 +422,7 @@ void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allow
             // Recovery cadence remains the owning Present ordinal after OFF.
             // Duplicate/zero/regressed/foreign ticks neither retry nor poll gaze.
             if(native_vrs::ordinalDecision(s.frame,frameOrdinal)!=native_vrs::FrameDecision::New)return;
-            s.frame=frameOrdinal;s.sampleUsable=false;nativeGazeReset();s.gaze={};s.gazeEpoch=0;syncInvalidation(s);fullRate(s);return;
+            s.frame=frameOrdinal;s.sampleUsable=false;s.gaze={};s.gazeEpoch=0;syncInvalidation(s);fullRate(s);return;
         }
         if(!context||!frameOrdinal){
             ++a.frameRefusals;
@@ -450,8 +451,13 @@ void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allow
         s.config=config;s.frame=frameOrdinal;s.sampleUsable=false;++a.ticks;
         syncInvalidation(s);
         const auto readiness=nativeTemporalGazeReadiness(s.device.Get(),GetCurrentThreadId());
-        if(!readiness.ready){
-            nativeGazeReset();s.gaze={};s.gazeEpoch=0;
+        NativeRenderLabels labels{};
+        // Capture the readiness epoch before the runtime name. The callback
+        // rechecks this epoch under the same mutex that temporal.close uses
+        // before XR teardown, so a new instance cannot inherit the old label.
+        if(!readiness.ready || !nativeRenderLabels(&labels) ||
+            std::strcmp(labels.runtimeName,kNativeGazeOpenXrRuntime)!=0){
+            s.gaze={};s.gazeEpoch=0;
             if(!a.refused.load(std::memory_order_relaxed))a.failure.store(NativeVrsFailure::GazeNotReady,std::memory_order_relaxed);
             fullRate(s);return;
         }
@@ -463,20 +469,19 @@ void nativeVrsTick(ID3D11DeviceContext* context,uint64_t frameOrdinal,bool allow
         struct Poll {NativeGazeSample sample{};bool completed=false;} poll;
         const auto callback=[](void* opaque,uint64_t epoch){
             auto& value=*static_cast<Poll*>(opaque);
-            nativeGazeSetLifetime(epoch);
-            // Contain provider faults inside the channel lock's scope. The
-            // callback makes no D3D/XR/channel calls and cannot reenter it.
-            value.completed=guarded("nativeVrs/gaze",[&]{value.sample=nativeGazePoll(true);});
-            if(!value.completed)nativeGazeReset();
+            // The temporal channel stays leased through the synchronous call;
+            // only the sample, never an SDK pointer, escapes the callback.
+            value.completed=guarded("nativeVrs/gaze",[&]{value.sample=nativeGazePoll(epoch);});
         };
         const bool admitted=nativeTemporalWithGazeReady(s.device.Get(),GetCurrentThreadId(),readiness.epoch,callback,&poll);
         if(admitted&&!poll.completed)refuse(s,NativeVrsFailure::GazeInvalid,kCallFault);
         if(!admitted||!poll.completed||nativeTemporalGazeEpoch()!=readiness.epoch){
-            nativeGazeReset();s.gaze={};s.gazeEpoch=0;
+            s.gaze={};s.gazeEpoch=0;
             if(!a.refused.load(std::memory_order_relaxed))a.failure.store(NativeVrsFailure::GazeNotReady,std::memory_order_relaxed);
             fullRate(s);return;
         }
         ++a.polls;s.gaze=poll.sample;s.gazeEpoch=readiness.epoch;
+        if(s.gaze.providerQueried)a.gazeProviderQueried.store(true,std::memory_order_relaxed);
         s.sampleUsable=s.gaze.usable&&s.gaze.eyes[0].valid&&s.gaze.eyes[1].valid&&
             native_vrs::validPoint(s.gaze.eyes[0].xNdc,s.gaze.eyes[0].yNdc)&&native_vrs::validPoint(s.gaze.eyes[1].xNdc,s.gaze.eyes[1].yNdc);
         if(s.sampleUsable){++a.valid;a.failure.store(NativeVrsFailure::None,std::memory_order_relaxed);}
@@ -623,6 +628,7 @@ bool nativeVrsSetCohortRate(ID3D11DeviceContext* ctx,unsigned eye,ID3D11RenderTa
 NativeVrsStatus nativeVrsStatus() noexcept {
     auto& a=shared();NativeVrsStatus out{};
     out.configured=a.enabled.load(std::memory_order_relaxed);out.driverReady=a.driverReady.load(std::memory_order_relaxed);
+    out.gazeProviderQueried=a.gazeProviderQueried.load(std::memory_order_relaxed);
     out.refused=a.refused.load(std::memory_order_relaxed);out.magicAbsent=a.magicAbsent.load(std::memory_order_relaxed);
     out.vendorStateKnown=a.vendorKnown.load(std::memory_order_relaxed);out.fullRateAcknowledged=a.fullKnown.load(std::memory_order_relaxed);
     out.coarseAcknowledged=a.coarseKnown.load(std::memory_order_relaxed);out.failure=a.failure.load(std::memory_order_relaxed);

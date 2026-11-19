@@ -7647,6 +7647,11 @@ void vScreenFrameBoundary() {
     if(g_state&&g_state->ownerCtx&&nativeVrsLive()) {
         static uint64_t nextNativeReport=0;const auto now=GetTickCount64();
         if(now>=nextNativeReport){nextNativeReport=now+5000;const auto n=nativeVrsStatus();
+            static bool gazeAcquisitionReported=false;
+            if(n.gazeProviderQueried&&!gazeAcquisitionReported){
+                gazeAcquisitionReported=true;
+                Log::get().noteReserved("native VRS gaze acquisition: backend=steamvr_client_core provenance=live_openxr_instance initialized_runtime=0 coordinates_logged=0");
+            }
             Log::get().noteReserved("native VRS focus: sharp_radius=%.3f transition_radius=%.3f core_width_percent=%.1f transition_width_percent=%.1f angular_calibration_verified=0",
                 double(n.sharpRadius),double(n.transitionRadius),double(n.sharpRadius*200.f),double(n.transitionRadius*200.f));
             Log::get().noteReserved("native world VRS: configured=%u driver_ready=%u refused=%u magic_absent=%u vendor_known=%u full_rate_ack=%u coarse_ack=%u failure=%u driver_status=%d ticks=%llu provider_polls=%llu valid_pairs=%llu invalid_pairs=%llu stale=%llu world_calls=%llu world_accepted=%llu full_rate_calls=%llu invalidations=%llu updates=%llu,%llu map_bytes=%llu rate_sets=%llu resource_sets=%llu driver_errors=%llu context_refused=%llu frame_refused=%llu target_refused=%llu world_ps_reduction_verified=0 gpu_benefit_verified=0 sensor_timestamp_unavailable=1 projection_mapping_verified=0 physical_calibration_verified=0 coordinates_logged=0",

@@ -4,18 +4,20 @@
 
 namespace edvr {
 
+inline constexpr char kNativeGazeOpenXrRuntime[] = "SteamVR/OpenXR";
+
 enum class NativeGazeFailure : std::uint8_t {
     None,
     Disabled,
-    ModuleLoadFailed,
+    ModuleNotLoaded,
     ModulePathMismatch,
     ContextUnavailable,
     ProviderInvalid,
     NonFinite,
     OutOfRange,
     ReceiptClockUnavailable,
-    InitTokenUnavailable,
-    ContextChanged,
+    ModuleCensusIncomplete,
+    ModuleAmbiguous,
 };
 
 struct NativeGazeEye {
@@ -34,6 +36,7 @@ struct NativeGazeSample {
     bool providerQueried{};
     bool providerReturnedValid{};
     bool usable{};
+    bool instanceFunctionInClient{}; // Optional probe witness; false is inconclusive.
     // IVRSystem026 supplies no sensor timestamp. QPC measures callback receipt.
     bool sensorTimestampUnavailable{true};
     std::uint64_t receiptQpc{};
@@ -42,11 +45,12 @@ struct NativeGazeSample {
     NativeGazeFailure failure{NativeGazeFailure::Disabled};
 };
 
-// Called once per game frame on the renderer thread. OFF has no API, loader,
-// context, clock or sequence side effects. Invalid samples require full rate.
-NativeGazeSample nativeGazePoll(bool enabled) noexcept;
-// Pure renderer-owned cache invalidation; no SDK, loader or shutdown calls.
-void nativeGazeSetLifetime(std::uint64_t epoch) noexcept;
-void nativeGazeReset() noexcept;
+// The serialized caller holds a live SteamVR OpenXR instance through the call.
+// In game, nativeTemporalWithGazeReady fences instance destruction. A stopped XR
+// session can return invalid gaze; no interface survives the poll. OFF performs
+// no lookup or clock work. The admitted epoch owns one complete module census,
+// and each poll uses only that image. An unavailable sample requires full rate.
+// The optional probe address is informational and cannot grant admission.
+NativeGazeSample nativeGazePoll(std::uint64_t admittedEpoch, const void* instanceFunction = nullptr) noexcept;
 
 }  // namespace edvr

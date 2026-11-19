@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 #include "../../src/d3d11/native_vrs.h"
 #include "../../src/d3d11/native_gaze.h"
+#include "../../src/d3d11/native_render_labels.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -28,6 +29,11 @@
 #ifdef EDVR_NATIVE_VRS_TEST
 #error This fixture requires the production native VRS owner path
 #endif
+
+bool nativeRenderLabels(NativeRenderLabels* labels){
+    std::memcpy(labels->runtimeName,edvr::kNativeGazeOpenXrRuntime,sizeof(edvr::kNativeGazeOpenXrRuntime));
+    labels->valid=1;return true;
+}
 
 namespace edvr {
 int guardFilter(unsigned long,const char*) {return EXCEPTION_EXECUTE_HANDLER;}
@@ -51,11 +57,9 @@ uint64_t nativeTemporalGazeEpoch() noexcept{
     return providerEpoch;
 }
 bool nativeTemporalWithGazeReady(ID3D11Device*,unsigned long,uint64_t epoch,NativeGazeReadyCallback callback,void* user){if(epoch!=providerEpoch)return false;callback(user,epoch);return true;}
-void nativeGazeReset() noexcept {}
-void nativeGazeSetLifetime(uint64_t) noexcept {}
-NativeGazeSample nativeGazePoll(bool enabled) noexcept {
+NativeGazeSample nativeGazePoll(std::uint64_t epoch,const void*) noexcept {
     NativeGazeSample sample{};
-    if(!enabled)return sample;
+    if(!epoch)return sample;
     LARGE_INTEGER now{},frequency{};
     if(!QueryPerformanceCounter(&now)||!QueryPerformanceFrequency(&frequency)||now.QuadPart<=0||frequency.QuadPart<=0) {
         sample.failure=NativeGazeFailure::ReceiptClockUnavailable;return sample;

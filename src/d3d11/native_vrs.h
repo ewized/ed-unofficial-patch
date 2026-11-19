@@ -18,7 +18,7 @@ enum class NativeVrsFailure:uint32_t {
 struct NativeVrsStatus {
     bool configured=false,driverReady=false,refused=false,magicAbsent=false;
     bool vendorStateKnown=false,fullRateAcknowledged=false,coarseAcknowledged=false;
-    bool sensorTimestampUnavailable=true;
+    bool sensorTimestampUnavailable=true,gazeProviderQueried=false;
     NativeVrsFailure failure=NativeVrsFailure::Disabled;
     int32_t lastDriverStatus=0;
     uint64_t ticks=0,providerPolls=0,validPairs=0,invalidPairs=0,staleRefusals=0;

@@ -6,6 +6,7 @@
 #include "witness_sampling_cases.h"
 #include "witness_replay_cases.h"
 #include "../../src/d3d11/native_gaze.h"
+#include "../../src/d3d11/native_render_labels.h"
 #include "../../src/d3d11/native_gaze_readiness.h"
 #include <algorithm>
 #include <cmath>
@@ -13,11 +14,10 @@
 #include <cstdlib>
 #include <limits>
 #include <vector>
+bool nativeRenderLabels(NativeRenderLabels*){std::abort();}
 namespace edvr {
 int guardFilter(unsigned long,const char*){return EXCEPTION_EXECUTE_HANDLER;}
-NativeGazeSample nativeGazePoll(bool) noexcept {std::abort();}
-void nativeGazeReset() noexcept {}
-void nativeGazeSetLifetime(uint64_t) noexcept {std::abort();}
+NativeGazeSample nativeGazePoll(std::uint64_t,const void*) noexcept {std::abort();}
 NativeGazeReadySnapshot nativeTemporalGazeReadiness(ID3D11Device*,unsigned long){return {};}
 uint64_t nativeTemporalGazeEpoch() noexcept{return 0;}
 bool nativeTemporalWithGazeReady(ID3D11Device*,unsigned long,uint64_t,NativeGazeReadyCallback,void*){std::abort();}

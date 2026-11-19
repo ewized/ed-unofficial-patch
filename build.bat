@@ -4095,11 +4095,8 @@ if not exist "%OBJ%\nativegaze" mkdir "%OBJ%\nativegaze"
     /Fo"%OBJ%\nativegaze\\" /Fe"%OBJ%\nativegaze\native_gaze_test.exe" ^
     "tools\native_gaze_test\native_gaze_test.cpp" "src\d3d11\native_gaze.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 exit /b 1
-for %%M in (--self-test --adapter-missing-get --adapter-path-mismatch --adapter-missing-init --adapter-load-failed --adapter-init-failed --adapter-missing-token) do (
-    "%OBJ%\nativegaze\native_gaze_test.exe" %%M
-    if errorlevel 1 exit /b 1
-)
-%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DNOMINMAX ^
+"%OBJ%\nativegaze\native_gaze_test.exe" --self-test || exit /b 1
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DNOMINMAX /I"third_party\openxr\include" ^
     /Fo"%OBJ%\nativegaze\\" /Fe"%OBJ%\nativegaze\provider_probe.exe" ^
     "tools\native_gaze_test\provider_probe.cpp" "src\d3d11\native_gaze.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 exit /b 1

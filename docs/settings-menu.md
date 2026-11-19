@@ -6,6 +6,7 @@
 - **VRS material coverage:** broad coverage uses independent UI, shader-compatibility and fine-motion protections. Manual feedback on `f93ef4e6` reported no visual regressions.
 - **VRS performance investigation:** `aba9d747` completed 30-second OFF/ON/OFF windows at 10.320 / 13.100 / 10.391 ms GPU. The unrelated-write cache route preserved no writes in this scene, so it has no demonstrated game benefit here. The guarded writable-EQUAL route passed WARP and RTX pixel checks on `619031af`; its game performance remains unmeasured after a startup connection failure.
 - **DLSS failure retries:** a bounded per-contract cache prevents alternating failing sizes, or a successful different size, from clearing an NGX refusal. Portable checks pass; native validation remains pending.
+- **Stationary stereo regression:** a clean launch was steady with temporal AA off and with DLSS alone. Enabling VRS brought back a horizontal world-image jump that persisted after Off. SteamVR logged overlapping initialization one second after enabling VRS. The candidate removes the gaze provider's background-client fallback and borrows the existing client. Portable checks pass; native and stationary-image verification remain pending.
 - **FG recovery:** `aba9d747` recovered from an actual missed handoff with VRS On. Both bounded captures retained all rows and verified 286 generated frames against their exact native endpoints and existing timing budget. Remaining repeats, physical headset behavior and full Reflex SDK qualification remain open.
 - **F8 opening view:** `249e7c9a` displayed DLSS quality, experimental frame generation, NVIDIA low latency, VRS and its sharp region together in the native VR Performance page. Physical headset validation remains pending.
 - **2026-10-28: the Sharp weapons setting is RETIRED** (`fix.sharp_weapons`; its VR menu row and its flat F8 row are gone): the weapons fire is always on. The rig note below is history.
@@ -1339,6 +1340,56 @@ A 160-size failure stream admits eight initial attempts and four overflow
 probes. The portable mode rig passes 224 checks and the seven focused feature
 mutations fail as expected. Native compilation and the final readiness
 suite remain pending; no driver failure was injected into the game.
+
+### Stationary stereo regression (2026-11-19)
+
+A clean `619031af` launch was steady in the hangar and on foot with DLSS,
+VRS and frame generation off. DLSS alone engaged at 16:59:18 UTC and stayed
+steady. Enabling only VRS at 17:00:14 brought the jump back; disabling it at
+17:01:30 did not clear the symptom. The user reports that the world shakes
+when the camera is stationary and appears stable while moving. The two
+profiles differ only in `experimental.eye_tracked_foveation`.
+
+Sparse eye captures show one left-eye world image shifting toward the
+right-eye view while its HUD stays steady. They cannot determine the
+frequency or prove a complete eye swap. A separate five-second F213 capture
+contains 358 samples of each camera/alignment stage, without gaps: all 357
+consecutive raw and corrected camera XYZ steps are zero, both head matrices
+are constant, and the runtime applies one unchanged alignment. F213 does not
+record the per-eye scene matrices or submitted texture identity.
+
+At 17:00:15.058, Elite's SteamVR XR client log reported a second `VR_Init`
+or `xrCreateInstance` without matching teardown and warned of undefined
+behavior. The process had already registered as an OpenXR scene. The gaze
+provider first asks a separate Valve OpenVR loader for its interface; if
+that loader has no initialized context, it calls `VR_InitInternal` as a
+background application. Turning VRS off retains that client. The warning
+and source identify an unsafe lifecycle path, while the cause of the pixel
+jump still needs a controlled fix and retest.
+
+Ruled out as a sufficient explanation: no physical full-rate reset after
+Off. During 15 seconds of the affected Off state, the recorded NVIDIA rate
+and resource setter counts each increased by 23,994, with no driver errors
+and no further coarse accepts. The reset calls were being reissued while
+the symptom continued. The sticky driver-ready path also keeps substantial
+work active after Off; its cost remains a separate performance question.
+
+The candidate acquires per-eye gaze from the existing SteamVR instance
+without initializing or cleaning up that shared runtime. A complete module
+census selects exactly one loaded `vrclient_x64.dll` for the admitted native
+epoch, before checking its factory. Each poll references that exact image,
+rechecks its path and factory owner, and obtains fresh interfaces under the
+native instance-lifetime guard. Alternate installation paths are supported;
+ambiguous, incomplete, truncated or changed identities leave shading at full
+rate. No interface is cached across polls. The published Valve client-core
+ABI supplies a compatibility route; borrowing an OpenXR-owned core is not an
+application API guarantee.
+
+The actual adapter passes 224 portable checks, including retained bilateral
+NDC/projections and refusal cases. The original adapter fails the no-second-
+initialization regression. Native provider execution and stationary stereo
+across repeated toggles remain required. The affected session was stopped
+cleanly and the original settings restored before building another candidate.
 
 ### Simulator validation (2026-11-19)
 
