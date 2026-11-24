@@ -8,6 +8,8 @@
 #include <thread>
 #include <string>
 #include "../../src/common/native_sharpen.h"
+#include "../../src/d3d11/native_vrs.h"
+#include "../../src/d3d11/frame_generation_coordinator.h"
 #include "../../src/common/config.h"
 #include "../../src/openxr/native_sharpen_client.h"
 #include "../../src/common/system_d3d11.h"
@@ -36,8 +38,34 @@ unsigned doorSeen=0,composites=0; uint64_t doorSeq=0; unsigned doorEye=9; bool d
 unsigned finalCalls=0; ID3D11Texture2D* finalTexture=nullptr;
 uint64_t finalSequence=0;uint32_t finalEye=9,finalRegion[4]{};
 bool finalComposite=false,finalFlipU=false,finalFlipV=false;
+ID3D11Texture2D* highlightOut=nullptr;
 ID3D11Texture2D* layeredOut=nullptr; ID3D11Texture2D* lastFrame=nullptr; uint32_t lastRegion[4]{}; float lastUv[4]{};
+// Record the selected clean world independently of the texture returned by the HUD.
+struct WorldCapture {
+  ID3D11Texture2D* texture=nullptr;
+  uint64_t sequence=0;
+  unsigned eye=0;
+  uint32_t region[4]{};
+  uint32_t refused=0;
+};
+WorldCapture* capture=nullptr;
 namespace edvr {
+bool nativeFgRequested() noexcept {return capture!=nullptr;}
+void nativeFgInvalidateProducer(uint32_t reason) noexcept {
+  if(capture)capture->refused=reason;
+}
+void nativeFgCaptureDoor(uint64_t,unsigned,ID3D11Texture2D*,const uint32_t[4],const float[4]) noexcept {
+  if(capture)order+='D';
+}
+void nativeFgCaptureWorld(uint64_t sequence,unsigned eye,ID3D11Texture2D* texture,const uint32_t region[4]) noexcept {
+  if(!capture)return;
+  order+='W';capture->sequence=sequence;capture->eye=eye;capture->texture=texture;
+  std::memcpy(capture->region,region,sizeof(capture->region));
+}
+ID3D11Texture2D* nativeVrsHighlightEye(uint64_t,uint32_t,ID3D11Texture2D*,const uint32_t[4]) noexcept {
+  if(highlightOut){order+='V';highlightOut->AddRef();}
+  return highlightOut;
+}
 void breadcrumb(const char*) {} // production guard.cpp's crash-channel dependency
 void temporalPassCaptureFinalEye(uint64_t seq,uint32_t eye,ID3D11Texture2D* texture,const uint32_t region[4],bool composite,bool flipU,bool flipV){
   ++finalCalls;finalSequence=seq;finalEye=eye;finalTexture=texture;std::memcpy(finalRegion,region,sizeof(finalRegion));finalComposite=composite;finalFlipU=flipU;finalFlipV=flipV;
@@ -188,6 +216,23 @@ void run() {
     check(door.treatEye(door.context,3,1,source.Get(),nullptr,&out,box)==S_FALSE&&!out,
           "nothing in the layer and sharpening off: the eye passes through exactly as before");
     check(finalTexture==source.Get()&&!finalComposite&&finalRegion[2]==32,"off empty-layer final hook captures unchanged source");
+    auto highlight=device.texture();
+    WorldCapture receipt;capture=&receipt;
+    highlightOut=highlight.Get();doorFromPassAnswer=true;order.clear();
+    check(door.treatEye(door.context,4,0,source.Get(),nullptr,&out,box)==S_OK&&out==highlight.Get()&&
+          order=="DWVC"&&receipt.texture==source.Get()&&receipt.sequence==4&&receipt.eye==0&&
+          receipt.region[0]==0&&receipt.region[1]==0&&receipt.region[2]==32&&receipt.region[3]==24&&
+          lastFrame==highlight.Get()&&lastOwned&&refs(highlight.Get())==2&&
+          finalTexture==highlight.Get()&&!finalComposite,
+          "VRS highlight replaces the clean passthrough before HUD and retains an output reference with no HUD draws");
+    if(out)out->Release();out=nullptr;
+    order.clear();layeredOut=layer.Get();
+    check(door.treatEye(door.context,4,1,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get()&&
+          order=="DWVC"&&receipt.texture==source.Get()&&receipt.sequence==4&&receipt.eye==1&&
+          lastFrame==highlight.Get()&&finalTexture==layer.Get()&&finalComposite,
+          "frame generation receives the clean eye before the highlight and the final capture receives the composited HUD");
+    if(out)out->Release();out=nullptr;
+    capture=nullptr;highlightOut=nullptr;layeredOut=nullptr;doorFromPassAnswer=false;
     const auto seenInvalid=doorSeen;
     const auto finalInvalid=finalCalls;
     check(door.treatEye(door.context,2,1,source.Get(),nullptr,&out,box)==E_INVALIDARG&&doorSeen==seenInvalid,
@@ -198,10 +243,14 @@ void run() {
   }
   {
     auto door=acquire(device,14);auto layer=device.texture();passSucceeds=false;layeredOut=layer.Get();
+    WorldCapture flipped;capture=&flipped;
     const float reversed[4]={.75f,1,.25f,0};ID3D11Texture2D* out=nullptr;float box[4]{};
     check(door.treatEye(door.context,1,0,source.Get(),reversed,&out,box)==S_OK&&out==layer.Get()&&finalTexture==layer.Get()&&finalComposite&&finalFlipU&&finalFlipV&&finalRegion[2]==16,"shader refusal still captures actual composed final result and flipped bounds");
     if(out)out->Release();out=nullptr;layeredOut=nullptr;
     check(door.treatEye(door.context,1,1,source.Get(),reversed,&out,box)==S_FALSE&&!out&&finalTexture==source.Get()&&!finalComposite&&finalRegion[0]==8&&finalRegion[2]==24,"stood-down empty layer captures passthrough original region");
+    check(!flipped.texture&&flipped.refused==edvr::NativeFgUnsupportedBounds,
+          "flipped input refuses frame generation and leaves the native eye available");
+    capture=nullptr;
     check(door.close(door.context)==S_OK,"final hook fault branch session closes");passSucceeds=true;
   }
   // The VR world route's layer-only eye (src/d3d11/vr_world_route.h): the frame at this door is the black one the temporal
@@ -219,16 +268,18 @@ void run() {
     if(out)out->Release();out=nullptr;
     // an eye the route took: the composite first, RCAS over its output
     layerOnlyEye[0]=layerOnlyEye[1]=true;layerOnlySeq=2;order.clear();sharpenSource=nullptr;
+    WorldCapture layerOnlyCapture;capture=&layerOnlyCapture;
     const auto doorsBefore=doorSeen,finalsBefore=finalCalls;
     check(door.treatEye(door.context,2,0,black.Get(),nullptr,&out,box)==S_OK&&out==layer.Get(),"a layer-only eye: S_OK with the composited frame");
     check(!lastOwned,"...and a layer-only eye's black frame is never handed over as owned (it is shared by the eyes and never rewritten)");
-    check(order=="CS"&&lastFrame==black.Get()&&sharpenSource==layer.Get(),
+    check(order=="DCS"&&!layerOnlyCapture.texture&&lastFrame==black.Get()&&sharpenSource==layer.Get(),
           "...the UI layer is composited FIRST (over the black frame the door handed on) and RCAS runs over the composited eye");
     check(box[0]==0&&box[1]==0&&box[2]==1&&box[3]==1&&lastRegion[0]==0&&lastRegion[2]==32&&lastRegion[3]==24,"...full bounds, the whole region");
     check(refs(layer.Get())==2,"...and the provider returns exactly one owned reference to the frame");
     check(finalTexture==layer.Get()&&finalComposite&&finalSequence==2&&finalEye==0&&finalCalls==finalsBefore+1&&doorSeen==doorsBefore+1,
           "...the door is noted first, and the final hook captures the composited, sharpened eye");
     if(out)out->Release();out=nullptr;
+    capture=nullptr;
     // the strength rules are unchanged: off -> only the composite
     cfg.set("fix.render_sharpness","0");
     layerOnlySeq=3;order.clear();

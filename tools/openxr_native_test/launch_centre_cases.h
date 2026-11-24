@@ -24,7 +24,7 @@ struct Fake {
   bool shouldRender=false;
   XrTime frameTime=200;
   XrResult endResult=XR_SUCCESS;
-  unsigned endCalls=0;
+  unsigned endCalls=0,lastEndLayers=0;
   XrReferenceSpaceType naturalType=XR_REFERENCE_SPACE_TYPE_LOCAL;
   XrSpace naturalSpace=reinterpret_cast<XrSpace>(3); // the default LOCAL fixture handle
   XrPosef localOriginInStage{{0,0,0,1},{0,0,0}};
@@ -57,7 +57,7 @@ inline XrResult XRAPI_PTR wait(XrSession,const XrFrameWaitInfo*,XrFrameState* ou
   out->predictedDisplayTime=active->frameTime;out->predictedDisplayPeriod=10;out->shouldRender=active->shouldRender?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR beginFrame(XrSession,const XrFrameBeginInfo*){return XR_SUCCESS;}
-inline XrResult XRAPI_PTR endFrame(XrSession,const XrFrameEndInfo*){++active->endCalls;return active->endResult;}
+inline XrResult XRAPI_PTR endFrame(XrSession,const XrFrameEndInfo* info){++active->endCalls;active->lastEndLayers=info->layerCount;return active->endResult;}
 inline XrResult XRAPI_PTR convert(XrInstance,const LARGE_INTEGER* qpc,XrTime* time) {
   ++active->converts;*time=qpc->QuadPart;return XR_SUCCESS;
 }

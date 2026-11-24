@@ -2,6 +2,8 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <memory>
+#include <utility>
 #include <thread>
 #include "runtime_gate.h"
 
@@ -51,4 +53,9 @@ struct NativeFgCreditRequest {
   void run(){try{callback();finish(true);}catch(...){finish(false);}}
   bool wait(){std::unique_lock<std::mutex> lock(mutex);cv.wait(lock,[&]{return done;});return success;}
 };
+// The owner withdraws its pending credit and wakes the pose caller before a
+// failed stereo source can influence another display tick.
+inline void cancelNativeFgCredit(std::shared_ptr<NativeFgCreditRequest>& pending) {
+  if(pending){auto request=std::move(pending);request->finish(false);}
+}
 } // namespace edvr::openxr

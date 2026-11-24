@@ -15,9 +15,11 @@
 // --fixes-off-device (with advanced.d3d11_fixes=0 in a fixture ini). These
 // focused hardware checks require the default log directory beside smoke.exe.
 // --warp runs the normal smoke checks on the software D3D11 device.
+// --witness-barriers --adapter-luid HIGH:LOW tests the real native context and DXGI hook paths.
 #include <windows.h>
 
 #include <d3d11.h>
+#include "witness_barriers.h"
 
 #include <cstdio>
 #include <string>
@@ -232,17 +234,6 @@ bool stageFixesOffProxy(const char* proxy, char* staged, size_t stagedSize) {
     return true;
 }
 
-// Whether IDXGISwapChain::Present (vtable slot 8) now lives in the module `mod`: the proxy's Present hook is on. The Present
-// checks below prove nothing about the hook without it.
-bool presentIsHookedBy(IDXGISwapChain* swapchain, HMODULE mod) {
-    void** vtable = *reinterpret_cast<void***>(swapchain);
-    HMODULE owner = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCSTR>(vtable[8]), &owner))
-        return false;
-    return owner == mod;
-}
-
 // Whether one of this process's own arguments already is `sw`.
 bool hasSwitch(int argc, char** argv, const char* sw) {
     for (int i = 1; i < argc; ++i) if (strcmp(argv[i], sw) == 0) return true;
@@ -292,6 +283,7 @@ int reexecWith(int argc, char** argv, const char* sw) {
 int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
     const char* proxy = argc > 1 ? argv[1] : "build\\d3d11.dll";
+    const bool witnessCheck = argc > 2 && strcmp(argv[2], "--witness-barriers") == 0;
     const bool recoveryCheck = argc > 2 && strcmp(argv[2], "--recovery-device") == 0;
     const bool foreignCheck = argc > 2 && strcmp(argv[2], "--foreign-device") == 0;
     const bool offCheck = argc > 2 && strcmp(argv[2], "--fixes-off-device") == 0;
@@ -365,6 +357,10 @@ int main(int argc, char** argv) {
 
     HMODULE mod = LoadLibraryA(full);
     if (!mod) return fail("the proxy did not load");
+    if(witnessCheck){
+        if(argc<5 || strcmp(argv[3],"--adapter-luid")!=0)return fail("expected --adapter-luid HIGH:LOW");
+        return smokeWitnessBarriers(mod,argv[4])?0:fail("real proxy witness barrier check failed");
+    }
     printf("  ok    proxy loaded\n");
 
     auto create = reinterpret_cast<PFN_Create>(GetProcAddress(mod, "D3D11CreateDevice"));
@@ -442,7 +438,7 @@ int main(int argc, char** argv) {
                 printf("  FAIL  swap chain through the proxy: hr=0x%08X\n", static_cast<unsigned>(made));
                 pass = false;
             } else {
-                const bool hooked = presentIsHookedBy(presenting.swapchain(), mod);
+                const bool hooked = smokeSwapChainSlotHookedBy(presenting.swapchain(),8,mod);
                 printf("  %s  the proxy's Present hook is on the swap chain with the fixes off\n", hooked ? "ok  " : "FAIL");
                 pass &= hooked;
                 bool presented = true;

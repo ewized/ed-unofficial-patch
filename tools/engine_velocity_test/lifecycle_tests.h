@@ -163,6 +163,7 @@ void vScreenVSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11VertexShader* vs, ID3
                            uint32_t n) { ctx->VSSetShader(vs, ci, n); }
 void vScreenPSSetShaderRaw(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ClassInstance* const* ci,
                            uint32_t n) { ctx->PSSetShader(ps, ci, n); }
+void vScreenCopyResourceRaw(ID3D11DeviceContext* ctx,ID3D11Resource* dst,ID3D11Resource* src){ctx->CopyResource(dst,src);}
 void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* ctx, ID3D11BlendState* state, const float factor[4], uint32_t mask) {
     ctx->OMSetBlendState(state, factor, mask);
 }
@@ -173,6 +174,14 @@ void Log::note(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     std::vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    lifecycle_fake::g_log.push_back(text);
+}
+void Log::noteReserved(const char* fmt, ...) {
+    char text[8192];
+    va_list args;
+    va_start(args,fmt);
+    std::vsnprintf(text,sizeof(text),fmt,args);
     va_end(args);
     lifecycle_fake::g_log.push_back(text);
 }
@@ -1570,7 +1579,31 @@ inline void run(const Harness& h) {
                 g.ctx->PSGetShaderResources(3, 1, &bound);
                 if (!(bound && bound.Get() != sentinel.Get())) std::printf("  VR overlay lifecycle: overlay draw #%d has no private t3 (bound %p, game %p)\n", eyeOverlayNo, static_cast<void*>(bound.Get()), static_cast<void*>(sentinel.Get()));
                 h.check(bound && bound.Get() != sentinel.Get(), "VR overlay lifecycle: the guarded pixel shader has the private snapshot at t3");
-                g.ctx->DrawInstanced(4, 1, 0, 0);
+                if(eyeOverlayNo==1){
+                    // Drive the production engine admission and owner drain as well
+                    // as the differential fixture's real shader/target replay.
+                    edvr::EngineWitnessBatchInput batch;
+                    batch.draw=edvr::native_vrs::WitnessDraw::instanced(4,1,0,0);
+                    batch.inputs=batch.pipeline=batch.outputGeneration=batch.projection.sequence=1;batch.certified=true;
+                    batch.rate=[](ID3D11DeviceContext*,unsigned,ID3D11RenderTargetView*,ID3D11DepthStencilView*,
+                        const edvr::NativeVrsProjection&,bool,edvr::NativeVrsCohortReceipt&,edvr::NativeVrsCohortStage) noexcept {return true;};
+                    batch.invalidateFrame=[](ID3D11DeviceContext*,unsigned,uint64_t,uint64_t) noexcept {return false;};
+                    static unsigned fineCount,materialCount;
+                    fineCount=materialCount=0;
+                    batch.replay=[](ID3D11DeviceContext* ctx,const edvr::native_vrs::WitnessDraw& draw,bool material){
+                        ++(material?materialCount:fineCount);edvr::native_vrs::issueWitnessDraw(*ctx,draw);
+                    };
+                    edvr::EngineWitnessIssue issue{g.ctx,g.rtv[0][0].Get(),g.dsv[0].Get(),0,1,1,true,true,nullptr,
+                        [](void*,bool){},[](void*,bool){return false;},&batch};
+                    h.check(edvr::engineVelocitySplitMaterial(issue) && edvr::engineVelocityWitnessCohortPending(),
+                            "VR overlay lifecycle: real guarded producer admitted");
+                    ++issue.drawNumber;
+                    h.check(edvr::engineVelocitySplitMaterial(issue) && !materialCount && !fineCount,
+                            "VR overlay lifecycle: next guard under the same publication retained without an early issue");
+                    edvr::engineVelocityFlushWitnessCohort(g.ctx);
+                    h.check(!edvr::engineVelocityWitnessCohortPending() && fineCount==2 && materialCount==2,
+                            "VR overlay lifecycle: two ordered guarded fine and material draws executed in the real engine");
+                }else g.ctx->DrawInstanced(4, 1, 0, 0);
             };
             auto eyeUnderlay = [&] {
                 g.setVs(); g.setPs(g.ps.Get(), kPsHash);

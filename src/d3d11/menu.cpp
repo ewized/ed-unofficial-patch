@@ -61,6 +61,8 @@
 #include "menu_policy.h"
 #include "menu_flat_layout.h"
 #include "menu_pages.h"
+#include "menu_vr_performance.h"
+#include "native_vrs.h"
 #include "menu_restart.h"
 #include "native_menu.h"
 #include "native_render_labels.h"
@@ -2064,7 +2066,16 @@ Page makePage(const MenuPageDef& d) {
     p.name = d.name;
     switch (d.source) {
         case MenuPageSource::Settings:
-            addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
+            if (d.token && strcmp(d.token, "performance") == 0 && d.tier == MenuPageTier::Fix) {
+                forEachVrPerformanceRow(kMenuRows, kRowDefCount, [&](int index) {
+                    if (menuDependentRowHidden(kMenuRows[index])) return;
+                    Entry entry;
+                    entry.def = index;
+                    p.entries.push_back(entry);
+                });
+            } else {
+                addSettingRows(p, menuTierOf(d.tier), d.token, d.grouped);
+            }
             break;
         case MenuPageSource::FlatPerformance: addFlatPerformanceRows(p); break;
         case MenuPageSource::FlatVisual: addFlatVisualRows(p); break;
@@ -2719,6 +2730,61 @@ void buildMonitorPanel(MenuContent& c) {
     snprintf(c.footer, sizeof(c.footer), "%s hides this panel", s.monitorKeyName.c_str());
 }
 
+const char* nativeVrsFailureLabel(NativeVrsFailure failure) {
+    switch (failure) {
+    case NativeVrsFailure::None: return "none";
+    case NativeVrsFailure::Disabled: return "disabled";
+    case NativeVrsFailure::InvalidRadii: return "invalid radii";
+    case NativeVrsFailure::MagicPresent: return "external VRS coexistence refused";
+    case NativeVrsFailure::ContextRefused: return "context refused";
+    case NativeVrsFailure::ThreadRefused: return "thread refused";
+    case NativeVrsFailure::FrameRefused: return "frame refused";
+    case NativeVrsFailure::NvapiModule: return "driver module unavailable";
+    case NativeVrsFailure::NvapiPath: return "driver path refused";
+    case NativeVrsFailure::NvapiQuery: return "driver query unavailable";
+    case NativeVrsFailure::NvapiOwner: return "driver owner refused";
+    case NativeVrsFailure::NvapiPin: return "driver pin failed";
+    case NativeVrsFailure::NvapiInitialize: return "driver initialization failed";
+    case NativeVrsFailure::DriverCall: return "driver call failed";
+    case NativeVrsFailure::TargetRefused: return "target refused";
+    case NativeVrsFailure::MapCreate: return "rate map creation failed";
+    case NativeVrsFailure::GazeInvalid: return "provider pair invalid";
+    case NativeVrsFailure::GazeStale: return "provider receipt stale";
+    case NativeVrsFailure::GazeNotReady: return "waiting for the eye provider";
+    }
+    return "unknown failure";
+}
+
+bool isNativeVrsRow(const MenuRowDef& row) {
+    return strcmp(row.section, "experimental") == 0 && strcmp(row.key, "eye_tracked_foveation") == 0;
+}
+
+// The request and driver acknowledgements can change independently. Show
+// the current receipt on the row itself and the longer counters in its tooltip.
+void nativeVrsRowStatus(bool requested, MenuContent& c, std::string* details) {
+    const NativeVrsStatus status = nativeVrsStatus();
+    snprintf(c.hint, sizeof(c.hint), "VRS %s. Driver %s. Coarse shading acknowledged: %s.",
+             requested ? "requested" : "off", status.driverReady ? "ready" : "not ready",
+             status.coarseAcknowledged ? "yes" : "no");
+    if (!details) return;
+    char text[512]{};
+    snprintf(text, sizeof(text),
+             "Configured %s. Driver state %s, full rate %s. Last status: %s (code %d, %llu errors). "
+             "Eye polls %llu, valid %llu, invalid %llu, stale %llu. "
+             "Scene draws accepted %llu of %llu. Sharp core %.0f%% wide, transition %.0f%% wide. ",
+             status.configured ? "on" : "off", status.vendorStateKnown ? "known" : "unknown",
+             status.fullRateAcknowledged ? "acknowledged" : "unconfirmed", nativeVrsFailureLabel(status.failure),
+             status.lastDriverStatus, static_cast<unsigned long long>(status.driverErrors),
+             static_cast<unsigned long long>(status.providerPolls),
+             static_cast<unsigned long long>(status.validPairs),
+             static_cast<unsigned long long>(status.invalidPairs),
+             static_cast<unsigned long long>(status.staleRefusals),
+             static_cast<unsigned long long>(status.worldAccepted),
+             static_cast<unsigned long long>(status.worldCalls),
+             status.sharpRadius * 200.f, status.transitionRadius * 200.f);
+    details->assign(text);
+}
+
 void buildContent(MenuContent& c) {
     State& s = g_s;
     memset(&c, 0, sizeof(c));
@@ -3103,6 +3169,9 @@ void buildContent(MenuContent& c) {
                              "completed once.");
                 }
             }
+            std::string body;
+            if (hi && isNativeVrsRow(d))
+                nativeVrsRowStatus(boolOf(r.value, false), c, showTip ? &body : nullptr);
             if (hi && showTip) {
                 // The tooltip beside the row: what the ini says about this
                 // key, in the ini's own words, plus the facts a person
@@ -3117,7 +3186,6 @@ void buildContent(MenuContent& c) {
                 // the truncation ate exactly the four things somebody about
                 // to change a value needs -- its range, its shipped value,
                 // when it applies, and which key does it.
-                std::string body;
                 if (openxrScaleRow) {
                     body += openxrResolutionFacts();
                 } else if (isVscreenResolutionRow(d) && d.lo[0] && d.hi[0]) {
@@ -6122,7 +6190,9 @@ void menuTick(ID3D11Device* dev) {
         if (world ? (s.open || s.alpha > 0.0f) : s.open) {
             {
                 Page& p = s.pages[s.page];
-                if (p.status && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
+                const int selected = s.open && world ? highlightedSettingDef() : -1;
+                const bool vrsStatus = selected >= 0 && isNativeVrsRow(kMenuRows[selected]);
+                if ((p.status || vrsStatus) && dueMs(s.statusRefreshMs, p.monitor ? kMonitorRefreshMs : kStatusRefreshMs)) {
                     s.statusRefreshMs = stampMs();
                     s.contentDirty = true;
                 }

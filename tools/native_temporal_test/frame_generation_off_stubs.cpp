@@ -1,7 +1,7 @@
 #include "../../src/d3d11/frame_generation_coordinator.h"
 
-// These existing temporal/sharpen contract rigs exercise the disabled optional
-// capability. The integrated coordinator has its own production-connected rig.
+// The temporal contract rig exercises disabled frame generation. The sharpen
+// contract rig records clean-world capture and the coordinator has its own rig.
 namespace edvr {
 void nativeFgSetRequestedMultiplier(uint32_t) noexcept {}
 bool nativeFgRequested() noexcept { return false; }

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "../../src/common/flat_profile_keys.h"
 #include "../../src/d3d11/flat_notice_queue.h"
 #include "../../src/d3d11/menu_flat_status.h"
@@ -15,14 +16,43 @@
 #include "../../src/d3d11/menu_policy.h"
 #include "../../src/d3d11/menu_flat_layout.h"
 #include "../../src/d3d11/menu_panel.h"
+#include "../../src/d3d11/menu_vr_performance.h"
 
 using namespace edvr;
 
 namespace {
+#include "menu_schema.inc"
+
 unsigned checks = 0, failures = 0;
 void check(bool ok, const char* name) {
     ++checks;
     if (!ok) { ++failures; std::printf("FAIL: %s\n", name); }
+}
+
+void vrPerformanceCases() {
+    std::vector<std::string> rows;
+    forEachVrPerformanceRow(kMenuRows, sizeof(kMenuRows) / sizeof(kMenuRows[0]), [&](int index) {
+        const auto& row = kMenuRows[index];
+        rows.emplace_back(std::string(row.section) + "." + row.key);
+    });
+    const std::vector<std::string> opening = {
+        "fix.temporal_aa", "fix.temporal_aa_model", "fix.frame_generation", "fix.nvidia_reflex",
+        "experimental.eye_tracked_foveation",
+        "experimental.foveation_focus", "experimental.foveation_highlight",
+    };
+    check(rows.size() >= opening.size() && std::equal(opening.begin(), opening.end(), rows.begin()),
+          "frame generation, driver low latency and all VRS controls are in the opening VR Performance viewport");
+    const VrPerformanceKey nativeOnly[] = {
+        {"fix", "frame_generation"}, {"fix", "nvidia_reflex"},
+        {"experimental", "eye_tracked_foveation"}, {"experimental", "foveation_focus"},
+        {"experimental", "foveation_highlight"},
+    };
+    for (const auto& key : nativeOnly) {
+        const std::string dotted = std::string(key.section) + "." + key.key;
+        check(std::count(rows.begin(), rows.end(), dotted) == 1 &&
+              !flatPageHasRow(key.section, key.key) && !flatProfileReadsKey(dotted.c_str()),
+              "each native-only setting appears once in VR and stays out of flat");
+    }
 }
 
 void policyCases() {
@@ -554,6 +584,7 @@ int main(int argc, char** argv) {
         std::fputs("usage: menu_policy_test [--self-test | --dry-run]\n", stderr);
         return 2;
     }
+    vrPerformanceCases();
     policyCases();
     summonCases();
     escapeCases();

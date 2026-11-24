@@ -24,17 +24,22 @@ class NativeTemporalClient final {
     if (!provider || !device || !generation) return E_INVALIDARG;
     const auto entry = GetProcAddress(provider, "edvrAcquireNativeTemporal");
     if (!owned(provider, entry)) return E_NOINTERFACE;
-    EdvrNativeTemporalRequest request{sizeof(request), EDVR_NATIVE_TEMPORAL_VERSION_1, device, generation};
-    EdvrNativeTemporalTable candidate{sizeof(candidate), EDVR_NATIVE_TEMPORAL_VERSION_1};
-    const auto result = reinterpret_cast<decltype(&edvrAcquireNativeTemporal)>(entry)(&request, &candidate);
-    if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
-    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TEMPORAL_VERSION_1 ||
-        !candidate.context || !owned(provider, candidate.beginFrame) || !owned(provider, candidate.noteProjection) ||
-        !owned(provider, candidate.treatEye) || !owned(provider, candidate.invalidate) || !owned(provider, candidate.close) ||
-        !owned(provider, candidate.skipEye))
-      return E_NOINTERFACE;
-    table_ = candidate; generation_ = generation;
-    return S_OK;
+    for(uint32_t version=EDVR_NATIVE_TEMPORAL_VERSION_2;version>=EDVR_NATIVE_TEMPORAL_VERSION_1;--version) {
+      const bool v2=version==EDVR_NATIVE_TEMPORAL_VERSION_2;
+      const uint32_t size=v2?uint32_t(sizeof(EdvrNativeTemporalTable)):EDVR_NATIVE_TEMPORAL_TABLE_V1_SIZE;
+      EdvrNativeTemporalRequest request{sizeof(request),version,device,generation};
+      EdvrNativeTemporalTable candidate{size,version};
+      const auto result=reinterpret_cast<decltype(&edvrAcquireNativeTemporal)>(entry)(&request,&candidate);
+      if(v2&&(result==E_INVALIDARG||result==E_NOINTERFACE))continue;
+      if(result!=S_OK)return FAILED(result)?result:E_NOINTERFACE;
+      if(candidate.size!=size||candidate.version!=version||!candidate.context||
+         !owned(provider,candidate.beginFrame)||!owned(provider,candidate.noteProjection)||
+         !owned(provider,candidate.treatEye)||!owned(provider,candidate.invalidate)||
+         !owned(provider,candidate.close)||!owned(provider,candidate.skipEye)||
+         (v2&&(!owned(provider,candidate.vrsFailures)||!owned(provider,candidate.diagnostics))))return E_NOINTERFACE;
+      table_=candidate;generation_=generation;return S_OK;
+    }
+    return E_NOINTERFACE;
   }
   bool acquired() const { std::lock_guard<std::mutex> lock(mutex_); return table_.context != nullptr; }
   // askedWidth/askedHeight: what the game is told now, max over eyes (the
@@ -106,6 +111,11 @@ class NativeTemporalClient final {
   HRESULT skip(uint64_t sequence, unsigned eye, bool jumpOnly, uint32_t verdict) {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context ? table_.skipEye(table_.context, sequence, eye, jumpOnly ? 1u : 0u, verdict) : S_FALSE;
+  }
+  uint32_t vrsFailures(uint64_t sequence) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return table_.context&&table_.version==EDVR_NATIVE_TEMPORAL_VERSION_2
+      ? table_.vrsFailures(table_.context,sequence) : 0;
   }
   HRESULT close() {
     std::lock_guard<std::mutex> lock(mutex_);

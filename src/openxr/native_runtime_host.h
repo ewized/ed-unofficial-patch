@@ -318,6 +318,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrTime fgFallbackTime=0;
   uint64_t fgFallbackSequence=0,fgFallbackReference=0;
   bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
+  uint64_t vrsRejectedSequence=0;
   XrView previousViews[2]{};
   StereoPlacement previousPlacement[2]{};
   XrSpace previousSpace=XR_NULL_HANDLE;
@@ -1944,11 +1945,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto rejected=boundary.submit(eye,texture,bounds,flags);
       lastCompositorResult=boundary.lastResult();return rejected;
     }
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     LARGE_INTEGER submitBegin{},submitEnd{}; const auto submitClock=QueryPerformanceCounter(&submitBegin);
     bool pairReady=false;
     if(fgEnabled.load(std::memory_order_acquire))return fgSubmitNative(eye,texture,bounds,flags);
     // Not `captured`: that name is the EyeCapture member (C4458).
     const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     // frame_end_overlap scope: separate device (finishPair below then needs
     // no graphicsCalls rendezvous with Elite's thread -- capture() above,
     // reached from publish(), already ran any producer copy that did),
@@ -2027,6 +2030,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // captured at deferral -- published because publishSubmitTimingCpu already
   // ran there (or didn't) and this must not publish the CPU record again.
   void finishPendingFrameEndBody(vr::EVREye eye,uint64_t sequence,bool published) {
+    if(rejectIncompleteVrsSource())return;
     finishingOverlapped=true; // endFrameReturned names the path
     const auto r=boundary.finishPair()==XR_SUCCESS?vr::VRCompositorError_None:vr::VRCompositorError_InvalidTexture;
     finishingOverlapped=false;
@@ -2244,6 +2248,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       const auto clockEnd=QueryPerformanceCounter(&ended);
       if(clock&&clockEnd) timingFrame.temporalMs[unsigned(eye)]=elapsedMs(began,ended);
       if(FAILED(treatment)) {
+        // Keep the failure receipt live until the XR owner can end this pair empty.
+        if(treatment==E_ABORT&&temporal.vrsFailures(sequence))return vr::VRCompositorError_InvalidTexture;
         invalidateEyeTreatments();timingInvalidate();
         if(temporalFailures++<8)nativeTracePrintf("native_temporal,failure=%08lx,callback=1\n",(unsigned long)treatment);
         return vr::VRCompositorError_InvalidTexture;
@@ -2419,6 +2425,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
+    if(temporal.vrsFailures(sequence))return vr::VRCompositorError_InvalidTexture;
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
     fgMenuVisible=menuTreated;
     if(fgEnabled.load(std::memory_order_acquire)&&menuTreated) {
@@ -2442,6 +2449,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+    if(temporal.vrsFailures(sequence))return vr::VRCompositorError_InvalidTexture;
     if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){
@@ -4240,6 +4248,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // The owner shares ownerInvoke (the constructor's setInvokeStats). Detach it once this host is gone, so the owner stops counting for a host
   // that no longer exists; an invoke already in flight keeps its own reference.
   ~NativeRuntimeHost() {close();service.setInvokeStats(std::shared_ptr<OwnerInvokeStats>{},nullptr);service.setFlatWaits({});}
+#include "native_vrs_source.inl"
   void invalidateEyeTreatments() { temporal.invalidate(); sharpen.invalidate(); }
   void publishFatalFailure(XrResult error,const char* operation) noexcept {
     fgCancelCredit();fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);

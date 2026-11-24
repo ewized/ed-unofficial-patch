@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #define EDVR_NATIVE_TEMPORAL_VERSION_1 1u
+// Acquire/table version only. Frame and projection wire shapes stay at V1.
+// A V1 consumer cannot withhold VRS failures, so it never enables batching.
+#define EDVR_NATIVE_TEMPORAL_VERSION_2 2u
 
 // Private temporal-only capability. Acquire/treat use the bound game producer;
 // begin/projection/invalidate/close are CPU-only and can run on the XR owner.
@@ -56,6 +59,11 @@ typedef HRESULT(WINAPI *EdvrNativeTemporalClose)(void*);
 // Consume an intentionally omitted eye without feeding bad pixels to history.
 // Jump-only omissions wait for the transition-flash fix's verdict; other causes reset it.
 typedef HRESULT(WINAPI *EdvrNativeTemporalSkip)(void*, uint64_t, uint32_t, uint32_t, uint32_t);
+// CPU-only, owner query: bit 0/1 identifies an incomplete left/right eye in
+// this exact source sequence. Either bit requires withholding the stereo pair.
+typedef uint32_t(WINAPI *EdvrNativeTemporalVrsFailures)(void*, uint64_t);
+// Reserved V2 capability slot. Returns zero with this provider.
+typedef uint32_t(WINAPI *EdvrNativeTemporalDiagnostics)(void*);
 struct EdvrNativeTemporalTable {
   uint32_t size, version;
   void* context;
@@ -65,5 +73,17 @@ struct EdvrNativeTemporalTable {
   EdvrNativeTemporalInvalidate invalidate;
   EdvrNativeTemporalClose close;
   EdvrNativeTemporalSkip skipEye;
+  EdvrNativeTemporalVrsFailures vrsFailures;
+  EdvrNativeTemporalDiagnostics diagnostics;
 };
+#define EDVR_NATIVE_TEMPORAL_TABLE_V1_SIZE ((uint32_t)offsetof(EdvrNativeTemporalTable, vrsFailures))
 extern "C" HRESULT WINAPI edvrAcquireNativeTemporal(const EdvrNativeTemporalRequest*, EdvrNativeTemporalTable*);
+
+namespace edvr {
+// Enroll the renderer's exact context and source sequence, only after a V2
+// owner negotiated frame withholding. The generation is an acquisition cookie.
+uint64_t nativeTemporalVrsOutputGeneration(ID3D11DeviceContext*,uint64_t sequence) noexcept;
+// Metadata only. Returns false for another acquisition, context or sequence.
+// Safe on a notifying thread under the engine lock; never calls the driver.
+bool nativeTemporalInvalidateVrsEye(ID3D11DeviceContext*,unsigned eye,uint64_t generation,uint64_t sequence) noexcept;
+}

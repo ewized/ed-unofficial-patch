@@ -39,6 +39,30 @@ struct D3D11_BOX;
 struct D3D11_VIEWPORT;
 
 namespace edvr {
+// Report installation facts and whether the calling thread owns this context.
+// The native producer confirms lifecycle coverage before exposing the context.
+// The supported producer owns its native game scene resources. A plug-in
+// independently exporting them to a video/D2D pipeline needs its own barrier.
+// Losing resource ownership or lifecycle coverage revokes this installation.
+struct VScreenWitnessContext {
+    bool nativeImplementation=false;
+    bool immediateAliases=false;
+    bool singleThreadContract=false;
+    bool serializedContext=false;
+    bool ownerThread=false;
+    bool barriersInstalled=false;
+    bool lifecycleCovered=false;
+    bool revoked=false;
+};
+VScreenWitnessContext vScreenWitnessContext(ID3D11DeviceContext*) noexcept;
+bool vScreenSetWitnessCohortLifecycleCoverage(ID3D11DeviceContext*,bool covered) noexcept;
+bool vScreenWitnessCohortQualified(ID3D11DeviceContext*) noexcept;
+// Drain before a consumer touches game resources or a frame identity changes.
+// A null context names the installed owner. On refusal, leave pending commands
+// and their resources intact. Call before taking a transport or graphics lock.
+bool vScreenDrainWitnessCohort(ID3D11DeviceContext* ctx=nullptr) noexcept;
+// Snapshot only; lifecycle must prevent further admissions before retirement.
+bool vScreenWitnessCohortDrained() noexcept;
 void vScreenExecuteCommandListRaw(ID3D11DeviceContext*,ID3D11CommandList*,int restore);
 
 // Above this many draws into the eye textures in one frame, a SCENE is being
@@ -183,7 +207,7 @@ void vScreenCopySubresourceRegionRaw(ID3D11DeviceContext* ctx, ID3D11Resource* d
 // Installs the context hooks using the mechanism the caller decided for this
 // device -- shared with the exposure hooks so the two never split modes on
 // the one context. See device_hook.h.
-void installVScreenFixes(ID3D11Device* device, HookMode mode);
+void installVScreenFixes(ID3D11Device* device, HookMode mode, bool nativeImmediateImplementation=false);
 
 // The size the on-foot panel actually renders at, once that is settled.
 //
@@ -221,6 +245,8 @@ void vScreenForceRefreshConfig();
 // draws reach the eye textures in a frame, which is only knowable at the end
 // of one.
 void vScreenFrameBoundary();
+// Recovery uses the Present owner's ordinal, even during graphics standdown.
+void vScreenNativeFrameBoundary(uint64_t frameOrdinal);
 
 
 // Called about once a second from the frame path: verify the context-vtable

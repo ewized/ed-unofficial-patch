@@ -29,7 +29,7 @@
     return request->wait();
   }
   void fgCancelCredit() {
-    if(fgCredit){auto request=std::move(fgCredit);request->finish(false);}
+    cancelNativeFgCredit(fgCredit);
   }
   void notePresentation(edvr::NativePresentationKind kind) {
     if(GetCurrentThreadId()!=ownerThread)return;
@@ -276,6 +276,10 @@
   }
   bool fgTickOwner(const RuntimeGate::Lease& operation) {
     if(!fgAvailable.load(std::memory_order_acquire)||!state.running()||state.terminal()||serviceStopped)return false;
+    // The game source is independent of the display tick. Handle a new
+    // failure once and let the next tick grant a fresh source credit.
+    if(fgEnabled.load(std::memory_order_acquire)&&activeFrameSequence!=vrsRejectedSequence&&
+       rejectIncompleteVrsSource())return true;
     const uint64_t now=GetTickCount64();
     const bool callerFresh=now-gameFrameCallMs.load(std::memory_order_relaxed)<=500;
     if(!callerFresh&&fgNativeOutstanding) {fgNativeOutstanding=false;fgAcceptedEyes=0;frameGeneration.invalidate(10);}
@@ -445,6 +449,7 @@
     const unsigned bit=1u<<unsigned(eye);
     if(!fgNativeOutstanding||(fgAcceptedEyes&bit))return vr::VRCompositorError_InvalidTexture;
     const auto admitted=capture(eye,texture,bounds,flags,fgNativePixels);
+    if(rejectIncompleteVrsSource())return vr::VRCompositorError_InvalidTexture;
     if(admitted==vr::VRCompositorError_None)fgAcceptedEyes|=bit;
     dispatchGpuEyeMarker(eye,texture,admitted==vr::VRCompositorError_None);
     if(clock&&counterNow(&ended))timingFrame.submitMs[unsigned(eye)]=elapsedMs(began,ended);

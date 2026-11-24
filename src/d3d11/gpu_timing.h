@@ -102,6 +102,10 @@ public:
     // Requires the shared application-frame frequency scope to be open. This
     // never starts a standalone TIMESTAMP_DISJOINT query.
     bool beginBorrowedFrame(ID3D11Device*, ID3D11DeviceContext*) noexcept;
+    // Preallocate on the shared clock owner, without emitting GPU commands.
+    // The prepared start never allocates or opens a private disjoint interval.
+    bool prepareBorrowedFrame(ID3D11Device*, ID3D11DeviceContext*) noexcept;
+    bool beginPreparedBorrowedFrame(ID3D11DeviceContext*) noexcept;
     bool end(ID3D11DeviceContext*) noexcept;
     // Wrong context/thread returns Pending and touches no mutable query state.
     // Ready/Invalid consumes the sample. S_FALSE never discards a sample;

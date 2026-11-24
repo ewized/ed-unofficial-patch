@@ -47,10 +47,14 @@
 
 #include "binding_shadow.h"
 #include "engine_velocity_families.h"
+#include "native_vrs.h"
+#include "native_vrs_replay.h"
 
 struct ID3D11Buffer;
 struct ID3D11DeviceContext;
 struct ID3D11PixelShader;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
 struct ID3D11Resource;
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
@@ -310,6 +314,48 @@ bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceV
 // original shaders or the currently held exact motion/marker replacement;
 // binding generations/context must still name those original shaders.
 bool engineVelocityFlatSourceShaders(ID3D11DeviceContext*, uint64_t vs, uint64_t ps);
+struct EngineWitnessBatchInput {
+    native_vrs::WitnessDraw draw{};
+    NativeVrsProjection projection{};
+    uint64_t inputs=0,pipeline=0,outputGeneration=0;
+    bool certified=false,expandedMaterial=false;
+    void (*replay)(ID3D11DeviceContext*,const native_vrs::WitnessDraw&,bool material)=nullptr;
+    decltype(&nativeVrsSetCohortRate) rate=nullptr;
+    bool (*invalidateFrame)(ID3D11DeviceContext*,unsigned eye,uint64_t outputGeneration,uint64_t frame) noexcept=nullptr;
+    bool (*mappedBuffer)(ID3D11Resource*) noexcept=nullptr; // consulted only during first capture
+    bool (*qualifiedOwner)(ID3D11DeviceContext*) noexcept=nullptr; // rechecked under the published cohort lock
+};
+struct EngineWitnessIssue {
+    ID3D11DeviceContext* ctx;
+    ID3D11RenderTargetView* color;
+    ID3D11DepthStencilView* depth;
+    unsigned eye;
+    uint64_t epoch,drawNumber;
+    bool reuse,querySafe;
+    void* user;
+    void (*draw)(void*,bool material);
+    bool (*rate)(void*,bool);
+    const EngineWitnessBatchInput* batch=nullptr;
+    uint64_t mirrorEpoch=epoch; // only proven unrelated resource writes may preserve this generation
+};
+bool engineVelocitySplitMaterial(const EngineWitnessIssue&);
+extern std::atomic<bool> g_engineWitnessCohortPending;
+extern thread_local bool g_engineWitnessCohortReplaying;
+inline bool engineVelocityWitnessCohortPending() noexcept {return g_engineWitnessCohortPending.load(std::memory_order_acquire);}
+void engineVelocityFlushWitnessCohort(ID3D11DeviceContext*);
+bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext*) noexcept;
+bool engineVelocityWitnessWriteUnrelated(ID3D11Resource* dst,uint64_t mirrorEpoch,uint64_t draw) noexcept;
+void engineVelocityReportWitness();
+// The render owner retains and reports one optional depth-copy census.
+void engineVelocityReportWitnessDepthCensus();
+void engineVelocityWitnessDepthCensusConfigure(bool on) noexcept;
+bool engineVelocityWitnessDepthCensusReportReady() noexcept;
+// Private borrowed timestamp commands pass the context hooks without becoming
+// application query events or advancing the witness mutation generations.
+inline thread_local bool engineWitnessTimingQueryInternal=false;
+void engineVelocityWitnessTimingConfigure(bool on) noexcept;
+void engineVelocityWitnessTimingFrame(ID3D11DeviceContext*,uint64_t frame,bool vrsEnabled) noexcept;
+void engineVelocityWitnessTimingAbandon() noexcept; // quiescent, after gpuTimingAbandon
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);

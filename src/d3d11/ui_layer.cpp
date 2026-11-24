@@ -15,6 +15,8 @@
 #include "ui_layer.h"
 #include "ui_layer_fg_adapter.h"
 #include "render_boundary.h"
+#include "ui_vrs_guard.h"
+#include "native_vrs.h"
 #include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
@@ -123,6 +125,50 @@ constexpr uint32_t kMaxAfterLines = 16;
 // tonemap runs every frame when the path works, so a streak this long says
 // the consumer is not coming; ~a third of a second at 90 Hz.
 constexpr uint32_t kCrispHdrMissFrames = 30;
+
+UiVrsGuard g_uiVrs;
+uint64_t g_uiVrsCoverageActivation[2] = {};
+HMODULE g_uiVrsMagic = nullptr, g_uiVrsNvapi = nullptr;
+void refreshUiVrs() {
+    // GetModuleHandle only: this optional compatibility path loads no DLLs,
+    // initializes no driver API and changes no driver or Magic configuration.
+    const HMODULE magic = GetModuleHandleW(L"LibMagicD3D1164.dll");
+    const HMODULE nvapi = magic ? GetModuleHandleW(L"nvapi64.dll") : nullptr;
+    if (magic == g_uiVrsMagic && nvapi == g_uiVrsNvapi) return;
+    g_uiVrsMagic = magic;
+    g_uiVrsNvapi = nvapi;
+    using Query = void* (__cdecl*)(unsigned int);
+    const auto query = nvapi ? reinterpret_cast<Query>(GetProcAddress(nvapi, "nvapi_QueryInterface")) : nullptr;
+    const auto reset = query ? reinterpret_cast<UiVrsReset>(query(0x34f7938f)) : nullptr;
+    g_uiVrs.configure(magic != nullptr, reset);
+}
+void uiVrsBefore(ID3D11DeviceContext* ctx, UiVrsScope scope) {
+    if (nativeVrsLive() && ctx && ctx->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        nativeVrsFullRate(ctx);
+    refreshUiVrs(); // a late attach is observed at its first recognized UI issue
+    g_uiVrs.before(ctx, scope);
+}
+void uiLayerExecuteFullRate(ID3D11DeviceContext* ctx, ID3D11CommandList* list, int restore) {
+    // Vendor extension state need not follow D3D11 command-list restoration.
+    // Reset the playback context explicitly, independently of the recorder,
+    // and reassert it afterward for a tone/UI issue following this list.
+    uiVrsExecute(ctx, list, restore, uiVrsBefore, vScreenExecuteCommandListRaw);
+}
+void uiLayerRecordFullRate(ID3D11DeviceContext* ctx) {
+    uiVrsBefore(ctx, UiVrsScope::DeferredRecord);
+}
+void logUiVrs() {
+    refreshUiVrs();
+    if (!g_uiVrs.magicLoaded()) return;
+    for (unsigned i = 0; i < static_cast<unsigned>(UiVrsScope::Count); ++i) {
+        const auto scope = static_cast<UiVrsScope>(i);
+        const UiVrsCounts& c = g_uiVrs.counts(scope);
+        Log::get().note("ui vrs: Magic4All loaded api_ready %u scope %s cumulative attempts %llu NVAPI_OK %llu errors %llu last_status %d; zero viewports, SRRV preserved.",
+            g_uiVrs.apiReady() ? 1u : 0u, uiVrsScopeName(scope),
+            static_cast<unsigned long long>(c.attempts), static_cast<unsigned long long>(c.ok),
+            static_cast<unsigned long long>(c.errors), c.lastStatus);
+    }
+}
 
 // ------------------------------------------------------------ configuration
 
@@ -2303,6 +2349,7 @@ void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
     }
     if (!e.mapPunchSrv) return;
     ID3D11DeviceContext* c = g_deferred.Get();
+    uiVrsBefore(c, UiVrsScope::DeferredRecord);
     const struct { UINT in[2], out[2]; float jitter[2], pad[2]; } constants{{td.Width, td.Height}, {e.hdrW, e.hdrH}, {g_draw.jx, g_draw.jy}, {0.0f, 0.0f}};
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(c->Map(g_mapPunch.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
@@ -2332,7 +2379,7 @@ void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
     c->PSSetShaderResources(0, 1, &none);
     Ptr<ID3D11CommandList> list;
     if (FAILED(c->FinishCommandList(FALSE, &list)) || !list) return;
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    uiLayerExecuteFullRate(ctx, list.Get(), 1);
     mapui::g_bodyCutouts.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2515,6 +2562,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     if (seedToken) g_hdrSeedGpu.endCopy(ctx, seedToken);
     bool recorded = false;
     try {
+        uiVrsBefore(g_deferred.Get(), UiVrsScope::DeferredRecord);
         g_seeder->seed(g_deferred.Get(), srcDepth, srcStencil, l.dsv.Get(),
                        td.Width, td.Height, outW, outH, g_draw.jx, g_draw.jy, stencilMask,
                        needDepth);
@@ -2532,7 +2580,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
         return false;
     }
     if (seedToken) g_hdrSeedGpu.beginWork(ctx, seedToken);
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    uiLayerExecuteFullRate(ctx, list.Get(), 1);
     if (seedToken) g_hdrSeedGpu.endWork(ctx, seedToken);
     seedProbe.token = 0;
     if (seedToken) g_hdrSeedActive = 0;
@@ -3234,6 +3282,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         mapBodiesPunch(ctx, e);
     vScreenOMSetBlendStateRaw(ctx, layerBlend, factor, sampleMask);
     if (mapRunStep != maprun::Step::kKeep) vScreenSetRenderTargetsRaw(ctx, 1, &target, layerDsv);
+    uiVrsBefore(ctx, UiVrsScope::Layer); // A continued map run keeps its UI target bound.
     if (mapRunIssue) {
         g_draw.mapRunBound = true;
         g_draw.mapRunEye = g_draw.eye;
@@ -5556,6 +5605,7 @@ bool uiLayerWriteBackBegin(ID3D11DeviceContext* ctx) {
         // depth or stencil write lands in the game's buffer exactly as it
         // always did, and its colour lands nowhere (it is in the layer).
         vScreenSetRenderTargetsRaw(ctx, 0, nullptr, g_draw.wbDsv);
+        uiVrsBefore(ctx, UiVrsScope::WriteBack);
         ok = true;
     });
     if (!ok) {
@@ -5897,6 +5947,7 @@ static ID3D11ShaderResourceView* glowFeedPass(ID3D11DeviceContext* ctx, const Ey
         g_glow = made;
     }
     ID3D11DeviceContext* dc = g_crispDeferred.Get();
+    if (hud) uiVrsBefore(dc, UiVrsScope::DeferredRecord);
     ID3D11RenderTargetView* target = g_glow.rtv.Get();
     const D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(td.Width), static_cast<float>(td.Height), 0.0f, 1.0f};
     dc->IASetInputLayout(nullptr);
@@ -5937,7 +5988,8 @@ static ID3D11ShaderResourceView* glowFeedPass(ID3D11DeviceContext* ctx, const Ey
         return nullptr;
     }
     FlatCrispGpu::beginOne(ctx, g_flatCrispGpu.glow, g_flatCrispGpu.glowBusy, g_flatCrispGpu.glowOpen, g_flatCrispGpu.glowCadence);
-    vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
+    if (hud) uiLayerExecuteFullRate(ctx, list.Get(), 1);
+    else vScreenExecuteCommandListRaw(ctx, list.Get(), 1);
     FlatCrispGpu::endOne(ctx, g_flatCrispGpu.glow, g_flatCrispGpu.glowOpen);
     g_flatCrispGpu.poll(ctx);
     verdict = UiGlowFeed::kFed;
@@ -6540,6 +6592,10 @@ const char* crispToneVariantName(uint64_t vs, uint64_t ps) {
 // context -- the depth-stencil seed's pattern: recorded off the hooked
 // immediate context, executed with the context state restored.
 bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) {
+    refreshUiVrs();
+    // A list cached before late attach is recorded once more with the explicit
+    // deferred reset. Cache hits thereafter append no commands to its recorder.
+    if (g_uiVrs.invalidateCache(g_uiVrsCoverageActivation[eye])) e.coverage.reset();
     if (!g_covVs || !g_covPs) compileCoverageOnce(ctx);
     if (!g_covVs || !g_covPs) return false;
     if (!g_crispDeferred) {
@@ -6567,7 +6623,7 @@ bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) 
         const UiCoverageBindings bindings{e.hdrSrv.Get(), e.rtv.Get(), g_covVs, g_covPs,
                                           blend, e.w, e.h};
         FlatCrispGpu::beginOne(ctx, g_flatCrispGpu.cov, g_flatCrispGpu.covBusy, g_flatCrispGpu.covOpen, g_flatCrispGpu.covCadence);
-        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, vScreenExecuteCommandListRaw, &failure);
+        ok = e.coverage.execute(ctx, g_crispDeferred.Get(), bindings, uiLayerExecuteFullRate, &failure, uiLayerRecordFullRate);
         FlatCrispGpu::endOne(ctx, g_flatCrispGpu.cov, g_flatCrispGpu.covOpen);
     } catch (const std::exception&) {
         FlatCrispGpu::endOne(ctx, g_flatCrispGpu.cov, g_flatCrispGpu.covOpen);
@@ -7108,6 +7164,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // Bind: the 8-bit layer, no depth view; the full-layer viewport (and scissor rect, if the game's rasterizer tests one).
         ID3D11RenderTargetView* target = e.rtv.Get();
         vScreenSetRenderTargetsRaw(ctx, 1, &target, nullptr);
+        uiVrsBefore(ctx, UiVrsScope::Tone);
         D3D11_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(e.w), static_cast<float>(e.h), 0.0f,
                           1.0f};
         vScreenRSSetViewportsRaw(ctx, 1, &vp);
@@ -7133,7 +7190,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // is (sharpGlassAddPass). A failure leaves W without the glass this frame: counted, and said once.
         if (wpnC && e.gSeq == p.seq && e.gDraws) {
             const bool added = e.gSrv && glassAddReady(ctx) &&
-                               sharpGlassAddPass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, e.gSrv.Get(), e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw);
+                               sharpGlassAddPass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, e.gSrv.Get(), e.wRtv.Get(), e.wW, e.wH, uiLayerExecuteFullRate, uiLayerRecordFullRate);
             if (added) {
                 ++g_win.glassAdds;
             } else {
@@ -7150,7 +7207,7 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         bool fellBack = wpnC && !plan.sourcePass;
         if (plan.sourcePass &&
             !sharpSourcePass(ctx, g_crispDeferred.Get(), g_srcVs, g_srcPs, g_sharpStates, gameHdr.Get(), g_sharpScratch.rtv.Get(),
-                             e.wRtv.Get(), e.wW, e.wH, vScreenExecuteCommandListRaw)) {
+                             e.wRtv.Get(), e.wW, e.wH, uiLayerExecuteFullRate, uiLayerRecordFullRate)) {
             plan = sharpTonePlan(hudC, wpnC, false);
             fellBack = true;
             plainWhy = "the source pass failed";
@@ -8420,6 +8477,7 @@ void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
         logTotals(static_cast<double>(now - g_winStartMs) / 1000.0);
     }
     logSharpWeapons();
+    logUiVrs(); // Uses the existing 30-second UI reporting window.
     logLegacyGlass();
     logShieldRipple();
     g_win = Window{};

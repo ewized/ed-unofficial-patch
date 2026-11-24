@@ -15,6 +15,7 @@
 #include "../../src/common/gpu_frame_protocol.h"
 extern "C" uint64_t WINAPI edvrGpuFrameEvent(unsigned, unsigned, uint64_t, unsigned, unsigned, void*);
 #include "../../src/d3d11/gpu_interval.h"
+#include "../../src/d3d11/native_vrs_witness_timing.h"
 #include "../../src/d3d11/ui_layer_draw_timing.h"
 #include "../../src/d3d11/ui_layer_seed_timing.h"
 #include "../../src/d3d11/gpu_disjoint_d3d11.h"
@@ -41,6 +42,8 @@ struct Ops {
                   uint64_t tick=0;unsigned reads=0;};
     std::vector<Query> queries;
     unsigned allocated=0,released=0,creates=0,commands=0,active=0;
+    unsigned dataCalls=0;
+    bool expectWitnessQueries=false;
     int failCreate=-1, pendingQuery=-1, failedQuery=-1;
     bool abandoning=false, failStamp=false, disjoint=false, pendingAll=false, faultNextStamp=false;
     uint64_t frequency=1000;
@@ -63,6 +66,7 @@ struct Ops {
     }
     static HRESULT end(void* p,ID3D11DeviceContext* c,ID3D11Asynchronous* q){
         auto& s=*static_cast<Ops*>(p);++s.commands;auto* x=s.find(q);if(!x)return E_FAIL;
+        if(s.expectWitnessQueries && (!engineWitnessTimingQueryInternal || x->kind!=D3D11_QUERY_TIMESTAMP))s.bad=true;
         if(s.faultNextStamp&&x->kind==D3D11_QUERY_TIMESTAMP){
             s.faultNextStamp=false;
             RaiseException(0xE042ED50u,0,0,nullptr); // before native End returns/first marker issues
@@ -75,7 +79,8 @@ struct Ops {
                 (s.failStamp&&x->kind==D3D11_QUERY_TIMESTAMP)) ? E_FAIL : S_OK;
     }
     static HRESULT data(void* p,ID3D11DeviceContext* c,ID3D11Asynchronous* q,void* out,UINT size,UINT flags){
-        auto& s=*static_cast<Ops*>(p);++s.commands;auto* x=s.find(q);
+        auto& s=*static_cast<Ops*>(p);++s.commands;++s.dataCalls;auto* x=s.find(q);
+        if(s.expectWitnessQueries && !engineWitnessTimingQueryInternal)s.bad=true;
         if(!x||!x->issued||x->open||flags!=D3D11_ASYNC_GETDATA_DONOTFLUSH){s.bad=true;return E_FAIL;}
         const int index=static_cast<int>(x-s.queries.data());++x->reads;
         if(s.pendingAll||index==s.pendingQuery)return S_FALSE;
@@ -300,6 +305,85 @@ void nativeFrameWork(Device& d) {
     check(br==GpuTimerPoll::Ready&&borrowerMs>0.0,"native borrower ready");
     borrower.reset(f.ctx()); policy.shutdown(GetTickCount64(),owner); driver.reset(f.ctx()); f.finish();
 }
+// Exercise the production observer on the existing clock with real D3D query
+// objects. Ops rejects any poll missing DONOTFLUSH and counts allocations.
+void witnessTimingCases(Device& d) {
+    using namespace edvr::native_vrs;
+    {
+        Fixture failed(d);WitnessTiming observer;
+        failed.ops.failCreate=3;observer.requested=true;
+        observer.tick(failed.ctx(),1,true);
+        const auto creates=failed.ops.creates;
+        observer.tick(failed.ctx(),2,true);
+        check(observer.mode==WitnessTiming::Mode::Done && failed.ops.allocated==failed.ops.released &&
+              failed.ops.active==0 && failed.ops.commands==0 && failed.ops.creates==creates,
+              "partial preallocation releases every query, emits no commands and stands down for this capture");
+        failed.finish();
+    }
+    Fixture f(d);
+    WitnessTiming probe;
+    auto* ctx=f.ctx();
+    probe.tick(ctx,1,true);
+    check(f.ops.creates==0 && f.ops.commands==0,"disabled witness timer touches no queries");
+    probe.requested=true;
+    probe.tick(ctx,2,true);
+    const auto prepared=f.ops.creates;
+    check(prepared==2*probe.slots*probe.phases && f.ops.commands==0,"arming preallocates all timestamp pairs without GPU work");
+    for(unsigned row=0;row<probe.plan.strata;++row)
+        for(unsigned n=0;n<16;++n)probe.plan.event(row);
+    probe.tick(ctx,3,true);
+    check(probe.mode==WitnessTiming::Mode::Collect,"pilot population starts joint window");
+    check(!probe.samples[0].gpu[0].beginPreparedBorrowedFrame(ctx) && f.ops.commands==0,
+          "prepared start with no app clock emits no query and owns no disjoint");
+    GpuTimingFrameDriver app;
+    check(app.bind(d.dev.Get(),ctx) && app.create(0) && app.begin(0) && app.timestamp(0,0),"application scope for witness sample");
+    const auto allocations=f.ops.creates;
+    WitnessMirror depth;
+    depth.textureDesc.Width=3840;depth.textureDesc.Height=2160;depth.format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    unsigned selected=0;
+    f.ops.expectWitnessQueries=true;
+    for(unsigned row=0;row<probe.plan.strata;++row){
+        for(unsigned n=0;n<32;++n){
+            WitnessObservation sample(probe,WitnessRoute(row/2),1,(row&1)!=0);
+            if(sample.sample)++selected;
+            sample.validated(depth,(row&1)!=0,false);
+            if(row&1)sample.stage(WitnessPhase::Copy);
+            sample.stage(WitnessPhase::Fine);
+            sample.stage(WitnessPhase::CoarseBind);
+            sample.stage(WitnessPhase::Material);
+            sample.finish(1);
+        }
+    }
+    check(selected==probe.plan.perFrame && f.ops.creates==allocations && f.ops.active==1,
+          "busy witness path respects per-frame cap with no allocations or private disjoint queries");
+    check(probe.depths[0].copies==32*probe.plan.strata/2 &&
+          probe.depths[0].bytes==probe.depths[0].copies*uint64_t(3840)*2160*8,"D32S8 copy count and physical format payload");
+    f.ops.expectWitnessQueries=false;
+    check(app.timestamp(0,1) && app.end(0),"app interval closed");
+    const auto polls=f.ops.dataCalls;
+    probe.requested=false;f.ops.expectWitnessQueries=true;
+    for(unsigned seq=4;seq<=6;++seq)probe.tick(ctx,seq,true);
+    check(f.ops.dataCalls==polls && probe.mode==WitnessTiming::Mode::Drain,"draining uses four later frame boundaries before any GetData");
+    f.ops.pendingAll=true;
+    probe.tick(ctx,7,true);
+    check(f.ops.dataCalls>polls && probe.mode==WitnessTiming::Mode::Drain,"S_FALSE remains pending after one bounded DONOTFLUSH poll");
+    f.ops.pendingAll=false;
+    probe.tick(ctx,8,true);
+    uint64_t valid=0,paired=0,chosen=0,missing=0;
+    for(auto& row:probe.rows){
+        paired+=row.paired;chosen+=row.chosen;
+        valid+=row.time[unsigned(WitnessPhase::Fine)].gpuSamples;
+        for(auto& phase:row.time)missing+=phase.missed;
+    }
+    check(probe.mode==WitnessTiming::Mode::Idle && valid==selected && chosen==valid && !missing &&
+          paired==32*probe.plan.strata,"all samples drain once, and all selected and unselected replay events remain represented");
+    f.ops.expectWitnessQueries=false;
+    check(!engineWitnessTimingQueryInternal && !f.ops.bad,"only private query commands are marked internal");
+    GpuSpanRawSample raw{};
+    check(app.poll(0,raw)==GpuSpanPoll::Ready,"application scope still supplies its frame duration");
+    app.destroy(0);app.reset(ctx);f.finish();
+}
+
 void frameDriverCases(Device& d) {
     {
         Fixture f(d);
@@ -1050,7 +1134,7 @@ void hdrSeedProbeCases(Device& d) {
         frame.consume(); frame.finish(); probe.reset(f.ctx()); f.finish();
     }
 }
-void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);controllerCases(device,runtime);nativeWork(device);nativeFrameWork(device);hdrDrawRouteCases(device);hdrSeedProbeCases(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
+void run(){Runtime runtime;Device device(runtime);policyCases(device,runtime);frameDriverCases(device);witnessTimingCases(device);controllerCases(device,runtime);nativeWork(device);nativeFrameWork(device);hdrDrawRouteCases(device);hdrSeedProbeCases(device);std::printf("PASS: %u shared GPU timer lifecycle checks\n",checks);}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {

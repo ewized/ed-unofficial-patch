@@ -16,6 +16,7 @@ struct UiCoverageBindings {
     uint32_t width = 0, height = 0;
 };
 using UiCoverageExecute = void (*)(ID3D11DeviceContext*, ID3D11CommandList*, int);
+using UiCoverageBeforeRecord = void (*)(ID3D11DeviceContext*);
 inline bool uiCoverageSameDevice(ID3D11Device* a, ID3D11Device* b) {
     if (!a || !b) return false;
     Microsoft::WRL::ComPtr<IUnknown> ai, bi;
@@ -61,9 +62,10 @@ inline bool uiCoverageDeviceDomainsMatch(ID3D11Device* immediateDevice, ID3D11De
         targetViewDevice.Get(), vsDevice.Get(), psDevice.Get(), blendDevice.Get()});
 }
 inline bool uiCoverageRecord(ID3D11DeviceContext* deferred, const UiCoverageBindings& b,
-                             Microsoft::WRL::ComPtr<ID3D11CommandList>& list) {
+                             Microsoft::WRL::ComPtr<ID3D11CommandList>& list, UiCoverageBeforeRecord beforeRecord = nullptr) {
     if (!deferred || !b.source || !b.target || !b.vs || !b.ps || !b.blend || !b.width || !b.height)
         return false;
+    if (beforeRecord) beforeRecord(deferred);
     deferred->IASetInputLayout(nullptr);
     deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     deferred->VSSetShader(b.vs, nullptr, 0);
@@ -117,7 +119,7 @@ public:
     bool hasCommands() const noexcept { return !!list_; }
     bool execute(ID3D11DeviceContext* ctx, ID3D11DeviceContext* deferred,
                  const UiCoverageBindings& b, UiCoverageExecute executeRaw,
-                 const char** failure = nullptr) {
+                 const char** failure = nullptr, UiCoverageBeforeRecord beforeRecord = nullptr) {
         if (failure) *failure = nullptr;
         const auto fail = [&](const char* reason) {
             if (failure) *failure = reason;
@@ -148,7 +150,7 @@ public:
             if (!uiCoverageDeviceDomainsMatch(device.Get(), deferredDevice.Get(), nativeDevice.Get(), b))
                 return fail("device domains");
             Microsoft::WRL::ComPtr<ID3D11CommandList> recorded;
-            if (!uiCoverageRecord(deferred, b, recorded)) return fail("command recording");
+            if (!uiCoverageRecord(deferred, b, recorded, beforeRecord)) return fail("command recording");
             device_ = device; immediate_ = ctx; deferred_ = deferred;
             source_ = b.source; target_ = b.target; vs_ = b.vs; ps_ = b.ps; blend_ = b.blend;
             width_ = b.width; height_ = b.height; list_ = recorded;

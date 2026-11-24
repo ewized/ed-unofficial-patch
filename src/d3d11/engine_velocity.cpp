@@ -1,6 +1,11 @@
 #include "flat_origin_capture.h"
 #include "flat_forward_light.h"
 #include "engine_velocity.h"
+#include "native_vrs_cohort_probe.h"
+#include "native_vrs_witness.h"
+#include "native_vrs_witness_state.h"
+#include "native_vrs_witness_timing.h"
+#include "native_vrs_material.h"
 #include "temporal_shader_bytecode.h"
 #include "dxbc_flat_overlay.h"
 
@@ -17,6 +22,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -45,6 +51,7 @@
 #include "vscreen.h"
 #include "../common/game_build.h"
 #include "../common/log.h"
+#include "../common/native_witness_drain.h"
 #include "../common/runtime_profile.h"
 #include "../common/timing.h"
 
@@ -169,6 +176,7 @@ struct FamilyState {
     std::unordered_map<ID3D11VertexShader*, Ptr<ID3D11VertexShader>> patchedVs;
     std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> patchedPs;
     std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> guardedPs;
+    std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> witnessPs;
     std::unordered_map<ID3D11PixelShader*, std::string> psFailed;
     std::unordered_map<ID3D11PixelShader*, bool> psExports;   // F2: the patched pixel shader writes E to target 7
     std::unordered_map<ID3D11PixelShader*, bool> psZeroes;    // F2: ...or writes "no history" there (exactly zero, valid 0): a skinned family's pixel shader that exports no E
@@ -312,6 +320,7 @@ const char* const kInvalidNames[kInvalidCount] = {
     "binding shadow disagreed", "no pool", "no scene constants", "create failed"};
 
 struct Eye {
+    native_vrs::WitnessMirror witnessMirror;
     Ptr<ID3D11Texture2D> depth;          // the scene depth this eye's slot target matches
     Ptr<ID3D11Texture2D> slots;
     DXGI_FORMAT slotFormat=DXGI_FORMAT_UNKNOWN;
@@ -368,6 +377,11 @@ struct Eye {
 // Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
 // eye-frame rules for a pass into the source's depth.
 Eye g_eyes[3];
+// A serialized foreign handoff may read this receipt under the queue lock.
+// Keep the counter independent of Eye resource reset to avoid reusing an old
+// publication. Holders retain the matching SRV through their pipeline.
+native_vrs::WitnessGuardPublication g_overlayPublication[3];
+
 // Marker ownership can start before world naming, on more than one depth in
 // the same present frame. Scene/pool snapshots keep their world-only lifecycle.
 struct FlatMarkerPlane {
@@ -788,6 +802,7 @@ void deriveFamily(int f) {
     // (armSkinForProfileLocked), and a family derived in VR just ahead of that must take it too.
     const bool skinArmed = !runtimeFlatProfile() && g_skinWanted.load(std::memory_order_acquire);
     if (s.derived && (s.derivedFlat != runtimeFlatProfile() || (kFamilies[f].skinned && s.derivedSkin != skinArmed))) {
+        s.witnessPs.clear();
         s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
         s.psExports.clear(); s.psZeroes.clear();
         s.derived = s.valid = false; s.skin = false; s.skinWhy.clear(); s.reason.clear(); s.inputs = EngineVelocityInputs{};
@@ -857,6 +872,8 @@ ID3D11VertexShader* patchedVsFor(ID3D11DeviceContext* ctx, int f, ID3D11VertexSh
             // made with the export are made again without it.
             s.skin = false;
             s.skinWhy = why;
+            s.witnessPs.clear();
+            s.psExports.clear(); s.psZeroes.clear();
             s.patchedPs.clear();
             ++g_skinStats.vsCreateFailed;
             Log::get().note("skin join: %s's vertex shader could not take the second skin (%s); the family goes on without it.", kFamilies[f].name, why.c_str());
@@ -1066,7 +1083,14 @@ struct FlatEngineGpu {
     }
 } g_flatEngineGpu;
 
-bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
+// Guard mutations also occur inside FlatComputeInternalScope, where a private
+// state setter is deliberately invisible to the game binding shadow.
+bool drainGuardWitness(ID3D11DeviceContext* ctx) {
+    if(!engineVelocityWitnessCohortPending())return true;
+    engineVelocityFlushWitnessCohort(ctx);
+    return !engineVelocityWitnessCohortPending() || (nativeWitnessDrain(ctx) && !engineVelocityWitnessCohortPending());
+}
+bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e,int eye) {
     if (!e.slots || !e.slotsRtv || !e.width || !e.height) return false;
     if (!e.overlayBase) {
         D3D11_TEXTURE2D_DESC d{};
@@ -1100,10 +1124,16 @@ bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
     ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &boundSrv);
     engineVelocityNoteStateCalls(1);
     if (boundSrv.Get() == e.overlayBaseSrv.Get()) return false;
-    FlatEngineGpu::beginOne(ctx, g_flatEngineGpu.ovlCopy, g_flatEngineGpu.ovlBusy, g_flatEngineGpu.ovlOpen, g_flatEngineGpu.ovlCadence);
-    ctx->CopyResource(e.overlayBase.Get(), e.slots.Get());
-    FlatEngineGpu::endOne(ctx, g_flatEngineGpu.ovlCopy, g_flatEngineGpu.ovlOpen);
-    g_flatEngineGpu.poll(ctx);
+    const bool published=g_overlayPublication[eye].replace(
+        [&]{return drainGuardWitness(ctx);},
+        [&]{
+            vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionRead);
+            FlatEngineGpu::beginOne(ctx, g_flatEngineGpu.ovlCopy, g_flatEngineGpu.ovlBusy, g_flatEngineGpu.ovlOpen, g_flatEngineGpu.ovlCadence);
+            ctx->CopyResource(e.overlayBase.Get(), e.slots.Get());
+            FlatEngineGpu::endOne(ctx, g_flatEngineGpu.ovlCopy, g_flatEngineGpu.ovlOpen);
+            g_flatEngineGpu.poll(ctx);
+        });
+    if(!published)return false;
     engineVelocityNoteStateCalls(1);
     ++g_draw.overlayCopies;
     const uint64_t slotBpp = e.slotFormat == DXGI_FORMAT_R32G32B32A32_FLOAT ? 16u : 8u;
@@ -1157,12 +1187,20 @@ inline bool guardTrusted(const void* base) noexcept {
            g_guardVerified.dsvGen == bindingGeneration(BindSlot::Dsv0);
 }
 
+bool setGuardT3(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* srv) {
+    if(!drainGuardWitness(ctx))return false;
+    FlatComputeInternalScope internal;
+    ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot,1,&srv);
+    engineVelocityNoteStateCalls(1);
+    return true;
+}
 // The game's own t3 back over the overlay guard's private one, if the private one is still what is bound (the game has not set t3 since: the
 // generation says so, and a verification that still holds says it was read back), and the guard let go. The guarded draws of one group keep the
 // private t3 bound between them (the lazy form); this is where it goes back: before any draw that is not one of the group, in restore() for
 // everything else.
-void guardRestoreT3(ID3D11DeviceContext* ctx) {
-    if (!g_bound.guardSrv3) return;
+bool guardRestoreT3(ID3D11DeviceContext* ctx) {
+    if (!g_bound.guardSrv3) return true;
+    if(!drainGuardWitness(ctx))return false;
     if (bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
         bool still = guardTrusted(g_bound.guardSrv3.Get());
         if (!still) {
@@ -1173,20 +1211,19 @@ void guardRestoreT3(ID3D11DeviceContext* ctx) {
         }
         if (still) {
             ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
-            FlatComputeInternalScope internal;
-            ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
-            engineVelocityNoteStateCalls(1);
+            if(!setGuardT3(ctx,game))return false;
             ++g_draw.restores;
         }
     }
     g_bound.guardSrv3.Reset();
     g_bound.gameSrv3.Reset();
+    return true;
 }
 
 // Put the game's own state back where EDVR's is still bound (the game has not
 // rebound since: the generation says so).
 void restore(ID3D11DeviceContext* ctx) {
-    guardRestoreT3(ctx);
+    if(!guardRestoreT3(ctx))return;
     if (g_bound.patchedPs && bindingGeneration(BindSlot::Ps) == g_bound.psGen) {
         vScreenPSSetShaderRaw(ctx, g_bound.originalPs, nullptr, 0);
         engineVelocityNoteStateCalls(1);
@@ -1484,6 +1521,8 @@ FlatMarkerPlane* flatMarkerPlane(ID3D11DeviceContext* ctx, ID3D11Texture2D* dept
     }
     if(plane->frame!=frame) {
         const float empty[4]={-1,0,0,0};
+        if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+        vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
         FlatEngineGpu::beginOne(ctx, g_flatEngineGpu.markerClr, g_flatEngineGpu.markerBusy, g_flatEngineGpu.markerOpen, g_flatEngineGpu.markerCadence);
         ctx->ClearRenderTargetView(plane->rtv.Get(),empty);
         FlatEngineGpu::endOne(ctx, g_flatEngineGpu.markerClr, g_flatEngineGpu.markerOpen);
@@ -1524,6 +1563,7 @@ void makeSkinTarget(ID3D11DeviceContext* ctx, Eye& e, int eye, unsigned width, u
 }
 
 bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* depth) {
+    if(e.depth.Get()!=depth && engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
     D3D11_TEXTURE2D_DESC dd{};
     depth->GetDesc(&dd);
     // A single-sample, single-slice scene depth only: MRT6 must match the
@@ -1549,8 +1589,10 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
         if (wantSkin && !e.skin && !e.skinFailed) makeSkinTarget(ctx, e, eye, dd.Width, dd.Height);
         return true;
     }
+    if(!drainGuardWitness(ctx))return false;
     const void* wasDepth = e.depth.Get();
     const unsigned wasW = e.width, wasH = e.height;
+    e.witnessMirror = {};
     e.skin.Reset(); e.skinRtv.Reset(); e.skinSrv.Reset(); e.skinBound = false; e.skinFailed = false; e.skinWrittenFrame = ~0u; e.skinClearedFrame = ~0u;
     e.slots.Reset(); e.slotsRtv.Reset(); e.slotsSrv.Reset();
     e.overlayBase.Reset(); e.overlayBaseSrv.Reset(); e.overlayGroup = false;
@@ -2146,6 +2188,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         if (!depthRes || FAILED(depthRes.As(&depthTex))) { restore(ctx); return; }
     }
     if (newFrame) {
+        if(!drainGuardWitness(ctx))return;
         // The eye-frame: this depth's slot target, cleared, and the sources copied.
         if (!ensureSlots(ctx, e, eye, depthTex.Get())) { restore(ctx); return; }
         ++g_draw.eyeFrames;
@@ -2167,7 +2210,11 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
             // The flat plane was cleared on its first use this frame. A
             // pre-world foreign marker must survive the source's first draw.
-            if(!runtimeFlatProfile())ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            if(!runtimeFlatProfile()){
+                if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+                vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
+                ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            }
             engineVelocityNoteStateCalls(1);
             // F2: target 7 starts the eye-frame at zero: valid 0 everywhere, so a pixel no skinned draw wrote is "no history". The on-foot source's
             // (3808x2142 in the F14 flight, 65 MB) is cleared at its first skinned draw instead (below): most frames on foot draw no character.
@@ -2176,6 +2223,8 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
                 {
                     // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
                     GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);
+                    if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+                    vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
                     ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
                 }
                 engineVelocityNoteStateCalls(1);
@@ -2229,7 +2278,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             if (!guarded) {
                 e.overlayGroup = false;
                 ++g_draw.overlayDeclinedShader;
-            } else if ((e.overlayGroup && e.overlayBaseSrv) || snapshotOverlayBase(ctx, e)) {
+            } else if ((e.overlayGroup && e.overlayBaseSrv) || snapshotOverlayBase(ctx,e,eye)) {
                 e.overlayGroup = true;
                 usePs = guarded;
                 guardOverlay = true;
@@ -2240,7 +2289,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         }
     }
     // A draw that is not a guarded overlay draw sees the game's t3, not the group's private one (the lazy guard keeps it bound across the group).
-    if (!guardOverlay && g_bound.guardSrv3) guardRestoreT3(ctx);
+    if (!guardOverlay && g_bound.guardSrv3 && !guardRestoreT3(ctx)) return;
     // Early-out blended depthless draws BEFORE bindTarget / derived blend when the game's blend state is already tracked.
     if (!overlayPair && runtimeFlatProfile() && g_flatGame.saved) {
         const uint32_t blendGenNow = bindingGeneration(BindSlot::Blend);
@@ -2384,17 +2433,13 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         const bool keptBound = g_bound.guardSrv3.Get() == privateSrv && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen;
         // Any other private t3 still bound (another snapshot, or the game set t3 over it) goes back first, so that what is read as "the game's t3"
         // below is the game's.
-        if (!keptBound) guardRestoreT3(ctx);
+        if (!keptBound && !guardRestoreT3(ctx)) return;
         const bool trusted = !keptBound && guardTrusted(privateSrv);   // nothing the two reads depend on has moved since they were last made
         Ptr<ID3D11ShaderResourceView> gameSrv;
         if (keptBound) gameSrv = g_bound.gameSrv3;
         else if (trusted) gameSrv = g_guardVerified.game;
         else { ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &gameSrv); engineVelocityNoteStateCalls(1); }
-        if (!keptBound) {
-            FlatComputeInternalScope internal;
-            ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &privateSrv);
-            engineVelocityNoteStateCalls(1);
-        }
+        if(!keptBound && !setGuardT3(ctx,privateSrv))return;
         Ptr<ID3D11ShaderResourceView> actual;
         if (!keptBound && !trusted) { ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &actual); engineVelocityNoteStateCalls(1); }
         if (!keptBound && !trusted && actual.Get() != privateSrv) {
@@ -2402,11 +2447,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             e.overlayGroup = false;
             ++g_draw.overlayDeclinedCreate;
             ID3D11ShaderResourceView* original = gameSrv.Get();
-            {
-                FlatComputeInternalScope internal;
-                ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &original);
-                engineVelocityNoteStateCalls(1);
-            }
+            if(!setGuardT3(ctx,original))return;
             usePs = patchedPsFor(ctx, f, ps);
             psInstalled = false;
         } else {
@@ -2450,6 +2491,8 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             {
                 // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
                 GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);
+                if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+                vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionWrite);
                 ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
             }
             engineVelocityNoteStateCalls(1);
@@ -2941,6 +2984,7 @@ void clearLocked() {
     for (auto& w : g_watchInfo) w = WatchInfo{};
     for (auto& s : g_families) {
         s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
+        s.witnessPs.clear();
         s.derived = s.valid = false; s.reason.clear(); s.binds = 0; s.unkeyedPsDraws = 0; s.selfMarked = 0; s.selfMarkedLatched = 0;
         s.skin = false; s.skinWhy.clear(); s.psExports.clear(); s.psZeroes.clear();
     }
@@ -3109,6 +3153,331 @@ void flatQueryGameColorTargets(ID3D11DeviceContext* ctx, ID3D11RenderTargetView*
     g_hookTargets.valid = true;
 }
 
+static native_vrs::WitnessDepthCopyCensus g_witnessDepthCopyCensus;
+static native_vrs::WitnessCounts g_witnessCounts=[] {
+    native_vrs::WitnessCounts counts;
+    counts.depthCensus=&g_witnessDepthCopyCensus;
+    return counts;
+}();
+std::atomic<bool> g_engineWitnessCohortPending{false};
+thread_local bool g_engineWitnessCohortReplaying=false;
+namespace {
+struct EngineWitnessCohort {
+    // Owner operations may hold g_mutex before this mutex. A serialized
+    // foreign context handoff takes only this mutex and calls raw Draw*.
+    std::recursive_mutex mutex;
+    std::atomic<bool> handoffSeen{false},mirrorDirty{false};
+    native_vrs::WitnessCohort draws;
+    std::optional<native_vrs::WitnessPipeline> state;
+    EngineWitnessBatchInput input;
+    uint64_t epoch=0,mirrorEpoch=0,firstDraw=0;
+    uint32_t markerFrame=~0u;
+    DWORD thread=0;
+    bool standDown=false,strongFull=false;
+    uint64_t foreignRuns=0,foreignDraws=0;
+    uint64_t guardedBatches=0,guardedMulti=0,guardedMaterials=0,guardedPaired=0,guardedMax=0;
+    uint64_t batches=0,multiple=0,materials=0,fallback=0,invalid=0,maxLength=0,stateRefused=0;
+};
+EngineWitnessCohort g_witnessCohort;
+native_vrs::WitnessTiming g_witnessTiming;
+std::atomic<bool> g_witnessTimingNeedsFrame{false};
+}
+
+// A write between two consecutive draws can preserve only an already
+// synchronized mirror. Draw gaps and prior invalidations remain authoritative.
+static std::atomic<uint64_t> g_witnessWriteOther{0},g_witnessWriteMatch{0},g_witnessWriteUnknown{0},g_witnessWriteCold{0};
+bool engineVelocityWitnessWriteUnrelated(ID3D11Resource* dst,uint64_t epoch,uint64_t draw) noexcept {
+    using native_vrs::WitnessWrite;
+    std::unique_lock<std::recursive_mutex> lock(g_mutex,std::try_to_lock);
+    if(!dst || !lock.owns_lock() || engineVelocityWitnessCohortPending() || g_witnessCohort.mirrorDirty.load(std::memory_order_acquire)){
+        ++g_witnessWriteUnknown;return false;
+    }
+    bool live=false;
+    for(const auto& eye:g_eyes){
+        const auto& m=eye.witnessMirror;
+        if(!m.reusable || m.epoch!=epoch || m.draw!=draw)continue;
+        live=true;
+        const auto relation=native_vrs::witnessWriteRelation(m,dst);
+        if(relation==WitnessWrite::Matching){++g_witnessWriteMatch;return false;}
+        if(relation!=WitnessWrite::Unrelated){++g_witnessWriteUnknown;return false;}
+    }
+    if(live)++g_witnessWriteOther;else ++g_witnessWriteCold;
+    return live;
+}
+void engineVelocityWitnessDepthCensusConfigure(bool on) noexcept {
+    g_witnessDepthCopyCensus.request(on);
+}
+bool engineVelocityWitnessDepthCensusReportReady() noexcept {
+    return g_witnessDepthCopyCensus.reportReady();
+}
+void engineVelocityWitnessTimingConfigure(bool on) noexcept {
+    g_witnessTiming.requested.store(on,std::memory_order_relaxed);
+}
+void engineVelocityWitnessTimingFrame(ID3D11DeviceContext* ctx,uint64_t frame,bool vrs) noexcept {
+    if(!g_witnessTiming.requested.load(std::memory_order_relaxed) &&
+       !g_witnessTimingNeedsFrame.load(std::memory_order_relaxed))return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    g_witnessTiming.tick(ctx,frame,vrs);
+    g_witnessTimingNeedsFrame.store(g_witnessTiming.mode!=native_vrs::WitnessTiming::Mode::Idle,std::memory_order_relaxed);
+}
+void engineVelocityWitnessTimingAbandon() noexcept {
+    if(!g_witnessTimingNeedsFrame.load(std::memory_order_relaxed))return;
+    g_witnessTiming.clearTimers(nullptr); // quiescent, shared clock already abandoned
+    g_witnessTiming.owner=nullptr;g_witnessTiming.mode=native_vrs::WitnessTiming::Mode::Idle;
+    g_witnessTimingNeedsFrame.store(false,std::memory_order_relaxed);
+}
+bool engineVelocityReplayWitnessOriginals(ID3D11DeviceContext* ctx) noexcept {
+    if(!ctx || g_engineWitnessCohortReplaying)return false;
+    auto& batch=g_witnessCohort;
+    batch.handoffSeen.store(true,std::memory_order_release);
+    std::lock_guard<std::recursive_mutex> lock(batch.mutex);
+    if(batch.draws.empty())return true;
+    if(batch.thread==GetCurrentThreadId() || batch.draws.key().context!=ctx || !batch.strongFull)return false;
+    const unsigned length=batch.draws.size();
+    struct ReplayScope {
+        ReplayScope(){g_engineWitnessCohortReplaying=true;}
+        ~ReplayScope(){g_engineWitnessCohortReplaying=false;}
+    } scope;
+    const auto& key=batch.draws.key();
+    native_vrs::WitnessGuardSnapshot guard;
+    if(key.guard.view)guard={batch.state->psInputs.srv.slots[kEngineVelocityOverlaySnapshotSlot],
+                            g_overlayPublication[key.eye].current()};
+    if(!native_vrs::replayPrearmedOriginals(batch.draws,ctx,batch.strongFull,
+            [&](const native_vrs::WitnessDraw& d){batch.input.replay(ctx,d,true);},guard))return false;
+    ++batch.foreignRuns;batch.foreignDraws+=length;
+    batch.strongFull=false;batch.state.reset();batch.mirrorDirty.store(true,std::memory_order_release);
+    g_engineWitnessCohortPending.store(false,std::memory_order_release);
+    return true;
+}
+void engineVelocityFlushWitnessCohort(ID3D11DeviceContext* ctx){
+    if(!engineVelocityWitnessCohortPending() || g_engineWitnessCohortReplaying)return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto& batch=g_witnessCohort;
+    std::lock_guard<std::recursive_mutex> queueLock(batch.mutex);
+    if(batch.draws.empty() || batch.thread!=GetCurrentThreadId() || batch.draws.key().context!=ctx)return;
+    struct ReplayScope {
+        ReplayScope(){g_engineWitnessCohortReplaying=true;}
+        ~ReplayScope(){g_engineWitnessCohortReplaying=false;}
+    } scope;
+    auto& s=*batch.state;auto& input=batch.input;
+    const auto eyeIndex=batch.draws.key().eye;
+    auto& eye=g_eyes[eyeIndex];
+    NativeVrsCohortReceipt receipt;
+    auto rate=[&](NativeVrsCohortStage stage){
+        return input.rate(ctx,eyeIndex,s.rt.slots[0],s.depth.Get(),input.projection,input.expandedMaterial,receipt,stage);
+    };
+    bool invalid=false;
+    auto strong=[&]{
+        if(!rate(NativeVrsCohortStage::StrongFull) && !invalid){
+            invalid=true;++batch.invalid;
+            if(input.invalidateFrame(ctx,eyeIndex,input.outputGeneration,input.projection.sequence)){
+                if(eye.frame==batch.markerFrame && eye.slotsRtv.Get()==s.rt.slots[6])eye.invalid=true;
+            }else{
+                batch.standDown=true;
+                Log::get().note("native VRS cohort: frame invalidation unavailable for eye %u generation %llu frame %llu; further cohorts disabled",
+                    eyeIndex,input.outputGeneration,input.projection.sequence);
+            }
+        }
+    };
+    struct Api {
+        ID3D11DeviceContext* ctx;decltype(rate)& setRate;
+        bool full(){return setRate(NativeVrsCohortStage::PrepareFine);}
+        void targets(UINT n,ID3D11RenderTargetView* const* v,ID3D11DepthStencilView* d){vScreenSetRenderTargetsRaw(ctx,n,v,d);}
+        void pixel(ID3D11PixelShader* p){vScreenPSSetShaderRaw(ctx,p,nullptr,0);}
+        void copy(ID3D11Resource* d,ID3D11Resource* src){vScreenCopyResourceRaw(ctx,d,src);}
+    } api{ctx,rate};
+    const unsigned length=batch.draws.size();
+    const auto paired=g_witnessCounts.paired;
+    const bool equal=s.depthAccess.equalWritable && input.qualifiedOwner && input.qualifiedOwner(ctx);
+    std::optional<native_vrs::WitnessObservation> obs;
+    if(g_witnessTiming.active(ctx))
+        obs.emplace(g_witnessTiming,native_vrs::witnessRoute(true,false,length),length,
+            !s.depthAccess.original && !equal && native_vrs::witnessNeedsCopy(eye.witnessMirror,s.depth.Get(),batch.mirrorEpoch,batch.firstDraw,true));
+    native_vrs::replayWitnessCohort(batch.draws,s,eye.witnessMirror,batch.mirrorEpoch,batch.firstDraw,g_witnessCounts,api,
+        [&](const native_vrs::WitnessDraw& d,bool material){input.replay(ctx,d,material);},
+        [&](unsigned i){return rate(i?NativeVrsCohortStage::NextMaterial:NativeVrsCohortStage::FirstMaterial);},strong,obs?&*obs:nullptr,equal);
+    if(obs)obs->finish(g_witnessCounts.paired-paired);
+    if(batch.draws.key().guard.view){
+        ++batch.guardedBatches;batch.guardedMulti+=length>1;batch.guardedMaterials+=length;batch.guardedPaired+=g_witnessCounts.paired-paired;
+        batch.guardedMax=(std::max)(batch.guardedMax,uint64_t(length));
+    }
+    ++batch.batches;batch.multiple+=length>1;batch.materials+=length;batch.fallback+=length-(g_witnessCounts.paired-paired);
+    batch.maxLength=(std::max)(batch.maxLength,uint64_t(length));
+    batch.draws.retire();batch.strongFull=false;batch.state.reset();g_engineWitnessCohortPending.store(false,std::memory_order_release);
+}
+
+static bool queueWitness(const EngineWitnessIssue& issue,ID3D11RenderTargetView* slots,ID3D11RenderTargetView* skin,
+    ID3D11VertexShader* vertex,ID3D11PixelShader* fine){
+    const auto* input=issue.batch;
+    if(!input || !input->certified || !input->rate || !input->replay || !input->invalidateFrame || !input->inputs ||
+       !input->pipeline || !input->outputGeneration || !input->projection.sequence || !input->draw.valid() ||
+       !issue.reuse || g_witnessCohort.standDown)return false;
+    native_vrs::WitnessGuardSnapshot guard;
+    if(g_bound.guardSrv3){
+        const auto& eye=g_eyes[issue.eye];
+        if(!eye.overlayGroup || eye.overlayBaseSrv!=g_bound.guardSrv3)return false;
+        guard={g_bound.guardSrv3.Get(),g_overlayPublication[issue.eye].current()};
+        if(!guard.valid())return false;
+    }
+    auto& batch=g_witnessCohort;
+    std::lock_guard<std::recursive_mutex> queueLock(batch.mutex);
+    if(batch.handoffSeen.load(std::memory_order_acquire))return false;
+    if(!batch.draws.empty()){
+        const auto& p=*batch.state;
+        if(batch.thread!=GetCurrentThreadId() || p.context.Get()!=issue.ctx)return false;
+        // Unchanged generation certifies the complete retained state and
+        // bytes. Compare engine-owned objects as well as the external key.
+        if(batch.draws.size()==native_vrs::WitnessCohort::capacity || batch.epoch!=issue.epoch ||
+           batch.firstDraw+batch.draws.size()!=issue.drawNumber || batch.draws.key().eye!=issue.eye || !(batch.draws.key().guard==guard) ||
+           p.rt.slots[0]!=issue.color || p.depth.Get()!=issue.depth || p.rt.slots[6]!=slots || p.rt.slots[7]!=skin ||
+           p.vertex.Get()!=vertex || p.fine.Get()!=fine || p.combined.Get()!=g_bound.patchedPs ||
+           p.material.Get()!=g_bound.originalPs || p.blend.Get()!=g_bound.derivedBlend.Get() ||
+           batch.input.inputs!=input->inputs || batch.input.pipeline!=input->pipeline || batch.input.outputGeneration!=input->outputGeneration ||
+           batch.input.expandedMaterial!=input->expandedMaterial || batch.input.replay!=input->replay ||
+           batch.input.rate!=input->rate || batch.input.invalidateFrame!=input->invalidateFrame ||
+           batch.input.projection.sequence!=input->projection.sequence ||
+           std::memcmp(batch.input.projection.frustum,input->projection.frustum,sizeof(input->projection.frustum)) ||
+           std::memcmp(batch.input.projection.shift,input->projection.shift,sizeof(input->projection.shift)))
+            engineVelocityFlushWitnessCohort(issue.ctx);
+    }
+    if(batch.draws.empty()){
+        auto& p=batch.state.emplace();
+        const bool timing=g_witnessTiming.active(issue.ctx) && g_witnessTiming.mode==native_vrs::WitnessTiming::Mode::Collect;
+        const bool sampled=timing && g_witnessTiming.admissionSample();
+        const auto begin=sampled?native_vrs::WitnessTiming::ticks():0;
+        const bool captured=p.capture(issue.ctx,issue.color,issue.depth,slots,skin,vertex,g_bound.patchedPs,fine,g_bound.originalPs,g_bound.derivedBlend.Get(),input->mappedBuffer,
+            g_witnessCounts.captureDepthDescriptor());
+        if(sampled){++g_witnessTiming.captureSamples;g_witnessTiming.captureTicks+=native_vrs::WitnessTiming::ticks()-begin;}
+        if(!captured || (guard.view && !p.permitsGuard(guard,kEngineVelocityOverlaySnapshotSlot))){
+            ++batch.stateRefused;batch.state.reset();return false;
+        }
+        NativeVrsCohortReceipt prearm;
+        if(timing)++g_witnessTiming.prearms;
+        const auto armStart=sampled?native_vrs::WitnessTiming::ticks():0;
+        batch.strongFull=input->rate(issue.ctx,issue.eye,issue.color,issue.depth,input->projection,input->expandedMaterial,
+                                    prearm,NativeVrsCohortStage::StrongFull);
+        if(sampled){++g_witnessTiming.prearmSamples;g_witnessTiming.prearmTicks+=native_vrs::WitnessTiming::ticks()-armStart;}
+        if(!batch.strongFull || batch.handoffSeen.load(std::memory_order_acquire)){
+            batch.strongFull=false;batch.state.reset();return false;
+        }
+        batch.input=*input;batch.firstDraw=issue.drawNumber;batch.epoch=issue.epoch;batch.mirrorEpoch=issue.mirrorEpoch;batch.thread=GetCurrentThreadId();
+        batch.markerFrame=g_eyes[issue.eye].frame;
+    }
+    const native_vrs::WitnessCohortKey key{issue.ctx,issue.color,issue.depth,&*batch.state,
+        input->projection.sequence,input->inputs,input->pipeline,issue.eye,guard};
+    if(batch.draws.append(key,input->draw)!=native_vrs::WitnessCohortAppend::Appended)return false;
+    g_engineWitnessCohortPending.store(true,std::memory_order_release);
+    return true;
+}
+bool engineVelocitySplitMaterial(const EngineWitnessIssue& issue) {
+    auto* ctx=issue.ctx;
+    struct Prior {
+        ID3D11DeviceContext* ctx;bool queued=false;
+        ~Prior(){if(!queued && engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);}
+    } prior{ctx};
+    if(issue.eye>=2||!ctx||!issue.draw||!issue.rate)return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if(g_witnessCohort.mirrorDirty.exchange(false,std::memory_order_acq_rel))
+        for(auto& e:g_eyes)e.witnessMirror.reusable=false;
+    if(!issue.querySafe){++g_witnessCounts.queryRefused;return false;}
+    if(ctx!=g_bound.context.Get()||g_bound.family<0 || !g_bound.patchedPs || !g_bound.originalPs ||
+       bindingGeneration(BindSlot::Vs)!=g_bound.vsGen||bindingGeneration(BindSlot::Ps)!=g_bound.psGen ||
+       bindingGet(BindSlot::Vs)!=g_bound.sourceVs||bindingGet(BindSlot::Ps)!=g_bound.originalPs){
+        ++g_witnessCounts.stateRefused;return false;
+    }
+    if(g_bound.guardSrv3){
+        Ptr<ID3D11ShaderResourceView> actual;
+        ctx->PSGetShaderResources(kEngineVelocityOverlaySnapshotSlot,1,&actual);
+        if(actual.Get()!=g_bound.guardSrv3.Get()){++g_witnessCounts.stateRefused;return false;}
+    }
+    auto& fam=g_families[g_bound.family];
+    auto found=fam.witnessPs.find(g_bound.patchedPs);
+    if(found==fam.witnessPs.end()){
+        Ptr<ID3D11PixelShader> witness;
+        const auto info=g_ps.find(g_bound.originalPs);
+        if(info!=g_ps.end()&&!info->second.linked){
+            const auto& bytes=info->second.bytes;
+            EngineVelocityInputs inputs=fam.inputs;const bool guarded=g_bound.guardSrv3.Get()!=nullptr;
+            inputs.skinExport=!guarded && fam.psExports[g_bound.originalPs];
+            inputs.skinZero=!guarded && fam.psZeroes[g_bound.originalPs];
+            std::vector<BYTE> derived;std::string why;
+            if(native_vrs::compatibleScenePixelShader(bytes.data(),bytes.size())&&
+               engineVelocityPatchPs(bytes.data(),bytes.size(),inputs,derived,why,guarded,
+                   dxbc_engine_velocity_detail::FlatMarkerKind::None,nullptr,true)){
+                Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+                t_creating=true;dev->CreatePixelShader(derived.data(),derived.size(),nullptr,&witness);t_creating=false;
+            }
+        }
+        found=fam.witnessPs.emplace(g_bound.patchedPs,std::move(witness)).first;
+    }
+    if(!found->second){++g_witnessCounts.shaderRefused;return false;}
+    struct Api {
+        const EngineWitnessIssue& issue;
+        void targets(UINT count,ID3D11RenderTargetView* const* views,ID3D11DepthStencilView* depth){vScreenSetRenderTargetsRaw(issue.ctx,count,views,depth);}
+        void pixel(ID3D11PixelShader* ps){vScreenPSSetShaderRaw(issue.ctx,ps,nullptr,0);}
+        void copy(ID3D11Resource* dst,ID3D11Resource* src){vScreenCopyResourceRaw(issue.ctx,dst,src);}
+        bool full(){return issue.rate(issue.user,false);}
+    } api{issue};
+    auto& eye=g_eyes[issue.eye];
+    auto* skin=eye.skinBound?eye.skinRtv.Get():nullptr;
+    auto* vertex=g_bound.patchedVs?g_bound.patchedVs:g_bound.sourceVs;
+    if(queueWitness(issue,eye.slotsRtv.Get(),skin,vertex,found->second.Get())){prior.queued=true;return true;}
+    if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
+    const auto depthAccess=native_vrs::WitnessDepthAccess::bound(ctx,issue.depth,g_witnessCounts.captureDepthDescriptor());
+    const bool observe=vrsCohortActive(ctx);
+    std::optional<native_vrs::WitnessObservation> obs;
+    if(g_witnessTiming.active(ctx))
+        obs.emplace(g_witnessTiming,native_vrs::witnessRoute(false,g_bound.guardSrv3.Get()!=nullptr,1),1,
+            !depthAccess.original && native_vrs::witnessNeedsCopy(eye.witnessMirror,issue.depth,issue.mirrorEpoch,issue.drawNumber,issue.reuse));
+    const auto paired=(observe||obs)?g_witnessCounts.paired:0,copies=observe?g_witnessCounts.copies:0;
+    const bool issued=native_vrs::splitWitness(api,ctx,issue.color,issue.depth,eye.slotsRtv.Get(),skin,
+        vertex,g_bound.patchedPs,found->second.Get(),g_bound.originalPs,
+        g_bound.derivedBlend.Get(),eye.witnessMirror,issue.mirrorEpoch,issue.drawNumber,issue.reuse,g_witnessCounts,
+        [&](bool material){issue.draw(issue.user,material);},[&]{return issue.rate(issue.user,true);},obs?&*obs:nullptr,&depthAccess);
+    if(obs)obs->finish(g_witnessCounts.paired-paired);
+    // A late refusal also issues material, through the combined shader.
+    // Only the completed fine/coarse pair can contribute to a candidate run.
+    if(observe && g_witnessCounts.paired!=paired){
+        vrsCohortNotePair(ctx,{issue.eye,issue.color,issue.depth,eye.slotsRtv.Get(),skin,vertex,found->second.Get(),
+            g_bound.derivedBlend.Get(),g_bound.guardSrv3.Get()!=nullptr,skin!=nullptr,g_witnessCounts.copies!=copies});
+    }
+    return issued;
+}
+void engineVelocityReportWitnessDepthCensus(){
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto& depth=g_witnessDepthCopyCensus;
+    if(depth.reportReady()){
+        unsigned listed=0;
+        for(unsigned i=0;i<depth.rowCount;++i)listed+=depth.rows[i].copies;
+        Log::get().noteReserved("native VRS depth copy census: status=%s sampled=%u cap=%u rows=%u explicit_listed=%u default_null=%u unknown=%u overflow=%u",
+            depth.complete()?"complete":"partial",depth.sampled,depth.copyLimit,depth.rowCount,listed,depth.defaultNull,depth.unknown,depth.overflow);
+        for(unsigned i=0;i<depth.rowCount;++i){
+            const auto& row=depth.rows[i];const auto& d=row.key;
+            Log::get().noteReserved("native VRS depth copy descriptor: row=%u copies=%u depth_enable=%u depth_write_mask=%u depth_func=%u stencil_enable=%u stencil_read_mask=%u stencil_write_mask=%u front_func_fail_zfail_pass=%u,%u,%u,%u back_func_fail_zfail_pass=%u,%u,%u,%u stencil_ref=%u",
+                i+1,row.copies,d.depthEnable,d.depthWriteMask,d.depthFunc,d.stencilEnable,d.stencilReadMask,d.stencilWriteMask,
+                d.front[0],d.front[1],d.front[2],d.front[3],d.back[0],d.back[1],d.back[2],d.back[3],d.stencilRef);
+        }
+        depth.markReported();
+    }
+}
+void engineVelocityReportWitness(){
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const auto& n=g_witnessCounts;
+    Log::get().note("native VRS motion: paired=%llu depth_copies=%llu depth_reuse=%llu readonly_original_runs=%llu readonly_original_draws=%llu equal_writable_eligible_draws=%llu equal_writable_fine_draws=%llu equal_writable_paired_draws=%llu state_refused=%llu shader_refused=%llu query_refused=%llu rate_refused=%llu",
+        n.paired,n.copies,n.reused,n.readOnlyOriginalRuns,n.readOnlyOriginalDraws,n.equalEligible,n.equalFine,n.equalPaired,n.stateRefused,n.shaderRefused,n.queryRefused,n.rateRefused);
+    for(unsigned writes=0;writes<2;++writes){
+        const auto& c=n.copyCauses;
+        Log::get().note("native VRS depth copy causes: stencil_may_write=%u unknown=%llu never=%llu less=%llu equal=%llu less_equal=%llu greater=%llu not_equal=%llu greater_equal=%llu always=%llu default_less=%llu depth_disabled=%llu",
+            writes,c[0][writes],c[1][writes],c[2][writes],c[3][writes],c[4][writes],c[5][writes],c[6][writes],c[7][writes],c[8][writes],c[9][writes],c[10][writes]);
+    }
+    Log::get().note("native VRS mirror writes: unrelated_preserved=%llu matching_invalidated=%llu unknown_invalidated=%llu no_current_mirror=%llu",
+        g_witnessWriteOther.load(),g_witnessWriteMatch.load(),g_witnessWriteUnknown.load(),g_witnessWriteCold.load());
+    const auto& b=g_witnessCohort;
+    std::lock_guard<std::recursive_mutex> queueLock(g_witnessCohort.mutex);
+    Log::get().note("native VRS witness cohorts: batches=%llu multi_draw=%llu materials=%llu combined_fallback=%llu invalid_frames=%llu capture_refused=%llu longest=%llu handoff_runs=%llu handoff_originals=%llu guarded_batches=%llu guarded_multi=%llu guarded_materials=%llu guarded_paired=%llu guarded_longest=%llu",
+        b.batches,b.multiple,b.materials,b.fallback,b.invalid,b.stateRefused,b.maxLength,b.foreignRuns,b.foreignDraws,b.guardedBatches,b.guardedMulti,b.guardedMaterials,b.guardedPaired,b.guardedMax);
+}
+
 bool engineVelocityActive() noexcept { return live.load(std::memory_order_acquire); }
 
 int engineVelocityFormatUnkeyed(char* out, size_t size) {
@@ -3203,7 +3572,11 @@ void engineVelocityConfigure(bool on) {
 void engineVelocityDiagnostics(bool on) { g_diagnosticsWanted.store(on, std::memory_order_relaxed); }
 
 void engineVelocityShutdown() {
+    // Config polling may run off-thread. In that case retain the eye and
+    // snapshot until the owner drains; a subsequent config poll retries.
+    if(engineVelocityWitnessCohortPending() && !nativeWitnessDrain())return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if(engineVelocityWitnessCohortPending())return;
     const bool was = live.exchange(false, std::memory_order_acq_rel);
     flatOriginWitnessShutdown();
     guardForget();
@@ -3566,6 +3939,7 @@ void engineVelocityFlatFrameEnd() noexcept {
 }
 
 void engineVelocityFlatAbandon() noexcept {
+    if(engineVelocityWitnessCohortPending() && !nativeWitnessDrain())return;
     guardForget();
     g_gpuRunActive = g_gpuRunTimed = false;   // the context lost its state and may be gone: no End on it
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -3857,6 +4231,7 @@ void engineVelocityNotePresentFrame(uint32_t presentFrame) noexcept {
 uint32_t engineVelocityPresentClock() noexcept { return g_frame.load(std::memory_order_acquire); }
 
 void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
+    if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
     // Runs while live, and once more after a stand-down that left EDVR state
     // bound: configure(false) may come from the config thread, which must not
     // touch the context, so the owner thread puts the game's back.
@@ -3875,9 +4250,7 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
             }
             if (still && bindingGeneration(BindSlot::PsSrv3) == g_bound.srv3Gen) {
                 ID3D11ShaderResourceView* game = g_bound.gameSrv3.Get();
-                FlatComputeInternalScope internal;
-                ctx->PSSetShaderResources(kEngineVelocityOverlaySnapshotSlot, 1, &game);
-                engineVelocityNoteStateCalls(1);
+                if(!setGuardT3(ctx,game))return;
                 ++g_draw.restores;
             }
         }
@@ -3985,7 +4358,8 @@ bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* o
 }
 }  // namespace engine_velocity_detail
 
-bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
+bool engineVelocityViews(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out) {
+    if(engineVelocityWitnessCohortPending())engineVelocityFlushWitnessCohort(ctx);
     if (!out) return false;
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
@@ -3993,6 +4367,8 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
                                        {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
                                         g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);
+    // Compose may acquire the same eye's skin view immediately after its slot view.
+    if(given)vrsCohortNoteBreak(ctx,VrsCohortBreak::MotionRead);
     return given;
 }
 
@@ -4061,7 +4437,9 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
     if (!out) return false;
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || !sourceDepth) return false;
+    if(engineVelocityWitnessCohortPending() && !nativeWitnessDrain())return false;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if(engineVelocityWitnessCohortPending())return false;
     return giveViewsLocked(g_eyes[kEngineVelocitySourceEye], sourceDepth, out,
                            {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
                             g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
@@ -4230,7 +4608,9 @@ void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups) 
 
 ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth) {
     if (!g_skinWanted.load(std::memory_order_acquire) || !live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return nullptr;
+    if(engineVelocityWitnessCohortPending() && !nativeWitnessDrain())return nullptr;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if(engineVelocityWitnessCohortPending())return nullptr;
     Eye& e = g_eyes[eye];
     const uint32_t frame = frameNow();
     // The same eye-frame the other views came from, and only if a draw wrote target 7 in it: a pixel no draw wrote reads zero (valid 0), but an

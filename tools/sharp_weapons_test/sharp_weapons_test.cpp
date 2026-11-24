@@ -70,6 +70,11 @@ static void check(bool ok, const char* why) {
     if (!ok) throw std::runtime_error(why);
 }
 static void hr(HRESULT r, const char* what) { check(SUCCEEDED(r), what); }
+static unsigned g_recordGuards = 0;
+static void beforeRecord(ID3D11DeviceContext* ctx) {
+    check(ctx && ctx->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED, "sharp pass VRS guard receives its recorder");
+    ++g_recordGuards;
+}
 
 static std::string readFile(const char* path) {
     std::ifstream f(path, std::ios::binary);
@@ -456,9 +461,9 @@ static void build2WiringTests() {
     }
     char line[512];
     formatGateHolders(line, sizeof(line), 0);
-    check(std::strcmp(line, "draw gate holders: 0 of 29 terms hold the gate open: none (the gate is closed).") == 0, "the line for an empty set says so");
+    check(std::strcmp(line, "draw gate holders: 0 of 30 terms hold the gate open: none (the gate is closed).") == 0, "the line for an empty set says so");
     formatGateHolders(line, sizeof(line), gateHolderBit(GateHolder::UiDepth) | gateHolderBit(GateHolder::IntroCurve));
-    check(std::strcmp(line, "draw gate holders: 2 of 29 terms hold the gate open: ui_depth, intro_curve.") == 0, "the line names the holders in order");
+    check(std::strcmp(line, "draw gate holders: 2 of 30 terms hold the gate open: ui_depth, intro_curve.") == 0, "the line names the holders in order");
     DrawMaskCounts mc;
     mc.draws = 14000;
     mc.skips[1] = 7;
@@ -2246,7 +2251,7 @@ static void gpuTests() {
         f.freshLayers();
         ID3D11RenderTargetView* s = sentinelRtv.Get();
         f.ctx->OMSetRenderTargets(1, &s, nullptr);
-        check(sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), kLw, kLh, exec), "the glass add pass runs");
+        check(sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), kLw, kLh, exec, beforeRecord), "the glass add pass runs");
         ComPtr<ID3D11RenderTargetView> rt;
         f.ctx->OMGetRenderTargets(1, &rt, nullptr);
         check(rt.Get() == sentinelRtv.Get(), "the immediate context's render target is back after the glass add");
@@ -2264,7 +2269,8 @@ static void gpuTests() {
         check(worst < 0.02f, "the glass add leaves W = L + G resampled bilinearly to the layer's size (to half precision)");
         check(alphaKept, "the glass add leaves W's alpha alone");
         // Then the source pass of the same re-issue adds F_up: W = L + G_up + F_up, which is the order the tonemap bracket runs them in.
-        check(sharpSourcePass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, f.fSrv.Get(), f.sRtv.Get(), f.wRtv.Get(), kLw, kLh, exec), "the source pass runs after the glass add");
+        check(sharpSourcePass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, f.fSrv.Get(), f.sRtv.Get(), f.wRtv.Get(), kLw, kLh, exec, beforeRecord), "the source pass runs after the glass add");
+        check(g_recordGuards == 2, "both sharp auxiliary passes call the recorder guard");
         const std::vector<float> W2 = f.readHalf(f.wTex.Get());
         float worst2 = 0;
         for (uint32_t y = 0; y < kLh; ++y)
@@ -2276,10 +2282,11 @@ static void gpuTests() {
         std::printf("glass add then source pass: W within %.5f of L + G_up + F_up\n", static_cast<double>(worst2));
         check(worst2 < 0.03f, "after the glass add the source pass gives W = L + G_up + F_up");
         // The refusals: no source view, no target, no layer size.
-        check(!sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, nullptr, f.wRtv.Get(), kLw, kLh, exec) &&
-                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), nullptr, kLw, kLh, exec) &&
-                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), 0, kLh, exec),
+        check(!sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, nullptr, f.wRtv.Get(), kLw, kLh, exec, beforeRecord) &&
+                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), nullptr, kLw, kLh, exec, beforeRecord) &&
+                  !sharpGlassAddPass(f.ctx.Get(), f.deferred.Get(), f.srcVs.Get(), f.srcPs.Get(), f.states, gSrv.Get(), f.wRtv.Get(), 0, kLh, exec, beforeRecord),
               "the glass add refuses a missing source, target or size");
+        check(g_recordGuards == 2, "refused auxiliary passes leave no pending guard commands");
     }
 
     // ---- the debug layer saw nothing wrong

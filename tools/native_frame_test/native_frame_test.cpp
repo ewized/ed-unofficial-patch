@@ -1,4 +1,5 @@
 #include "../../src/common/native_frame.h"
+#include "../../src/common/native_witness_drain.h"
 #include "../../src/common/comfort_fade.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/config.h"
@@ -355,6 +356,23 @@ int wmain(int argc, wchar_t** argv) {
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
         sizeof(firstDecision), EDVR_NATIVE_FRAME_VERSION_1};
+    static bool allowFrameDrain = false;
+    static unsigned frameDrains = 0;
+    static bool frameDrainHadContext = false;
+    edvr::setNativeWitnessDrain([](ID3D11DeviceContext* ctx) noexcept {
+        // This accessor takes the provider mutex. Drain must be outside it.
+        uint32_t trim[3]{};
+        edvr::nativeFrameFovTrimDegrees(trim);
+        ++frameDrains;
+        frameDrainHadContext |= ctx != nullptr;
+        return allowFrameDrain;
+    });
+    auto firstInput = input(41, 7, 1);
+    check(table.beginFrame(table.context, &firstInput, &firstOutput) == E_PENDING &&
+              table.invalidate(table.context) == E_PENDING && table.close(table.context) == E_PENDING &&
+              frameDrains == 3,
+          "pending witness work refuses CPU frame advance, invalidate and close");
+    allowFrameDrain = true;
     std::thread owner([&] {
         EdvrNativeFrameInput frame = input(41, 7, 1);
         workerBegin = table.beginFrame(table.context, &frame, &firstOutput);
@@ -362,6 +380,9 @@ int wmain(int argc, wchar_t** argv) {
         workerLatch = table.latchSubmit(table.context, 1, &firstDecision);
     });
     owner.join();
+    edvr::setNativeWitnessDrain(nullptr);
+    check(frameDrains == 4 && !frameDrainHadContext,
+          "CPU frame provider checks the owner on retry without issuing a foreign context command");
     check(workerBegin == S_OK, "XR owner can begin after producer acquire");
     check(workerLatch == S_OK, "XR owner can latch after producer acquire");
     // The old Explorer Cam's headset offset is retired (2026-10-07): its slots stay in the

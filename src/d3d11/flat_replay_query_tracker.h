@@ -69,7 +69,7 @@ struct FlatReplayQueryTracker {
             if (entry.identity && entry.kind != Kind::Timing && entry.kind != Kind::EndOnly) return false;
         return true;
     }
-    void resetForNewContext() { *this = {}; }
+    void resetForNewContext() { *this = FlatReplayQueryTracker{}; }
 
 private:
     void escape(Cause cause, Kind kind, const void* identity) {

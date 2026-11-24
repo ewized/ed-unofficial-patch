@@ -98,6 +98,7 @@ template<class Check> void runWorldScaleCases(Check&& check) {
     "src\\d3d11\\concourse_vr_bake_core.h",    // (a) TEMPORARY, the concourse cull's VR bake: where Elite's eye cameras land for an aimed base (the pair as Elite is given it)
     "src\\d3d11\\optimized_station.cpp",       // (a) TEMPORARY, ... its tick: the head and the eye pair of the frame, from nativeTemporalHeadPose
     "src\\d3d11\\native_temporal.cpp",         // (a) the temporal pass's eyes: motion, the ADS eye offsets, the history reset on a moved separation
+    "src\\d3d11\\native_gaze.cpp",             // (b) source SteamVR located eye orientation only: 3x3 parallel-axis validation; no game-scaled translation
     "src\\d3d11\\srv_turret.cpp",              // (a) the SRV turret HUD's anchored move: the eyes as Elite is given them (the head and the eye matrices of the frame)
     "src\\d3d11\\srv_turret_math.h",           // (a) ... its eye frame from them (eyeFrameFrom)
     "src\\d3d11\\vr_camera_census.h",          // (a) the declaration of nativeTemporalHeadPose, which hands them over
@@ -110,6 +111,12 @@ template<class Check> void runWorldScaleCases(Check&& check) {
     "src\\openxr\\system_publication.h",       // (a) the publication Elite's answers are read from
     "src\\openxr\\system_source.h",            // (a) the cached optics
   };
+  const auto nativeGaze=readSource("src\\d3d11\\native_gaze.cpp");
+  check(has(nativeGaze,"GetEyeToHeadTransform(static_cast<vr026::EVREye>(eye))")&&
+        has(nativeGaze,"for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)")&&
+        has(nativeGaze,"eyeToHead.m[row][col]")&&!has(nativeGaze,"eyeToHead.m[row][3]")&&
+        !has(nativeGaze,"eyeToHead.m[0][3]")&&!has(nativeGaze,"eyeToHead.m[1][3]")&&!has(nativeGaze,"eyeToHead.m[2][3]"),
+        "world scale: native gaze reads only source-runtime eye orientation, never game-scaled eye translation");
   const std::vector<std::string> got=readersOfEyeToHead();
   std::string extra;
   for(const auto& name:got)if(std::find(want.begin(),want.end(),name)==want.end())extra+=" "+name;

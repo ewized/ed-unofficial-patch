@@ -1886,6 +1886,22 @@ def self_test():
               "audit: the salt exception does not exempt another value in the same header")
         check(any(": known: " in p for p in audited("draw_record_other.h", "constexpr uint32_t kSalt = 0x00A5C35Au;")),
               "audit: the salt exception does not exempt its value in another file")
+        for name, value in (("native_vrs.cpp", 0x0150E828),
+                            ("native_vrs_material_receipt.h", 0x028950D5)):
+            literal = f"constexpr uint32_t value = 0x{value:08X};"
+            check(audited(name, literal) == [], f"audit: the exact SDK ID or COM GUID is allowed in {name}")
+            check(any(": known: " in p for p in audited(name, f"constexpr uint32_t value = 0x{value+1:08X};")),
+                  f"audit: adjacent values still need classification in {name}")
+            check(any(": known: " in p for p in audited("other.h", literal)),
+                  f"audit: the exception is private to {name}")
+        (s / "d3d11" / "openvr026_official").mkdir()
+        priorities = "constexpr int kMin=0x01000000, kMax=0x01FFFFFF, kReserved=0x02000000;"
+        check(audited("openvr026_official/openvr.h", priorities) == [],
+              "audit: pinned OpenVR overlay action priority constants are not game addresses")
+        check(any(": known: " in p for p in audited("openvr026_official/openvr.h", "constexpr int kOther=0x01000001;")),
+              "audit: OpenVR priority exceptions do not exempt another header value")
+        check(any(": known: " in p for p in audited("openvr_other.h", priorities)),
+              "audit: OpenVR priority exceptions do not exempt another header")
         # The review's blind spots (2026-10-25 round 2), each a shape that passed the gate before: every one fails now.
         gmh = "reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))"
         for name, text, rule, what in (
@@ -2010,6 +2026,12 @@ AUDIT_NOT_ADDRESSES = (
     ("d3d11/ui_holo_remap.h", None, "DXBC shader tokens"),
     ("installer/logbundle.cpp", (0x4034B50, 0x2014B50, 0x6054B50), "ZIP record signatures"),
     ("d3d11/perf_monitor.cpp", (0x150E828,), "an NVAPI function id"),
+    ("d3d11/native_vrs.cpp", (0x0150E828,),
+     "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h, pinned SDK 51e5aae4; not an Elite RVA"),
+    ("d3d11/native_vrs_material_receipt.h", (0x028950D5,),
+     "Data1 of the private COM GUID for material shader receipts; not an Elite RVA"),
+    ("d3d11/openvr026_official/openvr.h", (0x01000000, 0x01FFFFFF, 0x02000000),
+     "OpenVR 2.15.6 official SDK action-set overlay min/max and reserved priority constants; byte-pinned header, not Elite RVAs"),
     ("d3d11/kinematic_eval_probe.cpp", (0x4301234, 0x4305678), "the probe self-test's made-up vtable RVAs"),
     ("d3d11/draw_record_tag.h", (0x00A5C35A,), "the draw-record sentinel's XOR salt"),
     ("common/desktop_window_math.h", (0x01000000, 0x00C00000), "Win32 window style bits (WS_MAXIMIZE, WS_CAPTION), written out so the header needs no windows.h"),

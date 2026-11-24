@@ -615,7 +615,7 @@ static void wiringCases() {
                                    "        // issue 140: the game's own issue"),
                           module),
           "control: a thunk that does not count the game's own issue trips the pin");
-    check(!wiredStateNote(replaced(vscreen, "        const bool issued = draw(altered);\n", "        const bool issued = draw(altered);\n        srvTurretHudCountIssue(self);\n"), module),
+    check(!wiredStateNote(replaced(vscreen, "        const bool issued = native ? nativeWorldIssue(nativeDecision,[&]{return draw(altered);}) : draw(altered);\n", "        const bool issued = native ? nativeWorldIssue(nativeDecision,[&]{return draw(altered);}) : draw(altered);\n        srvTurretHudCountIssue(self);\n"), module),
           "control: a count inside observedDraw (whose text other rigs pin) trips the pin");
     check(!wiredStateNote(vscreen, replaced(module, "if (!g_stateNoted[family]) noteBegin(ctx, family, eye);", "")), "control: a family's first scope that never says its state trips the pin");
     check(wiredAccessors(journal, temporal, journalH), "journal_watch and native_temporal: the turret bit and the eye separation accessors");

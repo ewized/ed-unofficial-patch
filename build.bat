@@ -467,6 +467,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --tag d3d11 --out "%GEN%" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
+    --extra-export edvr_selftest_witness_generations ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_flat_sdk_snapshot ^
     --extra-export edvr_selftest_flat_sdk_owner_view ^
@@ -785,6 +786,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" "src\d3d11\vr_star_glow.cpp" ^
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
 
+    "src\d3d11\native_gaze.cpp" "src\d3d11\native_vrs.cpp" "src\d3d11\native_vrs_highlight.cpp" ^
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" "src\d3d11\native_reflex.cpp" ^
     "src\d3d11\native_timing.cpp" ^
@@ -869,6 +871,9 @@ if errorlevel 1 ( echo [edup] ERROR: DXBC notice resource failed & exit /b 1 )
 rc.exe /nologo /fo "%OBJ%\d3d11\miniz_notice.res" "third_party\miniz\notice.rc"
 if errorlevel 1 ( echo [edup] ERROR: miniz notice resource failed & exit /b 1 )
 
+rc.exe /nologo /fo "%OBJ%\d3d11\openvr_notice.res" "src\d3d11\openvr026_official\notice.rc"
+if errorlevel 1 ( echo [edup] ERROR: OpenVR notice resource failed & exit /b 1 )
+
 REM Version resources for both shipped DLLs. An unsigned DLL with no
 REM FileVersion, CompanyName or FileDescription looks less like a real build
 REM than one that has them, and this is the cheap, honest way to look like
@@ -888,7 +893,7 @@ if errorlevel 1 ( echo [edup] ERROR: rc.exe failed on the runtime version resour
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDUP_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\miniz_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib d3d12.lib dxgi.lib advapi32.lib bcrypt.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\miniz_notice.res" "%OBJ%\d3d11\openvr_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib d3d12.lib dxgi.lib advapi32.lib bcrypt.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edup] ERROR: link failed & exit /b 1 )
 
 echo [edup] built %BUILD%\d3d11.dll
@@ -1530,7 +1535,6 @@ if not exist "%OBJ%\native_sharpen_test" mkdir "%OBJ%\native_sharpen_test"
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_sharpen_test\\" /Fe"%BUILD%\native_sharpen_test.exe" ^
     "tools\native_sharpen_test\native_sharpen_test.cpp" "src\d3d11\native_sharpen.cpp" ^
-    "tools\native_temporal_test\frame_generation_off_stubs.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edup] ERROR: native sharpen contract test build failed & exit /b 1 )
@@ -4293,6 +4297,53 @@ python "tools\cull_gate_probe.py" --verify-fixture "%OBJ%\cullgate\gate_fixture.
 python "tools\cull_gate_probe.py" --tables-only "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
 exit /b 0
 
+:rig_ui_vrs_guard_test
+echo [edup] === ui_vrs_guard_test.exe ===
+if not exist "%OBJ%\uivrsguard" mkdir "%OBJ%\uivrsguard"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /I"src\d3d11" ^
+    /Fo"%OBJ%\uivrsguard\\" /Fe"%OBJ%\uivrsguard\ui_vrs_guard_test.exe" ^
+    "tools\ui_vrs_guard_test\ui_vrs_guard_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edup] ERROR: UI VRS guard test build failed & exit /b 1 )
+"%OBJ%\uivrsguard\ui_vrs_guard_test.exe" --dry-run || exit /b 1
+"%OBJ%\uivrsguard\ui_vrs_guard_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_native_gaze_test
+echo [edup] === native_gaze_test.exe ===
+if not exist "%OBJ%\nativegaze" mkdir "%OBJ%\nativegaze"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"tools\native_gaze_test\win_stub" ^
+    /Fo"%OBJ%\nativegaze\\" /Fe"%OBJ%\nativegaze\native_gaze_test.exe" ^
+    "tools\native_gaze_test\native_gaze_test.cpp" "src\d3d11\native_gaze.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\nativegaze\native_gaze_test.exe" --self-test || exit /b 1
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DNOMINMAX /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\nativegaze\\" /Fe"%OBJ%\nativegaze\provider_probe.exe" ^
+    "tools\native_gaze_test\provider_probe.cpp" "src\d3d11\native_gaze.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\nativegaze\provider_probe.exe" --dry-run || exit /b 1
+exit /b 0
+
+:rig_native_vrs_test
+echo [edup] === native_vrs_test.exe ===
+if not exist "%OBJ%\nativevrs" mkdir "%OBJ%\nativevrs"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX /DEDVR_NATIVE_VRS_TEST ^
+    /Fo"%OBJ%\nativevrs\\" /Fe"%OBJ%\nativevrs\native_vrs_test.exe" ^
+    "tools\native_vrs_test\native_vrs_test.cpp" "src\d3d11\native_vrs.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\nativevrs\native_vrs_test.exe" || exit /b 1
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX ^
+    /Fo"%OBJ%\nativevrs\\" /Fe"%OBJ%\nativevrs\material_policy_test.exe" ^
+    "tools\native_vrs_test\material_policy_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\nativevrs\material_policy_test.exe" . || exit /b 1
+REM Real-owner offscreen GPU proof is explicit opt-in. The build runs only DRY.
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX ^
+    /Fo"%OBJ%\nativevrs\\" /Fe"%OBJ%\nativevrs\native_vrs_gpu_test.exe" ^
+    "tools\native_vrs_test\native_vrs_gpu_test.cpp" "src\d3d11\native_vrs.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\nativevrs\native_vrs_gpu_test.exe" --dry-run || exit /b 1
+exit /b 0
+
 :rig_ui_layer_coverage_test
 echo [edup] === ui_layer_coverage_test.exe ===
 REM Exercise the production coverage command cache and shaders on WARP.
@@ -5074,7 +5125,7 @@ exit /b 0
 :rig_menu_policy_test
 echo [edup] === menu_policy_test.exe ===
 if not exist "%OBJ%\menupolicy" mkdir "%OBJ%\menupolicy"
-%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+%CC% /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 /Fo"%OBJ%\menupolicy"\ /Fe"%BUILD%\menu_policy_test.exe" ^
 "tools\menu_policy_test\menu_policy_test.cpp" /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edup] ERROR: menu_policy_test build failed & exit /b 1 )

@@ -136,7 +136,7 @@ W_DIM_CALL = "panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU,
 W_REVERSE_DECL = "    bool stripReverseU = false;\n"
 W_MOVIE_ARMED = "            if (introPanelStripArmed()) {\n"
 W_MOVIE_REVERSE = "                stripReverseU = introPanelStripReverseU();\n"
-W_REFUSAL = ("        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n"
+W_REFUSAL = ("        if (owner && uiLayerIssueBlocked()) { witnessDrain(self);objectProbeCandidateDrawIssued(self,false); return false; }\n"
              "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n")
 W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {"
 W_STRIP_CALL = "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, reissueDrawIndexedInstanced<ReissueCaller::PanelCurve>);"
@@ -316,7 +316,7 @@ MUTANTS = [
     wiring("iw-site-reverse-starts-true", "strip-site", [(W_REVERSE_DECL, "    bool stripReverseU = true;\n")], "an unarmed draw's u direction starts as against x"),
     wiring("iw-unarmed-early-return-first", "unarmed-text",
            [(W_REFUSAL, "        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n"
-                        "        if (owner && uiLayerIssueBlocked()) { objectProbeCandidateDrawIssued(self,false); return false; }\n")],
+                        "        if (owner && uiLayerIssueBlocked()) { witnessDrain(self);objectProbeCandidateDrawIssued(self,false); return false; }\n")],
            "observedDraw answers for the strip before its own refusal"),
     wiring("iw-unarmed-no-early-return", "unarmed-text", [("        if (stripIssued) { objectProbeCandidateDrawIssued(self,false); return true; }   // the strip was issued in its place\n", "")],
            "the game's own draw is issued a second time over the strip"),

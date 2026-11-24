@@ -32,6 +32,7 @@
 #include "weapon_motion.h"
 #include "vscreen.h"
 #include "../common/config.h"
+#include "../common/native_witness_drain.h"
 #include "../common/log.h"
 #include "../common/temporal_mode.h"
 #include <d3d11.h>
@@ -456,6 +457,8 @@ void treatWorld(ID3D11DeviceContext* ctx) {
 }
 
 void onTrigger(ID3D11DeviceContext* ctx) {
+    // The world resolver consumes scene color, depth and engine motion.
+    if(!nativeWitnessDrain(ctx))return;
     Frame& fr = g_f;
     fr.triggered = true;
     g_vrWorldWatchWrites = true;

@@ -53,7 +53,7 @@
   without restating the headset. The shared-vtable door held on the
   install tested first but not the Steam copy, where Steam's overlay may
   hand out private per-device tables.
-- **Detail:** "The keyboard gate" for the three doors and fail-open
+- **Detail:** [Native eye-tracked VRS](#native-eye-tracked-vrs) covers its controls and the measured GPU regression. "The keyboard gate" for the three doors and fail-open
   rules; "Navigation and interaction" for the DirectInput finding, the
   footer fix, "Your Elite keys (2026-09-11)" and the Tab-follows-page-pair
   fix; "What it shows" for the Monitor page's `Compositor_FrameTiming`
@@ -309,6 +309,45 @@ The driver reports the effective low latency bit. Boost is recorded as a
 request, and its effect would need a GPU clock measurement. The feature uses
 NVAPI SetSleepMode and GetSleepStatus. OpenXR continues to pace the headset.
 [NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
+
+### Native eye-tracked VRS
+
+The native VR Performance page offers **Native eye-tracked VRS**,
+**VRS sharp region**, and **VRS zone highlight**. Turning on
+`experimental.eye_tracked_foveation` asks the NVIDIA D3D11 driver to shade
+eligible world materials at 1×1 around each eye’s gaze, 2×2 in the next ring
+and 4×4 at the periphery. The focus profiles set radii in normalized image
+space. The blue highlight shows the acknowledged map beneath the HUD.
+
+This path requires ED-UP’s native temporal renderer, a working stereo pair,
+NVIDIA D3D11 VRS and valid bilateral gaze from SteamVR. The provider borrows
+the existing SteamVR client and reprojects each eye’s gaze for its current
+render frustum. The freshness check uses the time the application received
+the sample. A sensor timestamp is unavailable. Missing gaze, ambiguous eye
+or target identity, incompatible shader outputs and external Magic VRS
+ownership leave rendering at full rate.
+
+HUD, menu, screen-space effects and redirected UI stay at full rate. For
+eligible materials that also write temporal motion, ED-UP first renders
+per-pixel motion and skin data, then replays the material at the selected
+shading rate. Ordered draws may share a depth copy or reuse the original
+depth view when its state permits. An incomplete replay invalidates that
+stereo frame. With frame generation enabled, ED-UP discards generated frames
+that depend on an incomplete pair. The optional blue highlight is drawn after
+frame generation captures the clean world image and before HUD composition.
+
+**Measured performance.** In the fork’s stationary Surface Operation tutorial
+on an RTX 5090 with a 90 Hz simulated SteamVR/OpenXR headset, the initial
+broad-coverage build (`f93ef4e6`, DLAA, DLSS model K, 3840×2160 per eye)
+measured median application GPU times of 9.664 / 54.618 / 9.743 ms with
+VRS off / on / off. After batching and depth reuse, `aba9d747` measured
+10.320 / 13.100 / 10.391 ms GPU and 6.297 / 10.006 / 6.500 ms CPU in
+three 30-second windows. The later guarded writable-depth optimization
+passed WARP and RTX pixel checks on `619031af`; its gameplay timing remains
+unmeasured. The borrowed-client change on `bc5476b4` resolved overlapping
+SteamVR initialization, but a subsequent game session still reported
+stationary camera jumping. This port needs a new hardware timing comparison
+and a physical-headset check for stereo stability and gaze calibration.
 
 ### XeSS Frame Generation rows (2026-11-12)
 

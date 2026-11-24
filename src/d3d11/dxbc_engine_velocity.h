@@ -221,7 +221,8 @@ inline std::vector<BYTE> relocateNullPoolInput(const void* data,size_t size,uint
 
 inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in,
                                         bool guardOverlayDepth = false, FlatMarkerKind flatMarker = FlatMarkerKind::None,
-                                        uint32_t primitiveRegister = ~0u, uint32_t tokenSlot = ~0u, uint32_t primitiveComponent = 0) {
+                                        uint32_t primitiveRegister = ~0u, uint32_t tokenSlot = ~0u, uint32_t primitiveComponent = 0,
+                                        bool witnessOnly = false) {
     auto t = programWords(bytes);
     const bool provenance = flatMarker == FlatMarkerKind::ForeignPoolProvenance;
     const bool rgba = provenance || flatMarker == FlatMarkerKind::World || flatMarker == FlatMarkerKind::WorldPool;
@@ -345,6 +346,32 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         0x0010001Au, temp + 1, 0x0010102Au, in.positionRegister,
     };
     std::vector<uint32_t> out;
+    if (witnessOnly) {
+        if (flatMarker != FlatMarkerKind::None) throw std::runtime_error("non-VR witness");
+        out = {t[0],0};
+        // Keep the original interpolation declarations (especially position and
+        // flat identity). The tail is independent of all original arithmetic.
+        for (size_t at=2; at<t.size(); at+=instructionLength(t,at)) {
+            const auto op=t[at]&0x7ffu;
+            if (op==13 || op==120 || (op>=143 && op!=161 && op!=162 && op!=165 && op!=167))
+                throw std::runtime_error("witness cannot preserve discard or side effects");
+            if (op==kOpDclGlobalFlags || (op>=kOpDclInputPs && op<=kOpDclInputPsSiv))
+                out.insert(out.end(),t.begin()+at,t.begin()+at+instructionLength(t,at));
+        }
+        if (guardOverlayDepth) out.insert(out.end(),std::begin(overlayResource),std::end(overlayResource));
+        if (!positionDeclared) out.insert(out.end(),std::begin(posDecl),std::end(posDecl));
+        if (in.slotFromVsPatch) out.insert(out.end(),std::begin(slotDecl),std::end(slotDecl));
+        if (in.skinExport) out.insert(out.end(),std::begin(skinInDecl),std::end(skinInDecl));
+        out.insert(out.end(),std::begin(outDecl),std::end(outDecl));
+        if (in.skinExport || in.skinZero) out.insert(out.end(),std::begin(skinOutDecl),std::end(skinOutDecl));
+        out.insert(out.end(),{0x02000068u,tempCount+(guardOverlayDepth?2u:1u)});
+        if (guardOverlayDepth) out.insert(out.end(),std::begin(guardedTail),std::end(guardedTail));
+        else out.insert(out.end(),std::begin(tail),std::end(tail));
+        if (in.skinExport) out.insert(out.end(),std::begin(skinTail),std::end(skinTail));
+        if (in.skinZero) out.insert(out.end(),std::begin(skinZeroTail),std::end(skinZeroTail));
+        out.push_back(0x0100003eu);
+        return programBytes(std::move(out));
+    }
     out.reserve(t.size() + 64);
     out.push_back(t[0]);
     out.push_back(0);
@@ -507,7 +534,7 @@ inline bool engineVelocityPatchVs(const void* data, size_t bytes, const EngineVe
 inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVelocityInputs& inputs,
                                   std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false,
                                   dxbc_engine_velocity_detail::FlatMarkerKind flatMarker = dxbc_engine_velocity_detail::FlatMarkerKind::None,
-                                  unsigned* tokenSlot = nullptr) {
+                                  unsigned* tokenSlot = nullptr, bool witnessOnly = false) {
     using namespace dxbc_engine_velocity_detail;
     output.clear();
     reason.clear();
@@ -672,6 +699,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 velocity.componentType = 3;                  // float
                 velocity.registerIndex = kEngineVelocityTarget;
                 velocity.masks = rgba?0x000fu:0x0C03u;
+                if(witnessOnly)elements.clear();
                 elements.push_back(std::move(velocity));
                 if (psInputs.skinExport || psInputs.skinZero) {
                     SignatureElement skin;
@@ -687,7 +715,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
                 program = true;
-                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth, flatMarker,primitiveRegister,selectedToken,primitiveComponent);
+                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth, flatMarker,primitiveRegister,selectedToken,primitiveComponent,witnessOnly);
             }
         }
         if (!isgn || !osgn || !program) throw std::runtime_error("missing pixel shader chunks");

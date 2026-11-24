@@ -833,6 +833,18 @@ int boundarySourceChecks(const std::string& root) {
         body = hookText.substr(begin, i - begin);
     }
     const std::string tickBody = body;   // the ticks, before they are taken out below
+    verify(hookText.find("EDVR_BOUNDARY_TICK(tkNativeVrsClock, \"native_vrs_clock\")") != std::string::npos &&
+               tickBody.find("++g_state->frameCounter;") < tickBody.find("tkNativeVrsClock.run(") &&
+               tickBody.find("tkNativeVrsClock.run(") < tickBody.find("if (graphicsRuntimeDisabled())") &&
+               tickBody.find("vScreenNativeFrameBoundary(g_state->frameCounter)") != std::string::npos,
+           "native VRS recovery uses the sole Present ordinal under its own tick budget before graphics standdown");
+    const size_t install = screenText.find("void installVScreenFixes(");
+    const size_t optional = screenText.find("if (!wantVoid", install);
+    const size_t fallback = screenText.find("graphicsBridgeInstallTransport(device, mode)", optional);
+    verify(optional < fallback && fallback != std::string::npos &&
+               withoutSpaces(screenText.substr(optional, fallback - optional)).find(
+                   "!(runtimeScopeIncludesVr()&&cfg.getBool(\"experimental.eye_tracked_foveation\",false))&&") != std::string::npos,
+           "enabled native VRS keeps its draw hooks when panel fixes and GPU timing are off");
     // Every tick call out, then what is left.
     size_t pos = 0;
     int tickCalls = 0;
@@ -1743,6 +1755,93 @@ int drawPathSourceChecks(const std::string& root) {
         verify(hits.empty(), "no interestHas, draw_interest.h, RecomputeInterest or g_drawInterestPtr anywhere in src (closing build):" + hits);
     }
 
+    // Native attribution: subtract only the first raw primary call. Keep the
+    // existing sampling owner; preparation and mirrors belong to EDVR.
+    {
+        const std::string text = load("vscreen.cpp");
+        const std::string start = "constint64_tr0=clock.on?qpcNow():0;";
+        const std::string finish = "if(clock.on)clock.realCall(r0);";
+        const std::string prep = "nativeBeforeOriginal(self);";
+        struct ClockCase {
+            char kind;
+            const char* descriptor;
+            const char* raw;
+            const char* replay;
+            int timers, calls;
+        };
+        const ClockCase cases[] = {
+            {'D', "vertices(count,start)", "g_state->realDraw(self,count,start);",
+                  "caseKind::Vertices:g_state->realDraw(ctx,draw.count,draw.start);break;", 1, 1},
+            {'I', "indexed(count,startIndex,baseVertex)", "g_state->realDrawIndexed(self,count,startIndex,baseVertex);",
+                  "caseKind::Indexed:g_state->realDrawIndexed(ctx,draw.count,draw.start,draw.baseVertex);break;", 1, 2},
+            {'N', "instanced(perInstance,drawn,startVertex,startInstance)",
+                  "g_state->realDrawInstanced(self,perInstance,drawn,startVertex,startInstance);",
+                  "caseKind::Instanced:g_state->realDrawInstanced(ctx,draw.count,draw.instances,draw.start,draw.startInstance);break;", 1, 1},
+            {'X', "indexedInstanced(perInstance,instances,startIndex,baseVertex,startInstance)",
+                  "g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);",
+                  "caseKind::IndexedInstanced:g_state->realDrawIndexedInstanced(ctx,draw.count,draw.instances,draw.start,draw.baseVertex,draw.startInstance);break;", 1, 2},
+        };
+        const auto scope = [&](char kind) {
+            const std::string needle = std::string("forwardWithVerdict(self, v, flags, '") + kind + "'";
+            const size_t from = text.find(needle);
+            if (from == std::string::npos) return std::string();
+            const size_t open = text.find('(', from), end = closingParen(text, open);
+            return end == std::string::npos ? std::string() : withoutSpaces(text.substr(from, end - from + 1));
+        };
+        const auto valid = [&](const std::string& body, const ClockCase& c) {
+            if (body.empty() || countOf(body, start) != c.timers || countOf(body, finish) != c.timers ||
+                countOf(body, c.raw) != c.calls+1 || countOf(body, prep) != 1 ||
+                body.find("if(!pane.withheld()){if(!nativeSplitOriginal(self,native_vrs::WitnessDraw::" +
+                    std::string(c.descriptor) + ",[&](boolmaterial){constint64_tr0=material&&clock.on?qpcNow():0;" +
+                    c.raw + "if(material&&clock.on)clock.realCall(r0);})){"+prep) == std::string::npos ||
+                body.find(prep) >= body.find(start) || countOf(body, start + c.raw + finish) != c.timers) return false;
+            const size_t mirror = body.find("while(pane.nextMirrorPass())");
+            return mirror == std::string::npos || body.find(finish) < mirror;
+        };
+        for (const auto& c : cases) {
+            const std::string body = scope(c.kind), label = std::string("native attribution ") + c.kind;
+            verify(valid(body, c), label + ": preparation/reference setup excluded, raw primary only, withheld unclocked, mirrors outside");
+            std::string moved = body;
+            const size_t timer = moved.find(start), preparation = moved.find(prep);
+            if (timer != std::string::npos && preparation != std::string::npos) {
+                moved.erase(timer, start.size());
+                moved.insert(preparation, start);
+            }
+            verify(!valid(moved, c), label + ": charging native preparation to the forwarded draw fails");
+            moved = body;
+            const size_t end = moved.find(finish);
+            if (end != std::string::npos) { moved.erase(end, finish.size()); moved += finish; }
+            verify(!valid(moved, c), label + ": broad completion after pane/mirror work fails");
+            verify(!valid(body + c.raw, c), label + ": an extra raw primary call fails");
+        }
+        const std::string compact = withoutSpaces(text);
+        const size_t replayStart = compact.find("voidreplayWitnessDraw(");
+        const size_t replayEnd = compact.find("template<classDraw>boolnativeSplitOriginal(", replayStart);
+        const std::string replay = replayEnd == std::string::npos ? std::string() :
+                                   compact.substr(replayStart, replayEnd - replayStart);
+        const auto replayRoutes = [&](const std::string& body) {
+            if (countOf(body, "g_state->realDraw") != 4) return false;
+            for (const auto& c : cases) if (countOf(body, c.replay) != 1) return false;
+            return true;
+        };
+        verify(replayRoutes(replay) && compact.find("batch.draw=args;") != std::string::npos &&
+                   compact.find("batch.replay=&replayWitnessDraw;") != std::string::npos,
+               "native witness replay wires copied arguments to each original direct draw entry point exactly once");
+        const auto replaceOnce = [](std::string value, const char* from, const char* to) {
+            const size_t at = value.find(from);
+            if (at != std::string::npos) value.replace(at, std::strlen(from), to);
+            return value;
+        };
+        verify(!valid(replaceOnce(scope('I'), "indexed(count,startIndex,baseVertex)",
+                                  "indexed(count,baseVertex,startIndex)"), cases[1]),
+               "native witness descriptor gate rejects swapped signed base and index start");
+        verify(!replayRoutes(replaceOnce(replay, "draw.start,draw.baseVertex,draw.startInstance",
+                                        "draw.start,draw.baseVertex,0")),
+               "native witness replay gate rejects losing the indexed instance offset");
+        verify(compact.find("on(perfMonitorSampleDraws()&&(++t_drawClockOrdinal%kPerfMonitorDrawTimeStride)==0)") != std::string::npos &&
+                   compact.find("if(!forwarded)real+=qpcNow()-start;forwarded=true;") != std::string::npos,
+               "native attribution retains the existing sample ordinal/stride and first-forwarded-call rule");
+    }
     // vscreen.cpp: the draw's own flags replaced the thread_locals.
     const std::string vs = load("vscreen.cpp");
     verify(!vs.empty(), "could not read src\\d3d11\\vscreen.cpp");
