@@ -85,10 +85,9 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
         Mode mode = Mode::Off;
         if ((stamp & 1) && !edvr::graphicsRuntimeDisabled()) {
             const auto& cfg = edvr::Config::get();
-            const auto choice = cfg.getString("fix.nvidia_reflex", "auto");
-            // Keep low latency stable while the selected generator warms up or falls back to native frames.
-            const auto selected = edvr::nativeFgSelection(cfg.getString("fix.frame_generation", "off"));
-            mode = driverModeForSelection(choice, selected.enabled(), true);
+            const auto requested = parseMode(cfg.getString("fix.nvidia_reflex", "on"));
+            const auto generation = edvr::nativeFgSelection(cfg.getString("fix.frame_generation", "off"));
+            mode = forFrameGeneration(requested, generation.enabled());
         }
         if (stamp != lowLatencyConfigStamp()) return;
         changed = updateMode(state.lowLatency, state.device, mode, state.generation);
