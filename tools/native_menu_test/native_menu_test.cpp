@@ -299,6 +299,16 @@ int wmain(int argc, wchar_t** argv) {
             check(menu.find("c.reserveHint = true;", set + 1) == std::string::npos,
                   "menu.cpp sets reserveHint in exactly one place (the pad block; the Monitor and prompt pages reserve none)");
         }
+        {
+            std::ifstream in("src/d3d11/menu.cpp");
+            const std::string menu((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(menu.find("nativeFgSelection(shownValue(\"fix\", \"frame_generation\")).enabled()") != std::string::npos,
+                  "Reflex follows the frame-generation value currently displayed in F8");
+            check(menu.find("if (!requiresReflex || c.value != \"off\") out.push_back(c);") != std::string::npos &&
+                  menu.find("effectiveChoiceWord(d, v)") != std::string::npos &&
+                  menu.find("effectiveChoiceWord(d, cur)") != std::string::npos,
+                  "F8 restricts Reflex choices and uses the effective selection for display and stepping");
+        }
         // The flat card's sizing (menu_flat_layout.h). Its reference constants were derived from the Performance tab's shape at the old fixed raster (860 px wide,
         // cap 34): eleven rows, a reserved hint box, three tabs, a two-line footer. Measure that shape here, so a layout change that moves it fails this rig
         // and the constants are looked at, instead of the flat card drifting from the size it had at 1920x1080.

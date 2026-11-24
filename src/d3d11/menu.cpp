@@ -27,6 +27,8 @@
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/mirror_location.h"
+#include "../common/native_fg_multiplier.h"
+#include "../common/native_reflex_setting.h"
 #include "../common/native_render_settings.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/parallel_projection_notice.h"
@@ -440,7 +442,10 @@ std::string rowValue(const MenuRowDef& d) {
     if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
         strcmp(d.key, "temporal_aa") == 0)
         return Config::get().requestedTemporalMode();
-    return Config::get().getString(dottedOf(d).c_str(), d.shipped);
+    const std::string key = dottedOf(d);
+    const std::string value = Config::get().getString(key.c_str(), d.shipped);
+    if (key == "fix.nvidia_reflex") return native_reflex::modeWord(native_reflex::parseMode(value));
+    return value;
 }
 
 bool flatDlssSelected() {
@@ -562,6 +567,18 @@ const std::string& shownValue(const char* section, const char* key) {
     for (int i = 0; i < kRowDefCount; ++i)
         if (strcmp(kMenuRows[i].section, section) == 0 && strcmp(kMenuRows[i].key, key) == 0) return g_rows[i].value;
     return none;
+}
+
+// Use the displayed frame-generation selection so a pending F8 edit takes effect
+// immediately. Keep the saved Reflex preference in g_rows for when FG turns off.
+bool frameGenerationRequiresReflex(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "nvidia_reflex") == 0 &&
+           !runtimeFlatProfile() && nativeFgSelection(shownValue("fix", "frame_generation")).enabled();
+}
+
+const char* effectiveChoiceWord(const MenuRowDef& d, const std::string& saved) {
+    if (!frameGenerationRequiresReflex(d)) return saved.c_str();
+    return native_reflex::modeWord(native_reflex::forFrameGeneration(native_reflex::parseMode(saved), true));
 }
 
 bool flatAntiAliasingIsXess() { return _stricmp(shownValue("fix", "temporal_aa").c_str(), "xess") == 0; }
@@ -1256,6 +1273,7 @@ bool temporalAaRow(const MenuRowDef& d) {
 
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
+    const bool requiresReflex = frameGenerationRequiresReflex(d);
     std::string packed(d.choices);
     size_t pos = 0;
     while (pos <= packed.size()) {
@@ -1287,7 +1305,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             // DLSS/DLAA on an NVIDIA adapter, FSR 4.1 on an AMD adapter. A disabled choice is skipped by stepping and left
             // out of the choice list. The stored value still displays, so an ini that already names one keeps its label.
             if (temporalAaRow(d) && !edvr::temporalAaChoiceOffered(c.value.c_str(), g_menuGpu)) c.disabled = true;
-            out.push_back(c);
+            if (!requiresReflex || c.value != "off") out.push_back(c);
         }
         pos = bar + 1;
     }
@@ -1364,8 +1382,9 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
                     if (c.value == shown) return c.label;
                 }
             }
+            const char* word = effectiveChoiceWord(d, v);
             for (const ChoiceItem& c : choicesOf(d)) {
-                if (_stricmp(c.value.c_str(), v.c_str()) == 0) return c.label;
+                if (_stricmp(c.value.c_str(), word) == 0) return c.label;
             }
             return v.empty() ? "(empty)" : v;
         }
@@ -3666,7 +3685,7 @@ void stepRow(int defIndex, int dir, int mult) {
                                             ? std::string(fpsOverlayWord(parseFpsOverlay(cur.c_str())))
                                             : (isHudAntiAliasingRow(d) ? std::string(hudAaName(hudAaParse(cur.c_str())))
                                                : isDittoSharpenRow(d) ? std::string(dittoSharpenWord(dittoSharpenModeFromText(cur.c_str())))
-                                                                      : cur);
+                                                                      : effectiveChoiceWord(d, cur));
             for (size_t i = 0; i < items.size(); ++i) {
                 if (_stricmp(items[i].value.c_str(), curWord.c_str()) == 0) at = static_cast<int>(i);
             }

@@ -2,11 +2,15 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
 #include "detect.h"
 #include "mirror.h"
 #include "../common/flat_profile_keys.h"
 #include "../common/hotkey.h"
 #include "../common/iniedit.h"
+#include "../common/native_fg_multiplier.h"
+#include "../common/native_reflex_setting.h"
 #include "state.h"
 
 namespace edvr::installer {
@@ -268,6 +272,14 @@ void SettingsModel::refreshRows() {
                 break;
             }
         }
+        if (dotted == "fix.nvidia_reflex") {
+            const bool fg = !flatRows && nativeFgSelection(iniValue(m_text, "fix.frame_generation", "off")).enabled();
+            row.value = native_reflex::modeWord(native_reflex::forFrameGeneration(native_reflex::parseMode(row.value), fg));
+            if (fg) {
+                row.choices.erase(std::remove_if(row.choices.begin(), row.choices.end(),
+                    [](const Choice& choice) { return choice.value == "off"; }), row.choices.end());
+            }
+        }
         row.isRecommended = sameValue(def, row.value, def.recommended);
         m_rows.push_back(row);
     }
@@ -287,6 +299,13 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     const std::string leaf = toUtf8(leafOf(m_iniPath));
     bool fromShared = false;
     m_text = currentText(&fromShared);
+    // Frame generation may have been enabled outside the window since this row was drawn.
+    if (dotted == "fix.nvidia_reflex" && m_profile != "flat" && native_reflex::parseMode(value) == native_reflex::Mode::Off &&
+        nativeFgSelection(iniValue(m_text, "fix.frame_generation", "off")).enabled()) {
+        m_error = "Turn off VR frame generation before selecting Off for NVIDIA low latency.";
+        refreshRows();
+        return false;
+    }
 
     // The merge engine, used for one value: merging a document with itself is a
     // no-op (installer_test proves it), so the only change is the forced value

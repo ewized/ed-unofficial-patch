@@ -5811,6 +5811,51 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         check(rowFor(vr, "fix.ui_quality") != static_cast<size_t>(-1), "and VR shows the rows flat shows");
     }
 
+    {
+        const std::wstring dir = joinPath(scratch, L"settings-legacy-reflex");
+        makeTree(dir);
+        const std::wstring path = joinPath(dir, L"edup.ini");
+        const std::string old = "[fix]\r\nnvidia_reflex = AuTo\r\n";
+        writeAll(path, old);
+        SettingsModel model;
+        model.load(dir, "vr");
+        const size_t index = rowFor(model, "fix.nvidia_reflex");
+        check(index != SIZE_MAX, "the VR settings window exposes NVIDIA low latency");
+        if (index != SIZE_MAX) {
+            const auto& row = model.rows()[index];
+            expectEq(row.def->choices, "off=Off|on=On|boost=On + Boost", "the Reflex selector offers three driver modes");
+            expectEq(row.value, "on", "an old Auto preference shows On on first open");
+            check(row.isRecommended, "the migrated preference matches the recommended mode");
+            expectEq(readAll(path), old, "opening the selector preserves the original file");
+        }
+    }
+
+    {
+        const std::wstring dir = joinPath(scratch, L"settings-fg-reflex");
+        makeTree(dir);
+        const std::wstring path = joinPath(dir, L"edup.ini");
+        const std::string old = "[fix]\r\nnvidia_reflex = off\r\nframe_generation = off\r\n";
+        writeAll(path, old);
+        SettingsModel model;
+        model.load(dir, "vr");
+        const size_t reflex = rowFor(model, "fix.nvidia_reflex");
+        const size_t fg = rowFor(model, "fix.frame_generation");
+        check(reflex != SIZE_MAX && fg != SIZE_MAX, "Reflex and frame generation are available in VR");
+        if (reflex != SIZE_MAX && fg != SIZE_MAX) {
+            check(model.set(fg, "auto"), "select native frame generation");
+            const auto& row = model.rows()[reflex];
+            check(row.value == "on" && row.choices.size() == 2 && row.choices[0].value == "on" &&
+                  row.choices[1].value == "boost", "FG limits the Reflex selector to On and On + Boost");
+            expectEq(iniValue(readAll(path), "fix.nvidia_reflex", ""), "off", "enabling FG preserves the saved Off preference");
+            check(!model.set(reflex, "off"), "the installer refuses Off while FG is selected");
+            check(model.set(fg, "off") && model.rows()[reflex].value == "off" && model.rows()[reflex].choices.size() == 3,
+                  "turning FG off restores the saved preference and all three choices");
+            check(model.set(fg, "2x") && model.set(reflex, "boost") && model.rows()[reflex].value == "boost",
+                  "Boost can be selected during FG");
+            check(model.set(fg, "off") && model.rows()[reflex].value == "boost", "an explicit Boost edit persists after FG");
+        }
+    }
+
     {   // A file from before the movie setting moved to [visual]: the window reads it the way the runtime does, through the moved-from map
         // (settings.cpp kMovedSettings, generated from edup.ini), in both views.
         const std::wstring dir = joinPath(scratch, L"flatset-window-moved");
