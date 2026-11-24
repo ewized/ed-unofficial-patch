@@ -24,6 +24,7 @@
 #include <cstring>
 
 #include "../common/config.h"
+#include "../common/native_fg_multiplier.h"
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
@@ -138,6 +139,13 @@ inline void maskNoteSkip(MaskSkip k) {
 inline void maskNoteDraw() { g_maskDraws.store(g_maskDraws.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed); }
 
 namespace {
+// Auto frame generation needs application GPU timing even when the user
+// has disabled the standalone timing diagnostic.
+bool applicationGpuTimingEnabled(const Config& cfg) {
+    return cfg.getBool("advanced.app_gpu_timing", false) ||
+           (runtimeVrProfile() && nativeFgSelection(cfg.getString("fix.frame_generation", "off")).automatic);
+}
+
 
 // nullptr invalidates every cached input (command-list execution); otherwise
 // only writes to a source instance, bone or camera buffer invalidate them.
@@ -6737,7 +6745,7 @@ static void vScreenRefreshConfigBody(bool forced) {
         // The quiet-pass counters go back to zero with the sweep: the vouch list is rebuilt from silence the new profile earns.
         for (uint8_t& q : s->quietPasses) q = 0;
     }
-    const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", false);
+    const bool gpuTimingEnabled = applicationGpuTimingEnabled(cfg);
     gpuFrameConfigure(gpuTimingEnabled);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
     // on the render thread -- is an EDVR event with a duration, for the
@@ -7821,7 +7829,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // the two panel fixes meant that turning both off, with panel_hooks_always =
     // 0, silently took the flash fix with them: armed in the log, then nothing.
     if (!wantVoid && scale == 1.0f && !glitchFrameWantsHooks() &&
-        !cfg.getBool("advanced.app_gpu_timing", false) &&
+        !applicationGpuTimingEnabled(cfg) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         // The optional fixes are deliberately dormant, but native discovery
         // still needs the exact immediate-context transport. It has its own
@@ -7845,7 +7853,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // The measured owner path supplies the canonical context and actual OS
     // thread. Timing failure never prevents installing the rendering fixes.
     gpuTimingBind(device, ctx);
-    gpuFrameBind(device, ctx, cfg.getBool("advanced.app_gpu_timing", false));
+    gpuFrameBind(device, ctx, applicationGpuTimingEnabled(cfg));
 
     g_state = new State();
     g_state->installMs = stampMs();

@@ -325,6 +325,23 @@ int wmain(int argc, wchar_t** argv) {
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == 3 && g_latencyCalls.back().mode == Mode::Boost,
               "switching back to VR restores the saved request");
+
+        cfg.set("fix.nvidia_reflex", "auto");
+        cfg.set("fix.frame_generation", "2x");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 4 && g_latencyCalls.back().mode == Mode::On,
+              "selecting native frame generation requests low latency before the first generated frame");
+        cfg.set("fix.frame_generation", "auto");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 4, "changing generation cadence keeps the same driver request");
+        cfg.set("fix.frame_generation", "off");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 5 && g_latencyCalls.back().mode == Mode::Off,
+              "turning frame generation off withdraws the automatic request");
+        cfg.set("fix.nvidia_reflex", "boost");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 6 && g_latencyCalls.back().mode == Mode::Boost,
+              "explicit boost remains available with frame generation off");
     }
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
@@ -6522,7 +6539,7 @@ int wmain(int argc, wchar_t** argv) {
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
-    check(g_latencyCalls.size() == 4 && g_latencyCalls.back().device == device.Get() &&
+    check(g_latencyCalls.size() == 7 && g_latencyCalls.back().device == device.Get() &&
           g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
           "closing the XR session withdraws its driver request once");
     edvr::Config::get().set("fix.nvidia_reflex", "auto");

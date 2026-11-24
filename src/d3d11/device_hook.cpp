@@ -3,6 +3,7 @@
 #include "ui_layer.h"
 #include "gpu_timing.h"
 #include "gpu_frame_timing.h"
+#include "frame_generation_coordinator.h"
 #include "flat_cpu_trace.h"   // the flat profile's CPU markers: event 5 per owned Present, spans 0x200-0x207
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
 #include "native_reflex.h"
@@ -1877,6 +1878,51 @@ void presentFrameBoundary() {
     }
 }
 
+// Only a successful owner Present can update the requested mode or qualify a
+// new load sample. The config stamp keeps the Off path free of timing reads.
+void updateNativeFrameGeneration(ID3D11Device* device, ID3D11DeviceContext* context,
+                                 uint64_t nextFrame) {
+    auto& cfg = Config::get();
+    const bool vr = runtimeVrProfile();
+    const uint64_t stamp = (uint64_t(cfg.generation()) << 1) | uint64_t(vr);
+    static std::atomic<uint64_t> appliedStamp{UINT64_MAX};
+    if (appliedStamp.load(std::memory_order_acquire) == stamp && !nativeFgAutoRequested()) return;
+    if (!renderBoundaryValidateOwner(device, context, true)) return;
+    if (appliedStamp.load(std::memory_order_relaxed) != stamp) {
+        const auto choice = vr ? nativeFgSelection(cfg.getString("fix.frame_generation", "off")) : NativeFgSelection{};
+        if (stamp != ((uint64_t(cfg.generation()) << 1) | uint64_t(runtimeVrProfile()))) return;
+        if (choice.automatic) nativeFgSetAutoMode();
+        else nativeFgSetRequestedMultiplier(choice.multiplier);
+        appliedStamp.store(stamp, std::memory_order_release);
+    }
+    if (!nativeFgAutoRequested()) return;
+
+    const auto cpu = nativeTimingSnapshot();
+    const auto gpu = gpuFrameSnapshot();
+    static uint64_t session = 0, firstFrame = 0;
+    if (cpu.generation != session) {
+        session = cpu.generation;
+        firstFrame = nextFrame;
+    }
+    const uint64_t now = GetTickCount64();
+    const auto recent = [now](uint64_t capture) { return capture && now >= capture && now - capture <= 500; };
+    float alpha = 0.f;
+    uint32_t menuStamp = 0;
+    fg_auto::Sample sample{};
+    sample.nowMs = now;
+    sample.session = cpu.generation;
+    sample.cpuSequence = cpu.sequence;
+    sample.gpuSequence = gpu.result.sequence;
+    sample.cpuMs = cpu.applicationMs;
+    sample.gpuMs = gpu.result.outerMs;
+    sample.periodMs = fg_auto::panelPeriodMs(cpu.cpu.baseDisplayHz);
+    sample.valid = !(menuVisible(&alpha, &menuStamp) && alpha > 0.f) &&
+        cpu.active && cpu.haveCpu && !cpu.invalid && cpu.applicationValid && cpu.firstSequence &&
+        recent(cpu.capturedAtMs) && gpu.enabled && gpu.haveResult && gpu.result.reason == GpuSpanReason::Valid &&
+        gpu.result.source == GpuSpanSource::ApplicationRender && gpu.result.sourceFrame >= firstFrame && recent(gpu.capturedAtMs);
+    nativeFgAutoObserve(sample);
+}
+
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
                                         UINT flags) {
     // The hook's entry, one clock read for both clocks that want it: the runtime's
@@ -1987,6 +2033,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
         renderBoundaryNoteOwnedPresent(dev);
     if (workContext) {
+        if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+            updateNativeFrameGeneration(dev, workContext, g_state->frameCounter + 1);
         gpuFramePresent(workContext, g_state->frameCounter + 1);
         workContext->Release();
     }

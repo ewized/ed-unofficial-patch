@@ -41,6 +41,7 @@ class RuntimeGate {
     bool valid() const noexcept { return gate_ != nullptr; }
     explicit operator bool() const noexcept { return valid(); }
     uint64_t generation() const noexcept { return valid() ? generation_ : 0; }
+    bool belongsTo(const RuntimeGate& gate) const noexcept { return gate_ == &gate; }
 
    private:
     friend class RuntimeGate;

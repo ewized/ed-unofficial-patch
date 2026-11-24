@@ -1,5 +1,6 @@
 #include "../../src/common/native_menu.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/native_fg_readout.h"
 #include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
 #include "../../src/d3d11/menu_flat_layout.h"
@@ -31,6 +32,8 @@
 using Microsoft::WRL::ComPtr;
 
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeMenu")
+
+unsigned nativeMenuFpsOverlayProviderLocksForTest();
 
 class InlineExecutor final : public edvr::openxr::ImmediateExecutor {
  public: bool invoke(std::function<void()> callback) override { callback(); return true; }
@@ -652,7 +655,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!device) return 1;
 
     EdvrNativeMenuRequest request{sizeof(request), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 17};
-    EdvrNativeMenuTable table{sizeof(table), EDVR_NATIVE_MENU_VERSION_1};
+    EdvrNativeMenuTable table{EDVR_NATIVE_MENU_TABLE_V1_SIZE, EDVR_NATIVE_MENU_VERSION_1};
     check(edvrAcquireNativeMenu(&request, &table) == S_OK && table.context && nativeMenuActive() && !nativeMenuAvailable(), "provider acquire; session active before pose");
     // The eye poses the Status-page notice for parallel projection reads (nativeMenuEyePoses): none before a pose, and the caller's array is left alone.
     float heldEyes[2][12]; std::memset(heldEyes, 0x7f, sizeof(heldEyes)); float untouched[2][12]; std::memcpy(untouched, heldEyes, sizeof(untouched));
@@ -711,6 +714,24 @@ int wmain(int argc, wchar_t** argv) {
         float referenceWidth = 0.f;
         check(edvr::menuPanelBuildOverlayContent(reference, readout, 1.1f, &referenceWidth),
               "overlay production content builder");
+        // Frame-generation counters must fit the actual production compact and
+        // detailed builders, including long session totals and Auto waiting.
+        edvr::NativeFgReadout fg;fg.visible=fg.automatic=true;fg.selectedMultiplier=2;
+        fg.measurement=edvr::NativeFgMeasureState::Counting;
+        fg.nativeFps=45;fg.generatedFps=45;fg.submittedFps=90;
+        fg.totals.available=fg.totals.fgEnabled=true;fg.totals.activeMultiplier=2;
+        fg.totals.generatedFrames=1234567890123456789ull;
+        char fgLine[160];edvr::formatNativeFgOverlay(fg,45,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
+        edvr::MenuContent fgContent{};
+        check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
+              "native FG compact readout with Auto mode and a long total fits the production panel");
+        fg.measurement=edvr::NativeFgMeasureState::Unavailable;fg.totals.fgEnabled=false;
+        edvr::formatNativeFgOverlay(fg,58.4,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
+        check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
+              "native FG unavailable/waiting readout keeps a visible compact panel");
+        edvr::formatNativeFgTotals(fg,fgLine,sizeof(fgLine));const char* fgLines[]={fgLine};
+        check(edvr::menuPanelBuildReadoutContent(fgContent,fgLines,1,42,0,1.1f,nullptr),
+              "native FG detailed mode and totals fit the production panel line");
         edvr::setMenuHeadLock(true, 9.f, -8.f);
         edvr::MenuGeometry pendingGeometry{};
         pendingGeometry.alpha = 1.f;
@@ -792,7 +813,8 @@ int wmain(int argc, wchar_t** argv) {
     check(!nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, untouched, sizeof(heldEyes)) == 0, "eye poses: none after a CPU invalidation");
     check(table.close(table.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "CPU close retires session");
     check(!nativeMenuEyePoses(heldEyes), "eye poses: none after the close");
-    EdvrNativeMenuTable second{sizeof(second), EDVR_NATIVE_MENU_VERSION_1}; EdvrNativeMenuRequest secondRequest{sizeof(secondRequest), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 29};
+    EdvrNativeMenuTable second{EDVR_NATIVE_MENU_TABLE_V1_SIZE, EDVR_NATIVE_MENU_VERSION_1};
+    EdvrNativeMenuRequest secondRequest{sizeof(secondRequest), EDVR_NATIVE_MENU_VERSION_1, device.Get(), 29};
     check(edvrAcquireNativeMenu(&secondRequest, &second) == S_OK && second.context && nativeMenuActive(), "reacquire after close; session active");
     check(second.publishPose(second.context, head, eyes, frusta, 29, 4) == S_OK && nativeMenuAvailable(), "second publish");
     check(nativeMenuEyePoses(heldEyes) && std::memcmp(heldEyes, eyes, sizeof(heldEyes)) == 0, "eye poses: the second session's pair");
@@ -800,6 +822,105 @@ int wmain(int argc, wchar_t** argv) {
     check(table.close(table.context) == S_FALSE && nativeMenuActive(), "stale context cannot retire active generation");
     check(second.close(second.context) == S_OK && !nativeMenuAvailable() && !nativeMenuActive(), "second close");
     check(!nativeMenuEyePoses(heldEyes), "eye poses: none once the last session closed");
+
+    {
+        EdvrNativeMenuTable overlay{sizeof(overlay), EDVR_NATIVE_MENU_VERSION_2};
+        EdvrNativeMenuRequest overlayRequest{sizeof(overlayRequest), EDVR_NATIVE_MENU_VERSION_2, device.Get(), 30};
+        const bool acquired = edvrAcquireNativeMenu(&overlayRequest, &overlay) == S_OK &&
+                              overlay.context && overlay.readFpsOverlay && nativeMenuFpsOverlaySupported();
+        check(acquired, "FPS layer uses v2 without changing the v1 prefix");
+        if (!acquired) return 1;
+        EdvrNativeFpsOverlay meta{};
+        check(overlay.readFpsOverlay(overlay.context, 0, &meta, nullptr, 0) == S_FALSE &&
+              !meta.revision, "no FPS layer before the first visible raster");
+        const auto providerLocks = nativeMenuFpsOverlayProviderLocksForTest();
+        const auto workerLocks = edvr::menuPanelFpsOverlayLocksForTest();
+        bool hidden = true;
+        uint8_t hiddenPixel = 0x42;
+        for (unsigned frame = 0; frame < 180; ++frame) {
+            edvr::menuPanelSetNativeFpsOverlayPose(false, 6.0f, 20.0f, 1.4f);
+            meta.revision = 123;
+            hidden &= overlay.readFpsOverlay(overlay.context, 0, &meta, &hiddenPixel, 1) == S_FALSE &&
+                      !meta.revision && hiddenPixel == 0x42;
+        }
+        check(hidden && providerLocks == nativeMenuFpsOverlayProviderLocksForTest() &&
+              workerLocks == edvr::menuPanelFpsOverlayLocksForTest(),
+              "FPS layer Off uses no provider or worker locks");
+        edvr::MenuContent readout{};
+        check(edvr::menuPanelBuildOverlayContent(readout, "render 11 fps | gen 22 fps | gen total 614", 1.1f, nullptr),
+              "build an FPS raster containing generated counts");
+        const auto before = edvr::menuPanelRasterSerial();
+        edvr::menuPanelSetNativeFpsOverlayPose(true, 6.0f, 20.0f, 1.4f);
+        edvr::menuPanelSubmitNativeFpsOverlay(readout);
+        HRESULT queried = S_FALSE;
+        for (unsigned ms = 0; ms < 3000 && queried == S_FALSE; ms += 5) {
+            queried = overlay.readFpsOverlay(overlay.context, 0, &meta, nullptr, 0);
+            if (queried == S_FALSE) Sleep(5);
+        }
+        const bool readyOverlay = queried == S_OK && meta.revision && meta.width > 64 && meta.height > 8 &&
+                                  meta.yawDegrees == 6.0f && meta.pitchDegrees == 20.0f &&
+                                  meta.distanceMeters == 1.4f && meta.widthMeters > 0.0f;
+        check(readyOverlay, "FPS raster exposes revision, dimensions and view-relative placement");
+        if (!readyOverlay) { overlay.close(overlay.context); return 1; }
+        check(providerLocks < nativeMenuFpsOverlayProviderLocksForTest() &&
+              workerLocks < edvr::menuPanelFpsOverlayLocksForTest(),
+              "visible FPS layer still validates and reads raster under both locks");
+        uint8_t sentinel = 0x42;
+        const uint32_t bytes = meta.width * meta.height * 4;
+        const auto revision = meta.revision;
+        check(overlay.readFpsOverlay(overlay.context, 0, &meta, &sentinel, 1) ==
+                  HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) && sentinel == 0x42 &&
+                  meta.revision == revision,
+              "short FPS buffer receives metadata and leaves pixels untouched");
+        std::vector<uint8_t> rgba(bytes);
+        HRESULT copied = E_FAIL;
+        std::thread xrOwner([&] {
+            copied = overlay.readFpsOverlay(overlay.context, 0, &meta, rgba.data(), bytes);
+        });
+        xrOwner.join();
+        bool nonzeroAlpha = false;
+        for (size_t i = 3; i < rgba.size(); i += 4) nonzeroAlpha |= rgba[i] > 0;
+        check(copied == S_OK && nonzeroAlpha, "XR owner can copy FPS pixels without a game-eye pose");
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, &sentinel, 1) == S_OK &&
+              sentinel == 0x42, "matching FPS revision copies no pixels");
+        edvr::menuPanelTick(device.Get());
+        check(edvr::menuPanelRasterSerial() == before, "FPS snapshot never uploads into the menu raster slot");
+        check(overlay.publishPose(overlay.context, head, eyes, frusta, 30, 4) == S_OK, "FPS session retains the menu pose interface");
+        edvr::setMenuVisible(0.0f);
+        check(overlay.treatEye(overlay.context, 0, source.Get(), normal, &rejected, rejectBounds) == S_FALSE &&
+              !rejected, "visible FPS layer leaves the submitted eye untouched");
+        check(overlay.publishPose(overlay.context, nullptr, nullptr, nullptr, 30, 0) == S_OK &&
+              overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_OK,
+              "CPU menu-pose invalidation leaves the independent FPS raster available");
+        edvr::menuPanelSetNativeFpsOverlayPose(true, 7.0f, 21.0f, 1.5f);
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, &sentinel, 1) == S_OK &&
+              meta.revision == revision && meta.yawDegrees == 7.0f && meta.pitchDegrees == 21.0f &&
+              meta.distanceMeters == 1.5f && sentinel == 0x42,
+              "pose can update without a new raster or pixel copy");
+        edvr::menuPanelSetNativeFpsOverlayPose(false, 6.0f, 20.0f, 1.4f);
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_FALSE &&
+              !meta.revision, "hiding retires a visible FPS raster immediately");
+        edvr::menuPanelSetNativeFpsOverlayPose(true, 6.0f, 20.0f, 1.4f);
+        check(overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == S_FALSE,
+              "the next visibility interval does not inherit a retired raster");
+        check(overlay.close(overlay.context) == S_OK && !nativeMenuFpsOverlaySupported() &&
+              overlay.readFpsOverlay(overlay.context, revision, &meta, nullptr, 0) == E_INVALIDARG,
+              "v2 close retires the independent FPS capability");
+        EdvrNativeMenuTable replacement{sizeof(replacement), EDVR_NATIVE_MENU_VERSION_2};
+        overlayRequest.generation = 31;
+        const bool replaced = edvrAcquireNativeMenu(&overlayRequest, &replacement) == S_OK &&
+                              replacement.context && replacement.context != overlay.context &&
+                              replacement.readFpsOverlay;
+        check(replaced, "v2 reacquires with a fresh context");
+        if (replaced) {
+            check(overlay.readFpsOverlay(overlay.context, 0, &meta, nullptr, 0) == E_INVALIDARG &&
+                  replacement.readFpsOverlay(nullptr, 0, &meta, nullptr, 0) == E_INVALIDARG &&
+                  replacement.readFpsOverlay(replacement.context, 0, &meta, nullptr, 0) == S_FALSE,
+                  "hidden fast path admits only its current v2 context");
+            check(replacement.close(replacement.context) == S_OK, "close replacement FPS layer context");
+        }
+    }
+
     edvr::openxr::NativeMenuClient client;
     check(client.acquire(GetModuleHandleW(nullptr), device.Get(), 31) == S_OK && nativeMenuActive(), "client acquire; session active");
     edvr::openxr::GeometryInput gi{}; gi.generation = 31; gi.sequence = 1;
@@ -857,7 +978,7 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeMenuTable lcTable{};
         auto lcAcquire = [&](uint64_t gen) {
             EdvrNativeMenuRequest r{sizeof(r), EDVR_NATIVE_MENU_VERSION_1, device.Get(), gen};
-            lcTable = EdvrNativeMenuTable{sizeof(EdvrNativeMenuTable), EDVR_NATIVE_MENU_VERSION_1};
+            lcTable = EdvrNativeMenuTable{EDVR_NATIVE_MENU_TABLE_V1_SIZE, EDVR_NATIVE_MENU_VERSION_1};
             return edvrAcquireNativeMenu(&r, &lcTable) == S_OK && lcTable.context && nativeMenuActive() && !nativeMenuAvailable();
         };
         auto lcPublish = [&](const float (*eyes)[12], uint64_t gen) {

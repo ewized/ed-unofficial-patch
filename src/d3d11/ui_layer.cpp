@@ -13,6 +13,8 @@
 // owner, which may open a frame -- is only read, under native_temporal's own
 // lock, through nativeTemporalDrawJitter.
 #include "ui_layer.h"
+#include "ui_layer_fg_adapter.h"
+#include "render_boundary.h"
 #include "galaxy_map_ui.h"   // the Galaxy Map's panel mask and probe: mapui::pointerOpen, the panel shaders' hashes, the blend states
 
 #include "ui_layer_math.h"
@@ -109,6 +111,7 @@ template <class T>
 using Ptr = Microsoft::WRL::ComPtr<T>;
 
 constexpr uint64_t kTotalsMs = 30000;
+ui_layer_fg::CaptureCache g_fgCaptureCache[2];
 constexpr uint32_t kWatchPerFrame = 64;
 // First-seen lines are one per (family, decision, vs, ps): Phase 3's eight
 // take hologram hashes share the one kHoloGeneric row, so each needs its
@@ -7995,6 +7998,96 @@ uint32_t g_eyeSwapStreak = 0;           // consecutive swapped composites (F30: 
 bool g_eyeStoodDown = false;            // F30: the eye check stood the layer down (the frame boundary re-arms it on the next native mode edge)
 uint32_t g_eyeRearmSeen = 0;            // F30: g_nativeModeEdges at the last frame boundary
 constexpr uint32_t kEyeRearmWindow = 2000, kEyeSwapPersist = 30;
+static bool fgOwner(ID3D11DeviceContext* context, ID3D11Device* device) {
+    return context && context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+           renderBoundaryValidateOwner(device, context, true);
+}
+
+bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot,
+                        UiLayerFgPlanes* planes) noexcept {
+    if (!planes) return false;
+    *planes = UiLayerFgPlanes{};
+    if (!snapshot || !snapshot->info.fullSupported) return false;
+    planes->info = snapshot->info;
+    planes->layer = snapshot->layer.Get();
+    planes->multiply = snapshot->multiply.Get();
+    std::memcpy(planes->layerUv, snapshot->uv, sizeof(snapshot->uv));
+    planes->useMult = snapshot->useMult;
+    return true;
+}
+
+bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept {
+    if (!context) return false;
+    Ptr<ID3D11Device> device; context->GetDevice(&device);
+    if (!fgOwner(context, device.Get())) return false;
+    return ui_layer_fg::retireStorage(g_fgCaptureCache, context, device.Get());
+}
+
+std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
+    ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgInfo* info) noexcept {
+    UiLayerFgInfo result;
+    result.sequence = sequence; result.eye = eye;
+    const auto fail = [&](UiLayerFgRefusal why) -> std::shared_ptr<const UiLayerFgSnapshot> {
+        result.refusal = why;
+        if (info) *info = result;
+        return {};
+    };
+    try {
+        UiLayerFgFacts facts;
+        facts.arguments = context && frame && region && layerUv && sequence && eye < 2;
+        if (!facts.arguments) return fail(uiLayerFgAdmission(facts));
+        Ptr<ID3D11Device> device;
+        frame->GetDevice(&device);
+        facts.owner = fgOwner(context, device.Get());
+        if (!facts.owner) return fail(uiLayerFgAdmission(facts));
+        Eye& e = g_eye[eye];
+        D3D11_TEXTURE2D_DESC fd{}; frame->GetDesc(&fd);
+        result.width = fd.Width; result.height = fd.Height; result.frameFormat = fd.Format;
+        result.ownerThread = GetCurrentThreadId();
+        result.sourceDevice = reinterpret_cast<uintptr_t>(device.Get());
+        facts.available = !runtimeFlatProfile() && detail::g_uiQualityLive &&
+            !g_stoodDown && !g_crispStoodDown && !g_weaponsStoodDown && !graphicsRuntimeDisabled();
+        facts.sequence = e.submittedSeq == sequence && e.temporalOutSeq == sequence &&
+            e.doorFromPass && e.compositedSeq != sequence;
+        facts.hasUi = e.seq == sequence && e.draws != 0;
+        const void* mine = e.submittedSeq == sequence ? e.submitted : nullptr;
+        const void* other = g_eye[1 - eye].submitted;
+        const void* copied = e.copiedSeq == sequence ? e.copiedTo : nullptr;
+        facts.eye = frame == e.temporalOut && mine && mine != other &&
+            (!facts.hasUi || e.target == mine || copied == mine);
+        facts.size = fd.Width && fd.Height && fd.SampleDesc.Count == 1 &&
+            fd.ArraySize == 1 && fd.MipLevels == 1 && uiLayerFrameView(fd.Format) != DXGI_FORMAT_UNKNOWN &&
+            region[0] == 0 && region[1] == 0 && region[2] == fd.Width && region[3] == fd.Height &&
+            layerUv[0] == 0.f && layerUv[1] == 0.f && layerUv[2] == 1.f && layerUv[3] == 1.f &&
+            e.door.fullW == fd.Width && e.door.fullH == fd.Height &&
+            (!facts.hasUi || (e.tex && e.srv && e.w == fd.Width && e.h == fd.Height));
+        facts.scope = scopeZoomWanted();
+        facts.ripple = g_rippleLive && e.dSeq == sequence && e.dDraws;
+        facts.world = g_screenHeld == 1 || e.worldSeq == sequence || e.screenTakenSeq == sequence;
+        const bool hdr = e.hdrSeq == sequence && e.hdrDraws;
+        const bool weapons = e.wSeq == sequence && e.wDraws;
+        const bool multiply = e.mSeq == sequence;
+        facts.complete = !e.coveragePending && !g_draw.active && !detail::g_uiLayerIssueBlocked &&
+            !detail::g_uiLayerCrispPending && !detail::g_uiLayerWorldReissue &&
+            (!hdr || (facts.hasUi && e.hdrToneSeq == sequence)) &&
+            (!weapons || (facts.hasUi && e.wPubSeq == sequence)) &&
+            (!multiply || (facts.hasUi && e.mTex && e.mSrv && e.mW == fd.Width && e.mH == fd.Height));
+        const auto refusal = uiLayerFgAdmission(facts);
+        if (refusal != UiLayerFgRefusal::None) return fail(refusal);
+        ui_layer_fg::Source source;
+        source.info = result; source.facts = facts; source.expectedFrame = e.temporalOut;
+        source.layer = e.tex.Get(); source.layerView = e.srv.Get();
+        source.multiply = e.mTex.Get(); source.multiplyView = e.mSrv.Get();
+        source.useMult = multiply;
+        source.smooth = g_hudAaVr == HudAaMode::kSmaa;
+        source.fxaa = g_hudAaVr == HudAaMode::kFxaa;
+        std::memcpy(source.uv, layerUv, sizeof(source.uv));
+        return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info);
+    } catch (...) { return fail(UiLayerFgRefusal::CopyFailed); }
+}
+
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4], bool ownedFrame, bool resolved) {
     // The flat adapter's ask for this composite (uiLayerFlatSetEdgeSmoothing), taken whatever happens below so it never carries to another call.
@@ -8181,7 +8274,6 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 }  // namespace
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
-    uiBlendShapeCacheEnable(true);
     // A run of map sprites never outlives a frame: its references are let go and the game's targets are on the context for everything the boundary and the next frame do.
     uiLayerMapRunEnd(ctx);
     settleIssueFence(ctx);
@@ -8398,6 +8490,7 @@ namespace {
 // -- released, and every creation attempt and format-support answer forgotten, so the next use builds them on the
 // device it is handed. uiLayerShutdown's, and uiLayerDeviceReset's (the flat profile's actual device change).
 void releaseDeviceObjects() {
+    for (auto& cache : g_fgCaptureCache) cache.resetOwned();
     if (g_draw.active) releaseSaved();
     g_holoBinding.clear();
     g_holoCache.reset();

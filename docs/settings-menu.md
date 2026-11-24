@@ -292,8 +292,10 @@ window, VR view, still lists the row.
 The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
 **On** requests NVIDIA's driver low latency mode for the game's D3D11 device.
 **On + Boost** also requests higher GPU clocks. **Off** withdraws a request
-ED-UP owns. **Auto** is the default and leaves the driver unchanged when
-native VR frame generation is unavailable.
+ED-UP owns. **Auto** is the default. It requests low latency while the
+VR **Frame generation** setting is Auto, 2x, 3x, or 4x, including while the
+generator warms up or temporarily presents native frames. Turning frame
+generation off withdraws an Auto request that ED-UP owns.
 
 ED-UP checks the device's existing low latency and sleep state before it
 changes the mode. A reported existing policy or an unreadable baseline
@@ -332,6 +334,24 @@ Both rows are always on the page and dimmed unless the flat AA mode is XeSS (`xe
 values the panel shows (`g_rows`, as the DLSS preset row does), not `Config`: an F8 change reaches `Config` only
 with the reload after the write, so reading it dimmed (and before that, hid) the rows one change late (2026-11-12). The installer's window lists them in the
 flat view only. `flat_sharpen_test` holds the tables and the menu.cpp wiring.
+
+### Frame generation in native OpenXR VR
+
+On the headset's Performance page, **Frame generation (experimental)**
+(`fix.frame_generation`) defaults to **Off**. With DLSS or DLAA and a compatible
+NVIDIA GPU, **2x**, **3x** and **4x** request one, two and three intermediate
+world images per native stereo pair. HUD content updates with the native pair.
+The runtime keeps presenting native frames when it lacks a complete pair or
+the GPU cannot generate the selected number of frames. **Auto** starts at
+native cadence and switches between native and 2x using recent CPU and GPU
+application timing. These settings can be changed during a session.
+
+With frame generation selected, the Monitor page and FPS readout report the
+native and generated frames submitted to OpenXR. They measure application
+submissions. The headset runtime controls final presentation and reprojection.
+
+See the [build guide](building.md) for the required NVIDIA runtime, its
+matching license notice and the explicit install option.
 
 ## The ask
 

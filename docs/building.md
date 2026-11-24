@@ -43,6 +43,18 @@ python tools\fetch_fsr4.py
 python tools\fetch_openxr_loader.py
 ```
 
+The optional native VR Frame Generation backend compiles with the DLSS-G
+headers in the pinned NGX SDK. To use it, take `bin/x64/nvngx_dlssg.dll`
+and `bin/x64/nvngx_dlss.license.txt` from NVIDIA's
+`streamline-sdk-v2.14.16.zip`. Place the DLL in `build\` and save the
+notice there as `NVIDIA-DLSS-FG-LICENSE.txt`, preserving both files'
+bytes. With the game stopped, run
+`python tools\install_edup.py --scope vr --frame-generation` and add
+`--verify-only` to check the installed pair. The installer checks both
+SHA-256 hashes and records both files for restoration. NVIDIA distributes the
+optional Frame Generation runtime separately from ED-UP releases.
+[NVIDIA Streamline v2.14.16](https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16).
+
 `fetch_fsr4.py` stages AMD's FidelityFX (FSR 4.1) headers and its two signed
 D3D12 DLLs (about 29 MB) into `%LOCALAPPDATA%\EDVR\fsr4-sdk`; `third_party\fsr4`
 or `EDUP_FSR4_SDK` name another copy, and `EDUP_FSR4_SDK=none` forces the build

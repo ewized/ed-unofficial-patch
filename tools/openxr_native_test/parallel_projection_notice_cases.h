@@ -293,9 +293,12 @@ template<class Check> void runParallelProjectionNoticeCases(Check&& check) {
     const size_t eyes=menu.find("const bool named = nativeMenuEyePoses(eyes) && nativeRenderLabels(&labels) && labels.valid;");
     const size_t latch=menu.find("ppn::latchTick(s.parallelProjection, parallelSession, named ? eyes : nullptr, labels.systemName, labels.runtimeName)");
     const size_t toasts=menu.find("if (s.toasts) {\n                            s.toastQueue.push_back(parallelToast);");
+    // The FPS layer also reads this session identity to retire its own raster.
+    // Pin the notice's read without constraining those independent consumers.
     check(vrBranch!=std::string::npos&&block!=std::string::npos&&eyes!=std::string::npos&&latch!=std::string::npos&&toasts!=std::string::npos&&
               vrBranch<block&&block<eyes&&eyes<latch&&latch<toasts&&count(menu,"ppn::latchTick(")==1&&count(menu,"ppn::formatToast(")==1&&
-              count(menu,"ppn::decide(")==0&&count(menu,"ppn::classifyRotations(")==0&&count(menu,"nativeMenuSessionId()")==1,
+              count(menu,"ppn::decide(")==0&&count(menu,"ppn::classifyRotations(")==0&&
+              count(menu,"const uint64_t parallelSession = nativeMenuSessionId();")==1,
           "wiring: the menu tick reads the session identity before the held poses, decides through the latch in the VR branch, and toasts only the Notice, gated on menu.toasts");
     check(has(menu,"if (parallelSession != s.parallelProjection.session || !s.parallelProjection.checked) {")&&
               has(menu,"const bool named = nativeMenuEyePoses(eyes) && nativeRenderLabels(&labels) && labels.valid;"),

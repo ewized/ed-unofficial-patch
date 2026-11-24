@@ -1,6 +1,7 @@
 #include "../common/native_temporal.h"
 
 #include "temporal_pass.h"
+#include "frame_generation_coordinator.h"
 #include "dlss_floor.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"     // the layer-only door's preflight gaps and its first-eight-reasons log
@@ -421,7 +422,8 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   for(int e=0;e<2;++e) if(!rigid(f->eyeToHead[e])||!frustum(f->frusta[e])) return E_INVALIDARG;
   const Settings next=s->pendingSettings;
   const bool settingsChanged=!sameHistorySettings(next,s->currentSettings);
-  if(!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||settingsChanged) reset(*s);
+  const bool frameReset=!s->begun||s->reference!=f->referenceGeneration||f->sequence!=s->sequence+1||settingsChanged;
+  if(frameReset) reset(*s);
   if(settingsChanged)edvr::Log::get().note("native temporal: mode=%s, motion=%d, jitter=%u; history reset at the frame boundary.",mode(next),next.motion,unsigned(next.jitter));
   std::memcpy(s->previousJitter,s->renderedJitter,sizeof(s->previousJitter));
   std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));
@@ -484,6 +486,8 @@ HRESULT WINAPI begin(void* p,const EdvrNativeTemporalFrame* f,EdvrNativeTemporal
   if(s->shift[0][0]||s->shift[0][1]||s->shift[1][0]||s->shift[1][1])++s->jitterFrames;
   edvr::lightGridCacheNoteJitter(s->frameCounter,jx,jy,s->shift);   // the grid cache's jitter probe reads this (log only)
   g_frameSequence.store(f->sequence,std::memory_order_release);   // last: the head, eyes, frusta and shift above are this frame's
+  edvr::nativeFgBeginTemporal(*f,frameReset,s->currentSettings.on&&!s->standDown&&
+      s->currentSettings.engine==edvr::TemporalEngine::Nvidia&&!s->mapOpen&&!s->zoomedNow);
   return S_OK;
 }
 
@@ -621,13 +625,15 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   }
   edvrTemporalAaNoteHead(int(eye),pd?s->history[eye].head:nullptr,pd?s->head:nullptr,pd?eyeOffset:nullptr);
   edvr::temporalPassNoteEyes(int(eye),pd?previousEyes:nullptr,pd?s->eyes:nullptr);
+  edvr::nativeFgBeforeTemporalEye(seq,eye,source);
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
   s->treated[eye]=true;
-  if(!raw){s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
+  if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
   // layer arms for the next frame only behind a frame the pass produced.
   edvr::uiLayerNoteTemporal(seq,eye,result);
+  edvr::nativeFgAfterTemporalEye(seq,eye,result);
   if(resetHistory&&!mapEdge){++s->resets;++s->resetsEye[eye];if(zoomMoved)++s->zoomEdgeResets;}   // a map's opening and closing frames are counted as map_frames, not as resets
   if(!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native temporal: engaged mode=%s, input=%ux%u, output=%ux%u, sequence=%llu; producer filtering before menu and shared capture.",mode(s->currentSettings),w,h,outW?outW:w,outH?outH:h,(unsigned long long)seq);}
   outBox[0]=b[0]>b[2]?1.f:0.f;outBox[2]=b[0]>b[2]?0.f:1.f;outBox[1]=b[1]>b[3]?1.f:0.f;outBox[3]=b[1]>b[3]?0.f:1.f;
@@ -638,11 +644,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   std::memcpy(hst.otherEye,s->eyes[1-eye],sizeof(hst.otherEye));std::memcpy(hst.frustum,s->frusta[eye],sizeof(hst.frustum));
   hst.width=w;hst.height=h;hst.outputWidth=outW;hst.outputHeight=outH;hst.format=d.Format;hst.zoomed=zoomedHere;return S_OK;
 }
-HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
+HRESULT WINAPI invalidate(void* p){std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;edvr::nativeFgInvalidateProducer(2);reset(*s);s->begun=false;g_recommended.store(0,std::memory_order_release);g_frameSequence.store(0,std::memory_order_release);g_vertical.store(0,std::memory_order_release);g_asked.store(0,std::memory_order_release);g_trueVertical.store(0,std::memory_order_release);clearZoom(*s);std::memset(s->shift,0,sizeof(s->shift));std::memset(s->renderedJitter,0,sizeof(s->renderedJitter));return S_OK;}
 HRESULT WINAPI skipEye(void* p,uint64_t seq,uint32_t eye,uint32_t jumpOnly,uint32_t verdict) {
   edvr::uiLayerMapRunEnd(nullptr);   // as in treat
   std::lock_guard<std::mutex> lock(mutex);State* s=identify(p);
   if(!s||!s->active||s!=current||!s->begun||seq!=s->sequence||eye>1||s->treated[eye]||jumpOnly>1)return E_INVALIDARG;
+  edvr::nativeFgInvalidateProducer(2);
   // The transition-flash fix withheld this eye's frame (a glitch frame, a jump, a hold): the VR world route (docs section 82)
   // lets go of the world and resets its resolver's history with the eyes'. A no-op with the key off.
   edvr::vrWorldRouteNoteSceneReset();

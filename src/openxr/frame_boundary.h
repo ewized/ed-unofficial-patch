@@ -21,6 +21,7 @@ struct EndFrameInfo {
   bool background = false;    // a loading frame the runtime made itself
   bool turbo = false;         // deferred pacing was latched for this frame
   XrResult result = XR_SUCCESS;
+  bool fpsOverlay = false;    // a separate compositor layer accompanied the scene
 };
 
 // Callbacks execute on the frame owner's thread, under its runtime operation
@@ -38,6 +39,9 @@ struct FrameSink {
   virtual vr::EVRCompositorError capture(vr::EVREye, const vr::Texture_t*,
       const vr::VRTextureBounds_t*, vr::EVRSubmitFlags, bool copyPixels) = 0;
   virtual XrResult compose(XrCompositionLayerProjection&) = 0;
+  // Optional head-locked readout prepared only for a rendered scene. The
+  // borrowed quad and its released swapchain image live through endFrame.
+  virtual const XrCompositionLayerQuad* fpsOverlay() { return nullptr; }
   // A withheld first frame may have no safe stereo image to replay. Keep
   // frame pacing with zero layers until a complete good pair is available.
   virtual bool sceneLayerAvailable() const { return true; }
@@ -173,7 +177,39 @@ class FrameBoundary final {
     return finish(true);
   }
 
+  // The single owner may present an already-copied stereo image independently
+  // of native/game Submit tokens. No capture, sceneFinished or native timing
+  // sample is manufactured by this route. The caller retains layer backing
+  // storage through the synchronous end and uses this frame's displayTime.
+  XrResult prepared(const XrCompositionLayerProjection* layer,const XrCompositionLayerProjection* nativeUi=nullptr,
+                    const XrCompositionLayerQuad* fpsOverlay=nullptr) {
+    if(!ownerThread()||failed_||!session_.frameOpen()||deferred_||accepted_[0]||accepted_[1])
+      return XR_ERROR_CALL_ORDER_INVALID;
+    if(layer&&(layer->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION||layer->next||
+       !layer->space||layer->viewCount!=2||!layer->views))return XR_ERROR_VALIDATION_FAILURE;
+    if(nativeUi&&(!layer||nativeUi->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION||nativeUi->next||
+       !nativeUi->space||nativeUi->viewCount!=2||!nativeUi->views||
+       !(nativeUi->layerFlags&XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT)))return XR_ERROR_VALIDATION_FAILURE;
+    if(fpsOverlay&&(!layer||!validFpsOverlay(*fpsOverlay)))return XR_ERROR_VALIDATION_FAILURE;
+    const bool pixels=layer&&frame_.shouldRender&&!session_.terminal();
+    const XrCompositionLayerBaseHeader* headers[3]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(layer)};
+    unsigned layerCount=1;
+    if(nativeUi)headers[layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(nativeUi);
+    if(fpsOverlay)headers[layerCount++]=reinterpret_cast<const XrCompositionLayerBaseHeader*>(fpsOverlay);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.layerCount=pixels?layerCount:0u;end.layers=pixels?headers:nullptr;
+    {SubmissionWallScope measured(&endFrameMs_);lastResult_=session_.end(frame_,end,{pixels,pixels});}
+    if(lastResult_!=XR_SUCCESS)failed_=true;
+    return lastResult_;
+  }
+
  private:
+  static bool validFpsOverlay(const XrCompositionLayerQuad& layer) {
+    return layer.type==XR_TYPE_COMPOSITION_LAYER_QUAD&&!layer.next&&layer.space&&
+        layer.subImage.swapchain&&layer.subImage.imageRect.extent.width>0&&layer.subImage.imageRect.extent.height>0&&
+        std::isfinite(layer.size.width)&&std::isfinite(layer.size.height)&&layer.size.width>0.f&&layer.size.height>0.f;
+  }
+
   // Records the last REAL (runtime-reported) predicted time/period and when
   // it was learned, whichever pacing produced it: a synchronous wait, or a
   // pacer result taken at wait/finish/clear/drain. waited is checked against
@@ -279,15 +315,19 @@ class FrameBoundary final {
         return lastResult_;
       }
     }
-    const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+    const auto* overlay = pixels && !background && session_.lifecycle()!=Lifecycle::Stopping ? sink_.fpsOverlay() : nullptr;
+    const bool withOverlay = overlay && validFpsOverlay(*overlay);
+    const XrCompositionLayerBaseHeader* headers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(overlay)};
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
-    end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
+    end.layerCount = pixels ? (withOverlay ? 2u : 1u) : 0u; end.layers = pixels ? headers : nullptr;
     const bool shouldRender = frame_.shouldRender; // end() below clears it
     const uint64_t sequence = frame_.sequence;
     { SubmissionWallScope measured(&endFrameMs_);
       lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
       sink_.holdEndFrame(); }
-    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_});
+    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});
     if (!background) sink_.sceneFinished(pixels, lastResult_);
     if (lastResult_ != XR_SUCCESS) failed_ = true;
     // Kick the next frame's wait now, as the toolkit does right after its

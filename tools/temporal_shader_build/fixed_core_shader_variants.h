@@ -88,7 +88,9 @@ static std::vector<LegacyContract> coreLegacyContracts() {
     return {
         // Re-pinned 2026-10-13 on purpose: the thread group is 32x8, not 8x8 (the launch of 254,000 groups was the cost of the pass at the eye's
         // size: 0.120 ms an eye against 0.090; ui_holo_pass_test --bench-groups holds the two byte for byte). Was 0x237EEBB920BC9015.
-        {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x6488F4CEF2B7D55Cull},
+        // 2026-11-16: mode 2 exports native XR HUD coverage; modes 0/1 retain
+        // their original color formula. Real output GPU tests pin both paths.
+        {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x0CFC7AD84E25F416ull},
         {"ui_layer_coverage_vs", "main", "vs_5_0", nullptr, 0xC0A9BDF65E71A8DCull},
         {"ui_layer_coverage_ps", "main", "ps_5_0", nullptr, 0xA12E6D166D50BDA1ull},
         {"ui_layer_seed", "main", "vs_5_0", nullptr, 0xCC059AB4FCFA26BCull},

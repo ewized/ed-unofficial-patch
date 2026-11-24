@@ -48,6 +48,7 @@
 // answers for the engine fix.temporal_aa names right now (F6).
 #include "native_menu.h"
 #include "native_timing.h"
+#include "frame_generation_coordinator.h"
 #include "native_perf_history.h"
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
@@ -190,6 +191,7 @@ constexpr DWORD kPdhByteCap = 1u << 20;
 
 struct State {
     NativePerfHistory nativeHistory;
+    NativePresentationHistory nativePresentation;
     NativeBenchmarkCollector nativeBenchmark;
     NativeBenchmarkMetadata nativeBenchmarkMetadata{};
     uint64_t nativeBenchmarkMetadataMs = 0;
@@ -1203,6 +1205,7 @@ void perfMonitorProfileSwitch() {
     g_s.lastQpc = 0;
     // The presented counter's next sample is a new baseline too: the stretch between has no frames of its own to count.
     g_s.presented.rebase();
+    g_s.nativePresentation.clear();
 }
 
 void perfMonitorCrossProfileFrame() {
@@ -1286,6 +1289,12 @@ void perfMonitorFrame(ID3D11Device* dev) {
         const NativeTimingSnapshot timing = nativeTimingSnapshot();
         const GpuFrameSnapshot gpu = gpuFrameSnapshot();
         s.nativeHistory.observe(true, timing, gpu, historyNow);
+        if (nativeFgAutoRequested() || nativeFgRequested()) {
+            const auto presentation = nativePresentationSnapshot();
+            s.nativePresentation.observe(presentation, GetTickCount64());
+        } else {
+            s.nativePresentation.clear();
+        }
         // With the application clock off (2026-10-14), the frame's GPU work span is the application-render series' source: one sample
         // a completed pair, once. Its benchmark join is not made (the native benchmark joins by native frame sequence).
         if (!gpu.enabled) {
@@ -1665,6 +1674,32 @@ void appendSlowTiles(Tile&& tile) {
 }
 }
 
+namespace {
+NativeFgReadout nativeFgReadout(uint64_t now) {
+    const bool automatic = nativeFgAutoRequested();
+    if (!automatic && !nativeFgRequested()) return {};
+    auto out = g_s.nativePresentation.read(now);
+    out.automatic = automatic;
+    EdvrFgStatus status{};
+    nativeFgStatusSnapshot(&status);
+    out.selectedMultiplier = status.requestedMultiplier;
+    out.failed = status.state == EDVR_FG_FAILED;
+    out.backendUnavailable = status.state == EDVR_FG_UNAVAILABLE;
+    if (automatic) {
+        const auto policy = nativeFgAutoStatus();
+        out.reason = fg_auto::reasonName(policy.reason);
+        out.failed = out.failed || policy.reason == fg_auto::Reason::Fault;
+    } else if (out.failed) {
+        out.reason = "generation failed";
+    } else if (out.backendUnavailable) {
+        out.reason = "generation unavailable";
+    } else {
+        out.reason = out.totals.fgEnabled ? "fixed mode" : "waiting for generated frames";
+    }
+    return out;
+}
+}
+
 int perfMonitorTiles(PerfTile* out, int max) {
     State& s = g_s;
     if (!out || max <= 0) return 0;
@@ -1690,6 +1725,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
     const NativeTimingSnapshot nativeTiming = nativeTimingSnapshot();
     const bool haveNativePeriod = native && nativeCpuReady(nativeTiming);
     const uint64_t historyNow = GetTickCount64();
+    const auto fg = native ? nativeFgReadout(historyNow) : NativeFgReadout{};
     const auto nativeApplicationCpu = s.nativeHistory.applicationCpu(historyNow, 200);
     const auto nativeApplicationGpu = s.nativeHistory.applicationGpu(historyNow, 200);
     const auto nativeSubmit = s.nativeHistory.submit(historyNow, 200);
@@ -1719,12 +1755,12 @@ int perfMonitorTiles(PerfTile* out, int max) {
     if (ps.count) {
         snprintf(v, sizeof(v), "%.1f", perfFpsOf(ps.avgMs));
         snprintf(sub, sizeof(sub), "fps, period %.1f ms", ps.avgMs);
-        tile("FRAME RATE", v, sub);
+        tile(fg.visible ? "RENDERED" : "FRAME RATE", v, sub);
         snprintf(v, sizeof(v), "%.0f", perfFpsOf(ps.p99Ms));
         snprintf(sub, sizeof(sub), "fps, worst 1%% %.1f ms", ps.p99Ms);
         tile("1% LOW", v, sub);
     } else {
-        tile("FRAME RATE", "--", "measuring");
+        tile(fg.visible ? "RENDERED" : "FRAME RATE", "--", "measuring");
         tile("1% LOW", "--", "");
     }
     // GPU TIME (2026-10-14): the application-render mean when that clock is on; with it off, the census's frame GPU span
@@ -1913,6 +1949,24 @@ int perfMonitorTiles(PerfTile* out, int max) {
         }
         tile("DISPLAY", v, sub);
     }
+    if (fg.visible) {
+        if(fg.measurement==NativeFgMeasureState::Counting) {
+            snprintf(v,sizeof(v),"%.1f",fg.generatedFps);
+            snprintf(sub,sizeof(sub),"fps; last 1 s");
+        } else {
+            snprintf(v,sizeof(v),"--");
+            snprintf(sub,sizeof(sub),"%s",nativeFgMeasureWord(fg.measurement));
+        }
+        tile("GENERATED",v,sub);
+        formatNativeFgTileValue(fg,v,sizeof(v));
+        const auto mode=nativeFgModeSelection(fg);
+        const char* modeWord=mode.kind==NativeFgModeKind::Failed?"failed":
+            mode.kind==NativeFgModeKind::Unavailable?"unavailable":
+            mode.kind==NativeFgModeKind::Waiting?"waiting":
+            mode.kind==NativeFgModeKind::Native?"native":"active";
+        snprintf(sub,sizeof(sub),"%s: %s",fg.automatic?"Auto":"Fixed",modeWord);
+        tile("FG MODE",v,sub);
+    }
     return n;
 }
 namespace {
@@ -1967,6 +2021,7 @@ void perfMonitorReadout(PerfReadout* out, float windowSeconds) {
         }
     }
     out->drops = dropsInLast(10.0f);
+    if (nativeMenuActive()) { out->nativeFg = nativeFgReadout(GetTickCount64()); return; }
     // The presented rate: absent without a bridge this session; unavailable when a bridge's count cannot be had; "measuring" until the ring has an entry and
     // again if the counter stops moving for two seconds.
     const bool bridge = xessFgBridgeThisSession();
@@ -2167,6 +2222,16 @@ int perfMonitorGraph(int which, float* out, int max, float* budgetMs) {
     return n;
 }
 
+void perfMonitorNativeFrameGenerationLine(char* buf,size_t len) {
+    if(!buf||!len)return;
+    if(!nativeMenuActive()){buf[0]=0;return;}
+    const auto fg=nativeFgReadout(GetTickCount64());
+    if (!fg.visible) { buf[0] = 0; return; }
+    char rates[112],totals[112];
+    formatNativeFgRates(fg,rates,sizeof(rates));formatNativeFgTotals(fg,totals,sizeof(totals));
+    snprintf(buf,len,"%s | %s | %s",rates,totals,fg.reason);
+}
+
 void perfMonitorOverlayLine(char* buf, size_t bufLen) {
     State& s = g_s;
     if (!buf || !bufLen) return;
@@ -2208,6 +2273,12 @@ void perfMonitorOverlayLine(char* buf, size_t bufLen) {
         // older runtime's stand-in says what it is.
         overlayLineText(buf, bufLen, perfFpsOf(ps.avgMs), pick, nativeCpuPreSubmit(s.nativeHistory) ? "cpu (pre-submit)" : "cpu",
                         haveCpu, submit.meanMs);
+        const auto fg = nativeFgReadout(now);
+        if (fg.visible) {
+            char suffix[160]{};
+            if (const char* times = std::strstr(buf, "   ")) snprintf(suffix, sizeof(suffix), "%s", times);
+            formatNativeFgOverlay(fg, perfFpsOf(ps.avgMs), suffix, buf, bufLen);
+        }
         return;
     }
     char times[120] = "";
