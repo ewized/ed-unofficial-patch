@@ -877,7 +877,15 @@ def self_test():
             assert not (root / "dist").exists()
             try: package(root, "../escape", dry_run=True); raise AssertionError("bad version accepted")
             except ValueError: pass
+            # Developers can stage the separately supplied VR Frame Generation files
+            # in build/. The release ZIP and component archives keep their own manifests.
+            local_fg = {"nvngx_dlssg.dll", "NVIDIA-DLSS-FG-LICENSE.txt"}
+            for name in local_fg:
+                (root / "build" / name).write_bytes(b"developer payload")
             assert package(root, "1.2.3", no_dlss=True) == 0
+            for archive_path in (root / "dist").glob("*.zip"):
+                with zipfile.ZipFile(archive_path) as archive:
+                    assert local_fg.isdisjoint(Path(name).name for name in archive.namelist()), archive_path
             # SHA256SUMS lists what release.yml's rule lists (the two ZIPs, both manifests, the manifest's
             # assets and its launcher), each with its hash, in LF lines, and no .sig.
             sums_bytes = (root / "dist" / SUMS_NAME).read_bytes()

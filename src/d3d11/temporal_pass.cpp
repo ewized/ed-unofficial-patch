@@ -1,5 +1,7 @@
 #include "fixed_shader_source.h"
 #include "temporal_pass.h"
+#include "frame_generation_coordinator.h"
+#include "scene_projection_capture.h"
 #include "temporal_history.h"
 #include "flat_stationary_camera_capture.h"   // mapCameraChanges, mapCameraAnyOpen: the map camera's pose is the map frames' stillness signal
 #include "../common/runtime_profile.h"
@@ -192,6 +194,10 @@ struct EyeState {
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
     ID3D11ShaderResourceView*  dlMvSrv = nullptr;
+    // FG-only physical motion, lazily allocated at the guide dimensions. SR
+    // continues to use dlMv, including its deliberate history rejections.
+    ID3D11Texture2D*           fgMv = nullptr;
+    ID3D11UnorderedAccessView* fgMvUav = nullptr;
     // Exists only while an explicit eye run asks for the capture-only mv
     // variant (its u7 decision texture).
     ID3D11Texture2D*           dlDecision = nullptr;
@@ -241,6 +247,10 @@ struct EyeState {
     // path never sets: NVIDIA was told "the scene changed completely" on
     // every frame and never accumulated a thing.
     bool                       dlHaveHistory = false;
+    // Actual scene-depth encoding from the previous successful FG guide
+    // boundary. This is independent of the runtime's projection planes.
+    float                      fgProjection[2]{};
+    bool                       fgProjectionKnown = false;
     int64_t                    dlLastQpc = 0;   // the previous evaluation, for NVIDIA's frame delta
     // The headset's poses and this eye's offset, noted by the openvr half
     // before each treat (edvrTemporalAaNoteHead): the world path's
@@ -290,6 +300,8 @@ void releaseDl(EyeState& e) {
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
+    if (e.fgMvUav) { e.fgMvUav->Release(); e.fgMvUav = nullptr; }
+    if (e.fgMv) { e.fgMv->Release(); e.fgMv = nullptr; }
     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
     if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
     if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
@@ -305,6 +317,7 @@ void releaseDl(EyeState& e) {
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
     e.dlHaveHistory = false;
+    e.fgProjectionKnown = false;
     e.dlLastQpc = 0;
 }
 void releaseCopy(EyeState& e) {
@@ -1086,6 +1099,8 @@ ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
 ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
+ID3D11ComputeShader*       g_csMvFg[3] = {};
+bool                       g_csMvFgTried[3] = {};
 ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
 bool                       g_csEyeJumpLatticeTried = false;
 
@@ -1098,6 +1113,20 @@ ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
             diagnostics ? kTemporalMvBytecode : kTemporalMvFastBytecode,
             diagnostics ? sizeof(kTemporalMvBytecode) : sizeof(kTemporalMvFastBytecode),
             diagnostics ? "temporal_mv_cs" : "temporal_mv_fast_cs", "temporal aa");
+    }
+    return shader;
+}
+ID3D11ComputeShader* motionFgShader(ID3D11DeviceContext* ctx, bool diagnostics, bool trace) {
+    const unsigned index = trace ? 2u : diagnostics ? 1u : 0u;
+    auto*& shader = g_csMvFg[index];
+    if (!shader && !g_csMvFgTried[index]) {
+        g_csMvFgTried[index] = true;
+        const void* code = trace ? static_cast<const void*>(kTemporalMvFgTraceBytecode) :
+            diagnostics ? static_cast<const void*>(kTemporalMvFgBytecode) : static_cast<const void*>(kTemporalMvFgFastBytecode);
+        const size_t bytes = trace ? sizeof(kTemporalMvFgTraceBytecode) :
+            diagnostics ? sizeof(kTemporalMvFgBytecode) : sizeof(kTemporalMvFgFastBytecode);
+        shader = shaderSwapCreateCs(ctx, code, bytes, trace ? "temporal_mv_fg_trace_cs" :
+            diagnostics ? "temporal_mv_fg_cs" : "temporal_mv_fg_fast_cs", "FG physical motion");
     }
     return shader;
 }
@@ -2857,6 +2886,8 @@ struct RowsWrite {
     const void* buf = nullptr;
     float       rows[12] = {};
     float       proj[2] = {};   // the projection's z row: the depth written is proj[0] + proj[1] / z
+    float       legacyProj[2] = {};
+    SceneProjectionSource projectionSource = SceneProjectionSource::None;
     uint32_t    frame = 0;
     uint32_t    seq = 0;
     uint32_t    observedSeq = 0; // diagnostic clock, includes rejected non-rotation writes
@@ -2965,6 +2996,10 @@ uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over
 uint32_t    g_camCarriedJump = 0;    // ...of which carried a translation over 50 m: zero by construction
 float    g_curRows[12] = {};
 float    g_curProj[2] = {};        // the picked write's projection z row (A, B); B > 0 once read
+float    g_curLegacyProj[2] = {};
+SceneProjectionSource g_curProjectionSource = SceneProjectionSource::None;
+SceneProjectionSource g_projectionSourceNoted = SceneProjectionSource::None;
+unsigned g_projectionSourceNotes = 0;
 bool     g_projNoted = false;      // the encoding line, once
 bool     g_curValid = false;
 bool     g_curRowsBound = false;
@@ -3372,6 +3407,8 @@ void chooseCameraRows() {
         memcpy(g_curRows, g_rowsRing[applyIdx].rows, sizeof(g_curRows));
         g_curProj[0] = g_rowsRing[applyIdx].proj[0];
         g_curProj[1] = g_rowsRing[applyIdx].proj[1];
+        std::memcpy(g_curLegacyProj,g_rowsRing[applyIdx].legacyProj,sizeof(g_curLegacyProj));
+        g_curProjectionSource = g_rowsRing[applyIdx].projectionSource;
         g_curValid = true;
         g_curRowsBound = g_boundSeen && g_rowsRing[applyIdx].buf == g_boundBuf;
         if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
@@ -4241,6 +4278,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // missed the station beyond a few hundred metres (19:52).
         float projA = 0.0f, projB = 0.0f;
         const bool measuredProjection = temporalSceneProjection(g_curProj[0], g_curProj[1], nearZ, &projA, &projB);
+        if (measuredProjection && nativeFgRequested() && g_projectionSourceNoted!=g_curProjectionSource && g_projectionSourceNotes<12) {
+            g_projectionSourceNoted=g_curProjectionSource;++g_projectionSourceNotes;
+            Log::get().note("temporal aa: measured scene projection source=%s A=%.9g B=%.9g legacy=(%.9g,%.9g) scene_frame=%u selected_eye=%d; shared by SR motion and FG.",
+                sceneProjectionSourceName(g_curProjectionSource),double(projA),double(projB),double(g_curLegacyProj[0]),double(g_curLegacyProj[1]),g_rowsFrame,g_rowsChoice.selectedEye);
+        }
         if (!measuredProjection && !g_projNoted && projB > 0.0f) {
             g_projNoted = true;
             Log::get().note("temporal aa: no usable scene projection row; using Elite's infinite-far reversed-Z depth = %.6g / metres. OpenVR's finite far plane does not describe this scene depth.", static_cast<double>(projB));
@@ -4907,6 +4949,21 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 } else if (probeTrace && !made) {
                     blendProbeGridRefuse("the pass's own textures were not made this frame");
                 }
+                const bool fgRequested = !amdEngine && !intelEngine && !fsr4Engine && !dittoEngine && edvr::nativeFgRequested();
+                bool fgMotionReady = false;
+                if (made && fgRequested) {
+                    ID3D11ComputeShader* fgCs = motionFgShader(ctx, diagnostics, traceReady);
+                    if (fgCs && !e.fgMv) {
+                        if (!makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+                                     D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                                     &e.fgMv, nullptr, &e.fgMvUav)) {
+                            if (e.fgMvUav) { e.fgMvUav->Release(); e.fgMvUav = nullptr; }
+                            if (e.fgMv) { e.fgMv->Release(); e.fgMv = nullptr; }
+                        }
+                    }
+                    fgMotionReady = fgCs && e.fgMv && e.fgMvUav;
+                    if (fgMotionReady) mvCs = fgCs;
+                }
                 if (made && setParams(ctx, p)) {
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
                         g_csUiResolveTried=true;
@@ -5022,7 +5079,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
                     setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
-                                                           nullptr, g_statsUav, e.dlMvUav,
+                                                           fgMotionReady ? e.fgMvUav : nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                             uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                             traceReady ? e.dlDecisionUav : nullptr};
@@ -5164,6 +5221,55 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
+                        unsigned fgAnatomicalEye = 2;
+                        if (fgRequested &&
+                            edvr::nativeFgGuideEye(static_cast<ID3D11Texture2D*>(srcTex), fgAnatomicalEye)) {
+                            NativeFgGuides guide;
+                            guide.eye = fgAnatomicalEye; guide.internalEye = static_cast<unsigned>(eye);
+                            guide.source = static_cast<ID3D11Texture2D*>(srcTex);
+                            guide.width = w; guide.height = h;
+                            guide.outputWidth = oW; guide.outputHeight = oH;
+                            guide.depth = e.dlDepth;
+                            // Missing allocation/variant must refuse this FG
+                            // source, never substitute SR vectors or old pixels.
+                            guide.motion = fgMotionReady ? e.fgMv : nullptr;
+                            guide.jitterPixels[0] = jxNow; guide.jitterPixels[1] = jyNow;
+                            std::memcpy(guide.frustum, tanNow, sizeof(guide.frustum));
+                            std::memcpy(guide.previousFrustum, p.tanPrev, sizeof(guide.previousFrustum));
+                            guide.sceneProjectionA = projA; guide.sceneProjectionB = projB;
+                            guide.previousProjectionA = e.fgProjectionKnown ? e.fgProjection[0] : projA;
+                            guide.previousProjectionB = e.fgProjectionKnown ? e.fgProjection[1] : projB;
+                            guide.reset = resetHist || !e.fgProjectionKnown;
+                            guide.depthAvailable = haveDepth && measuredProjection;
+                            guide.originJump = jumpedNow;
+                            guide.cameraValid = worldOn && g_rowsDeltaOwn && g_curValid && g_prevValid &&
+                                e.eyesNotedFrame == g_rowsFrame && e.headNoted && e.headNotedFrame == g_rowsFrame &&
+                                g_rowsChoice.selectedEye >= 0 && g_rowsChoice.selectedEye < 2 &&
+                                g_prevRowsEye >= 0 && g_prevRowsEye < 2;
+                            guide.provenance = (depthMotion ? 1u : 0u) | (depthSrv ? 2u : 0u) |
+                                (headTrans ? 4u : 0u) | (haveDepth ? 8u : 0u) | (measuredProjection ? 16u : 0u) |
+                                (worldOn ? 32u : 0u) | (g_rowsDeltaOwn ? 64u : 0u) | (g_curValid ? 128u : 0u) |
+                                (g_prevValid ? 256u : 0u) | (e.headNoted ? 512u : 0u) |
+                                (e.headNotedFrame == g_rowsFrame ? 1024u : 0u) |
+                                (e.eyesNotedFrame == g_rowsFrame ? 2048u : 0u) |
+                                (g_rowsChoice.selectedEye >= 0 && g_rowsChoice.selectedEye < 2 ? 4096u : 0u) |
+                                (g_prevRowsEye >= 0 && g_prevRowsEye < 2 ? 8192u : 0u) |
+                                (floorRefused ? 16384u : 0u) | (jumpedNow ? 32768u : 0u) |
+                                (candValid[2] ? 65536u : 0u) | (worldValid ? 131072u : 0u) | (g_rowsFollow >= 0 ? 262144u : 0u);
+                            guide.sceneFrame = g_rowsFrame; guide.headFrame = e.headNotedFrame;
+                            guide.eyesFrame = e.eyesNotedFrame; guide.sceneDraws = sceneDraws;
+                            guide.selectedEye = g_rowsChoice.selectedEye; guide.previousSelectedEye = g_prevRowsEye;
+                            guide.rawProjection[0] = g_curLegacyProj[0]; guide.rawProjection[1] = g_curLegacyProj[1];
+                            if (guide.cameraValid) {
+                                temporalRowsForEye(g_curRows, g_rowsChoice.selectedEye, static_cast<int>(fgAnatomicalEye), e.eyesNow, guide.cameraNow);
+                                temporalRowsForEye(g_prevRows, g_prevRowsEye, static_cast<int>(fgAnatomicalEye), e.eyesPrev, guide.cameraPrevious);
+                            }
+                            // Both guides are copied immediately at this exact
+                            // successful SR evaluation, before any eye reuses them.
+                            edvr::nativeFgCaptureGuides(ctx, guide);
+                            e.fgProjection[0] = projA; e.fgProjection[1] = projB;
+                            e.fgProjectionKnown = true;
+                        }
                         if (fsr4Engine) {
                             if (!g_fsr4Noted || (oW != w && !g_fsr4UpscaleNoted)) {
                                 g_fsr4Noted = true;
@@ -6250,8 +6356,20 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     // when the rows are a rotation.
     if (!detail::g_temporalPassWantedFssChrome || !data || bytes < 944 * 4) return;
     const float* f = static_cast<const float*>(data) + 932;
-    const float* pz = static_cast<const float*>(data) + 792;
     const bool rowsValid = temporalRowsAreRotation(f);
+    SceneProjectionCapture projection{};
+    if (rowsValid) {
+        // Keep the existing SR interpretation outside FG. With FG requested,
+        // both passes must use the same measured scene-depth coefficients.
+        if (nativeFgRequested()) {
+            projection = captureSceneProjection(data, bytes);
+        } else {
+            const float* legacy = static_cast<const float*>(data) + 794;
+            projection.a = projection.legacyA = legacy[0];
+            projection.b = projection.legacyB = legacy[1];
+            projection.source = SceneProjectionSource::Legacy198;
+        }
+    }
     ++g_rowsObservedWrites;
     const uint32_t observedSeq = g_rowsObservedSeq++;
     ObservedRowsWrite* observed = res ? observedRowsSlot(res) : nullptr;
@@ -6261,8 +6379,8 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
         observed->rowsValid = rowsValid;
         if (rowsValid) {
             memcpy(observed->rows, f, sizeof(observed->rows));
-            observed->proj[0] = pz[2];
-            observed->proj[1] = pz[3];
+            observed->proj[0] = projection.a;
+            observed->proj[1] = projection.b;
         }
     }
     // The production chooser keeps its existing contract: only rotations enter
@@ -6285,17 +6403,14 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     g_pendingTagIdx = static_cast<int>(slot);
     detail::g_cameraDrawWatch = true;
     memcpy(w.rows, f, sizeof(w.rows));
-    // The projection's z row sits at row 198 of the same block (float
-    // offset 792), read the column-vector way the x and y rows' off-centre
-    // terms confirm: clip z = A * view z + B with the view z as clip w, so
-    // the depth the game writes is A + B / z. On build 334473 it reads
-    // A = 0, B = 0.025 -- reversed-Z with NO far plane, depth = 0.025 / z.
-    // The 0.025..50000 m the game asks the runtime for is the runtime's
-    // projection, not this one, and decoding with those planes read 10 km
-    // as 8.3 km (2026-09-08 19:52: the body's grid missed the station
-    // beyond a few hundred metres for it).
-    w.proj[0] = pz[2];
-    w.proj[1] = pz[3];
+    // Keep the measured coefficients and their source attached to this
+    // exact mapped write. A valid legacy row198 is preserved; otherwise
+    // captureSceneProjection validates actual shader clip rows270..273.
+    // Neither route treats OpenVR's finite planes as measured scene depth.
+    w.proj[0] = projection.a;
+    w.proj[1] = projection.b;
+    w.legacyProj[0] = projection.legacyA; w.legacyProj[1] = projection.legacyB;
+    w.projectionSource = projection.source;
     w.frame = g_rowsFrame;
     w.seq = g_rowsSeq;
     w.observedSeq = observedSeq;
@@ -7164,6 +7279,10 @@ void temporalPassShutdown() {
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }
     g_csMvTraceTried = false;
+    for (unsigned i = 0; i < 3; ++i) {
+        if (g_csMvFg[i]) { g_csMvFg[i]->Release(); g_csMvFg[i] = nullptr; }
+        g_csMvFgTried[i] = false;
+    }
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
     if (g_csUiResolve) { g_csUiResolve->Release(); g_csUiResolve=nullptr; }
     g_csUiResolveTried=g_uiResolveNoted=false;

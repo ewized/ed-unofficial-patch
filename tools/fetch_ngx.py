@@ -52,6 +52,9 @@ HEADER = os.path.join("include", "nvsdk_ngx.h")
 LIB = os.path.join("lib", "Windows_x86_64", "x64", "nvsdk_ngx_s.lib")
 DLL = os.path.join("lib", "Windows_x86_64", "rel", "nvngx_dlss.dll")
 LICENCE = "LICENSE.txt"
+FG_HEADERS = tuple(os.path.join("include", name) for name in (
+    "nvsdk_ngx_helpers_dlssg_d3d.h", "nvsdk_ngx_params_dlssg.h", "nvsdk_ngx_defs_dlssg.h"))
+REQUIRED = (HEADER, LIB, DLL, LICENCE, *FG_HEADERS)
 
 
 def default_dest():
@@ -85,7 +88,7 @@ def verify(dest, quiet=False):
     """The files the build needs, and the runtime's hash. Returns a list of
     problems, empty when the copy is the pinned SDK."""
     problems = []
-    for rel in (HEADER, LIB, DLL, LICENCE):
+    for rel in REQUIRED:
         if not os.path.isfile(os.path.join(dest, rel)):
             problems.append("missing: %s" % os.path.join(dest, rel))
     dll = os.path.join(dest, DLL)
@@ -209,7 +212,7 @@ def self_test():
 
     def sdk(root, dll=b"the runtime"):
         """A directory that has every file the build reads."""
-        for rel in (HEADER, LIB, DLL, LICENCE):
+        for rel in REQUIRED:
             path = os.path.join(root, rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
@@ -244,7 +247,7 @@ def self_test():
         empty = os.path.join(base, "empty")
         os.makedirs(empty)
         problems = verify(empty, quiet=True)
-        expect(name, len(problems) == 4 and all(p.startswith("missing: ") for p in problems), repr(problems))
+        expect(name, len(problems) == len(REQUIRED) and all(p.startswith("missing: ") for p in problems), repr(problems))
         expect(name, any(os.path.join(empty, DLL) in p for p in problems), repr(problems))
 
         name = "verify-wrong-runtime"
@@ -262,6 +265,16 @@ def self_test():
                "%r %r" % (problems, said))
         problems, said = capture(verify, right, True)
         expect(name, problems == [] and said == "", "quiet: %r %r" % (problems, said))
+        # The optional backend uses these pinned SDK headers too. A complete
+        # SR-only cache must fail verification before the compiler sees it.
+        name = "verify-missing-fg-header"
+        for rel in FG_HEADERS:
+            path = os.path.join(right, rel)
+            os.remove(path)
+            problems = verify(right, quiet=True)
+            expect(name, problems == ["missing: %s" % path], repr(problems))
+            with open(path, "wb") as header:
+                header.write(b"x")
         # A clone at another commit is a note, not a failure: the hash decides.
         git_head[0] = "0123456789abcdef" * 2 + "01234567"
         problems, said = capture(verify, right)
@@ -276,7 +289,7 @@ def self_test():
         code, said = capture(main, ["--verify", wrong])
         expect(name, code == 1 and "fetch_ngx: nvngx_dlss.dll is not the pinned" in said, "%r %r" % (code, said))
         code, said = capture(main, ["--verify", empty])
-        expect(name, code == 1 and said.count("fetch_ngx: missing: ") == 4, "%r %r" % (code, said))
+        expect(name, code == 1 and said.count("fetch_ngx: missing: ") == len(REQUIRED), "%r %r" % (code, said))
 
         # run(): a dry run says the command and does not run it.
         name = "run"

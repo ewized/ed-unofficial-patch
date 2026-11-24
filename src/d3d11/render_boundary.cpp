@@ -125,12 +125,13 @@ bool renderBoundaryRegisterOwner(ID3D11Device* device,
 }
 
 bool renderBoundaryValidateOwner(ID3D11Device* device,
-                                 ID3D11DeviceContext* context) noexcept {
+                                 ID3D11DeviceContext* context, bool requireRenderThread) noexcept {
     if (!device || !context) return false;
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_owner || !g_owner->device || !g_owner->context ||
             !g_owner->firstPresentIdentity) return false;
+        if (requireRenderThread && (!g_owner->threadRecorded || g_owner->renderThread != GetCurrentThreadId())) return false;
         if (!sameIdentity(static_cast<IUnknown*>(device), g_owner->device.Get()) ||
             !sameIdentity(static_cast<IUnknown*>(context), g_owner->context.Get()) ||
             !sameIdentity(static_cast<IUnknown*>(device), g_owner->firstPresentIdentity.Get()))

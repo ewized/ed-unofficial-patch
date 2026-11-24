@@ -291,14 +291,22 @@ window, VR view, still lists the row.
 
 The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
 **Off** is the default and withdraws a request ED-UP owns while keeping frame
-instrumentation active. Older profiles saved with Auto use Off. **On** enables
-the per-frame low latency mode for an eligible native VR session. **On +
-Boost** also requests higher GPU clocks. The row dims when unavailable and Off
-remains selectable for recovery. A saved On choice waits until the paired
-runtime, SDK and actual rendered-frame source are available. The original game
-mirror (`Mirror window` > `Image` > `Game`) cannot supply that source; select
-an ED-UP eye image to make it eligible. [NVIDIA Reflex programming
-guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
+instrumentation active. A missing setting or a legacy **Auto** value uses
+**Off**. **On** enables per-frame low latency for an eligible native VR
+session. **On + Boost** also requests higher GPU clocks. The row dims when
+unavailable. **Off** remains selectable for recovery when Reflex is
+unavailable or the frame session faults. Saved **On** and **On + Boost**
+choices wait until the paired runtime, SDK and actual rendered-frame source
+are available. Select an ED-UP eye image in `Mirror window` > `Image` to
+supply that source. [NVIDIA Reflex programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
+
+Native **Frame generation** requires effective NVIDIA low latency. While
+frame generation is selected and the VR session is eligible for Reflex, F8
+offers **On** and **On + Boost**. If the saved preference is **Off**, ED-UP
+requests **On** for the session. F8 displays **On** in place of **Off** only
+after the driver confirms the mode. Turning frame generation off restores the
+saved preference. The installer's **On (required)** label describes the
+configured profile's request. F8 reports the driver's status during a session.
 
 ED-UP checks the device's existing low latency and sleep state before it
 changes the mode. A reported existing policy or an unreadable baseline prevents
@@ -341,6 +349,25 @@ Both rows are always on the page and dimmed unless the flat AA mode is XeSS (`xe
 values the panel shows (`g_rows`, as the DLSS preset row does), not `Config`: an F8 change reaches `Config` only
 with the reload after the write, so reading it dimmed (and before that, hid) the rows one change late (2026-11-12). The installer's window lists them in the
 flat view only. `flat_sharpen_test` holds the tables and the menu.cpp wiring.
+
+### Frame generation in native OpenXR VR
+
+On the headset's Performance page, **Frame generation (experimental)**
+(`fix.frame_generation`) defaults to **Off**. With DLSS or DLAA and a compatible
+NVIDIA GPU, **2x**, **3x** and **4x** request one, two and three intermediate
+world images per native stereo pair. HUD content updates with the native pair.
+The runtime keeps presenting native frames when it lacks a complete pair or
+the GPU cannot generate the selected number of frames. Generated frames also
+require the driver to confirm effective NVIDIA low latency. **Auto** starts at
+native cadence and switches between native and 2x using recent CPU and GPU
+application timing. These settings can be changed during a session.
+
+With frame generation selected, the Monitor page and FPS readout report the
+native and generated frames submitted to OpenXR. They measure application
+submissions. The headset runtime controls final presentation and reprojection.
+
+See the [build guide](building.md) for the required NVIDIA runtime, its
+matching license notice and the explicit install option.
 
 ## The ask
 

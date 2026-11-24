@@ -122,8 +122,14 @@ void modeSelection() {
     check(parseMode("AuTo") == Mode::Off, "retired Auto profiles use Off");
     check(parseMode("invalid") == Mode::Off && parseMode("") == Mode::Off,
           "unknown and empty settings make no driver request");
-    for (Mode mode : {Mode::Off, Mode::On, Mode::Boost})
+    for (Mode mode : {Mode::Off, Mode::On, Mode::Boost}) {
         check(parseMode(modeWord(mode)) == mode, "each displayed setting round-trips to its driver mode");
+        check(forFrameGeneration(mode, false) == mode, "disabling frame generation restores each preference");
+    }
+    check(forFrameGeneration(Mode::Off, true) == Mode::On &&
+          forFrameGeneration(Mode::On, true) == Mode::On &&
+          forFrameGeneration(Mode::Boost, true) == Mode::Boost,
+          "frame generation requires low latency and preserves explicit Boost");
 }
 
 void modeHint() {

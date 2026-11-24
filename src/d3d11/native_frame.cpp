@@ -5,6 +5,7 @@
 #include "../common/scope_zoom_window.h"
 #include "../common/view_circle.h"
 #include "../common/config.h"
+#include "../common/native_fg_multiplier.h"
 #include "../common/world_scale.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
@@ -90,7 +91,11 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
         Mode mode = Mode::Off;
         if ((stamp & 1) && (stamp & kLowLatencyAvailable) && !(stamp & kLowLatencyTransportFault) &&
             !edvr::graphicsRuntimeDisabled() && state.lowLatencyDriver) {
-            mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "off"));
+            const auto& cfg = edvr::Config::get();
+            const auto requested = parseMode(cfg.getString("fix.nvidia_reflex", "off"));
+            // Keep the request stable during generator warmup and native fallback.
+            const auto selected = edvr::nativeFgSelection(cfg.getString("fix.frame_generation", "off"));
+            mode = forFrameGeneration(requested, selected.enabled());
         }
         if (stamp != lowLatencyConfigStamp()) return;
         changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);

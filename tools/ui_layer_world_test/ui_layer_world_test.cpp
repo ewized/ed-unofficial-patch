@@ -123,6 +123,9 @@ Stubs g_stubs;
 
 // ============================================================================== the neighbours, stubbed
 namespace edvr {
+// This isolated WARP fixture never registers a live game render owner.
+bool renderBoundaryValidateOwner(ID3D11Device*, ID3D11DeviceContext*, bool) noexcept { return false; }
+
 thread_local bool g_flatComputeInternal = false;
 thread_local bool g_vrWorldInternal = false;
 // The back-off trail's two hooks that ui_layer.cpp calls: flat_ui_layer.cpp defines them in the product, and this rig does not link it.

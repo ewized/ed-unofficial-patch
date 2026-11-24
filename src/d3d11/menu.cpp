@@ -27,6 +27,7 @@
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/mirror_location.h"
+#include "../common/native_fg_multiplier.h"
 #include "../common/native_render_settings.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/parallel_projection_notice.h"
@@ -68,6 +69,7 @@
 #include "native_render_labels.h"
 #include "vr_runtime.h"
 #include "menu_schema.h"
+#include "frame_generation_coordinator.h"
 #include "perf_monitor.h"
 #include "sharpen_pass.h"
 #include "star_glow_bloom_reader.h"   // Elite's Bloom option, read for the Star glow row's hint (when a menu opens or the setting changes, never per frame)
@@ -382,6 +384,8 @@ struct State {
     float    overlayYaw = 0.0f;
     float    overlayPitch = -16.0f;
     bool     overlayUp = false;
+    bool     overlayLayer = false; // native OpenXR acquired the independent readout
+    uint64_t overlayLayerSession = 0;
     float    overlayAlpha = 0.0f;
     uint64_t overlayTextMs = 0;
     std::string overlayText;
@@ -568,6 +572,18 @@ const std::string& shownValue(const char* section, const char* key) {
     for (int i = 0; i < kRowDefCount; ++i)
         if (strcmp(kMenuRows[i].section, section) == 0 && strcmp(kMenuRows[i].key, key) == 0) return g_rows[i].value;
     return none;
+}
+
+// Follow the pending F8 edit immediately. A missing or faulted Reflex
+// session still offers Off for recovery.
+bool frameGenerationRequiresReflex(const MenuRowDef& d) {
+    return isNvidiaLowLatencyRow(d) && !runtimeFlatProfile() && native_reflex::availableForUser() &&
+           nativeFgSelection(shownValue("fix", "frame_generation")).enabled();
+}
+
+const char* reflexChoiceWord(const MenuRowDef& d, const std::string& saved) {
+    if (!frameGenerationRequiresReflex(d)) return saved.c_str();
+    return native_reflex::modeWord(native_reflex::forFrameGeneration(native_reflex::parseMode(saved), true));
 }
 
 bool flatAntiAliasingIsXess() { return _stricmp(shownValue("fix", "temporal_aa").c_str(), "xess") == 0; }
@@ -1263,6 +1279,7 @@ bool temporalAaRow(const MenuRowDef& d) {
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
     const bool unavailableNvidiaLowLatency = isNvidiaLowLatencyRow(d) && !native_reflex::availableForUser();
+    const bool requiresReflex = frameGenerationRequiresReflex(d);
     std::string packed(d.choices);
     size_t pos = 0;
     while (pos <= packed.size()) {
@@ -1295,7 +1312,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             // out of the choice list. The stored value still displays, so an ini that already names one keeps its label.
             if (temporalAaRow(d) && !edvr::temporalAaChoiceOffered(c.value.c_str(), g_menuGpu)) c.disabled = true;
             if (unavailableNvidiaLowLatency && c.value != "off") c.disabled = true;
-            out.push_back(c);
+            if (!requiresReflex || c.value != "off") out.push_back(c);
         }
         pos = bar + 1;
     }
@@ -1336,6 +1353,9 @@ std::string switchWord(const MenuRowDef& d, const std::string& value) {
 }
 
 std::string displayValue(const MenuRowDef& d, const std::string& v) {
+    // The saved and shipped labels still need Off while it is omitted from
+    // the available choices.
+    if (isNvidiaLowLatencyRow(d) && native_reflex::parseMode(v) == native_reflex::Mode::Off) return "Off";
     if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && _stricmp(v.c_str(), "dlaa") == 0) {
         return "DLAA"; // explicit legacy 1:1 mode, even below HMD Quality 1
     }
@@ -2426,6 +2446,10 @@ void buildMonitor(MenuContent& c) {
         char line[240];
         perfMonitorNativeTimingLine(line, sizeof(line));
         addMonitorNote(c, line);
+        if (nativeFgAutoRequested() || nativeFgRequested()) {
+            perfMonitorNativeFrameGenerationLine(line, sizeof(line));
+            addMonitorNote(c, line);
+        }
     }
     // One line under the gauges: the last drop and what EDVR was doing.
     {
@@ -2681,11 +2705,11 @@ bool buildReadoutContent(MenuContent& c, FpsOverlayMode mode, bool flat, float t
     }
     PerfReadout r;
     perfMonitorReadout(&r, 1.0f);
-    char l1[96], l2[96], note[200], l3[96];
+    char l1[128], l2[96], note[200], l3[160];
     formatDetailRates(r, l1, sizeof(l1));
     formatDetailTimes(r, l2, sizeof(l2));
     formatBridgeNote(r, note, sizeof(note));
-    snprintf(l3, sizeof(l3), "%.90s", note);
+    snprintf(l3, sizeof(l3), "%.*s", int(sizeof(l3) - 1), note);
     const char* lines[3];
     int n = 0;
     lines[n++] = l1;
@@ -2971,8 +2995,10 @@ void buildContent(MenuContent& c) {
             const bool dlssRow = isDlssPresetRow(d);
             const bool nvidiaLowLatencyRow = isNvidiaLowLatencyRow(d);
             const bool unavailableNvidiaLowLatency = nvidiaLowLatencyRow && !native_reflex::availableForUser();
+            const auto nvidiaStatus = nvidiaLowLatencyRow ? native_reflex::modeStatusForUser()
+                                                         : native_reflex::ModeStatus::Unavailable;
             const char* nvidiaHint = hi && nvidiaLowLatencyRow
-                ? native_reflex::modeStatusHint(native_reflex::modeStatusForUser(), !unavailableNvidiaLowLatency) : nullptr;
+                ? native_reflex::modeStatusHint(nvidiaStatus, !unavailableNvidiaLowLatency) : nullptr;
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -3011,6 +3037,8 @@ void buildContent(MenuContent& c) {
             }
             std::string v = openxrScaleRow ? openxrResolutionValue(res)
                                            : displayValue(d, r.value);
+            if (nvidiaStatus == native_reflex::ModeStatus::ConfirmedOn)
+                v = displayValue(d, reflexChoiceWord(d, r.value));
             if (editingThis) {
                 // What has been typed, with a caret. The raster shows a
                 // typed row in the value colour whatever its kind.
@@ -3478,8 +3506,11 @@ void enqueueChange(WriteJob& job, bool held = false) {
 
 void applyChange(int defIndex, const std::string& fileValue, bool held = false) {
     const MenuRowDef& d = kMenuRows[defIndex];
-    if (isNvidiaLowLatencyRow(d) && fileValue != "off" && !native_reflex::availableForUser()) {
-        g_s.lastWrite = native_reflex::kModeUnavailableHint;
+    const bool unavailable = isNvidiaLowLatencyRow(d) && fileValue != "off" && !native_reflex::availableForUser();
+    const bool required = fileValue == "off" && frameGenerationRequiresReflex(d);
+    if (unavailable || required) {
+        g_s.lastWrite = unavailable ? native_reflex::kModeUnavailableHint
+                                    : "Turn off Frame generation before selecting Off for NVIDIA low latency.";
         g_s.contentDirty = true;
         return;
     }
@@ -3685,7 +3716,7 @@ void stepRow(int defIndex, int dir, int mult) {
                                             ? std::string(fpsOverlayWord(parseFpsOverlay(cur.c_str())))
                                             : (isHudAntiAliasingRow(d) ? std::string(hudAaName(hudAaParse(cur.c_str())))
                                                : isDittoSharpenRow(d) ? std::string(dittoSharpenWord(dittoSharpenModeFromText(cur.c_str())))
-                                                                      : cur);
+                                                                      : reflexChoiceWord(d, cur));
             for (size_t i = 0; i < items.size(); ++i) {
                 if (_stricmp(items[i].value.c_str(), curWord.c_str()) == 0) at = static_cast<int>(i);
             }
@@ -5300,6 +5331,7 @@ static void menuReadFpsOverlayKeys(Config& cfg, bool monitorPanelProfile) {
         Log::get().note("menu: the frame-rate overlay is %s.", fpsOverlayWord(mode));
         s.overlayTextMs = 0;   // the next tick builds the new shape at once
         s.overlayText.clear();
+        if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
     }
     if (monitorPanelProfile && (!s.configured || view != s.monitorView)) {
         // At configure too (a profile switch clears s.configured): a flight log says which view F5 will show.
@@ -5640,6 +5672,18 @@ void menuTick(ID3D11Device* dev) {
     const bool world = pol.anchor == MenuAnchor::World;
     const bool hotkeysPage = menuProfileHasPage(MenuPageSource::Hotkeys, runtimeFlatProfile());   // one answer, the page table's (menu_pages.h)
     guardedBudget(g_budget, [&] {
+        const bool layeredFps = world && (nativeFgAutoRequested() || nativeFgRequested()) && nativeMenuFpsOverlaySupported();
+        const uint64_t overlaySession = layeredFps ? nativeMenuSessionId() : 0;
+        if (layeredFps != s.overlayLayer || overlaySession != s.overlayLayerSession) {
+            if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
+            s.overlayLayer = layeredFps;
+            s.overlayLayerSession = overlaySession;
+            s.overlayUp = false; // route the next raster to the new owner
+        }
+        const auto submitOverlay = [layeredFps](const MenuContent& content) {
+            if (layeredFps) menuPanelSubmitNativeFpsOverlay(content);
+            else menuPanelSubmit(content);
+        };
         if (world) {
             static bool lastNvidiaLowLatencyAvailable = false;
             static native_reflex::ModeStatus lastNvidiaModeStatus = native_reflex::ModeStatus::Unavailable;
@@ -5999,14 +6043,13 @@ void menuTick(ID3D11Device* dev) {
                         s.contentDirty = true;   // the menu's content must be re-sent after a toast
                     }
                 }
-                // The head-locked readout: the door anchors it to each frame's
-                // own pose (setMenuHeadLock below), so it rides the look with no
-                // lag, the toolkit's way; its text is refreshed twice a second.
-                // Never while a toast has the panel.
+                // Native OpenXR places the readout in view space. The legacy
+                // eye pass still takes a head pose per frame. Both refresh the
+                // same content while neither a menu nor a toast is showing.
                 if (s.overlay && !s.toastUp) {
                     float pose[12];
-                    s.anchorValid = headPose(pose);
-                    if (s.anchorValid) {
+                    if (!layeredFps) s.anchorValid = headPose(pose);
+                    if (layeredFps || s.anchorValid) {
                         // compact: twice a second; detailed: about four times a second, and always re-rasterised (its strip moves).
                         const bool detailed = s.overlayMode == FpsOverlayMode::Detailed;
                         if (!s.overlayUp || dueMs(s.overlayTextMs, detailed ? 250 : 500)) {
@@ -6016,7 +6059,7 @@ void menuTick(ID3D11Device* dev) {
                                 if (buildReadoutContent(c, FpsOverlayMode::Detailed, false, s.textDeg)) {
                                     s.overlayText.clear();
                                     s.overlayTextDeg = s.textDeg;
-                                    menuPanelSubmit(c);
+                                    submitOverlay(c);
                                 }
                             } else {
                                 char line[120];
@@ -6027,7 +6070,7 @@ void menuTick(ID3D11Device* dev) {
                                     if (menuPanelBuildOverlayContent(c, s.overlayText.c_str(), s.textDeg,
                                                                       nullptr)) {
                                         s.overlayTextDeg = s.textDeg;
-                                        menuPanelSubmit(c);
+                                        submitOverlay(c);
                                     }
                                 }
                             }
@@ -6186,7 +6229,13 @@ void menuTick(ID3D11Device* dev) {
             g.halfW = panelHalfW(widthDeg, menuBranch && tooltipsOn());
             g.shift = panelShift(g.halfW, menuBranch && tooltipsOn());
             g.alpha = s.toastUp ? s.toastAlpha : showingOverlay ? s.overlayAlpha : s.alpha;
-            g.overlayRaster = showingOverlay;
+            g.overlayRaster = showingOverlay && !layeredFps;
+            if (layeredFps) {
+                menuPanelSetNativeFpsOverlayPose(showingOverlay, s.overlayYaw, s.overlayPitch, s.distance);
+                // The overlay is outside both the projection images and the
+                // shared menu alpha that suspends Auto FG sampling.
+                if (showingOverlay) g.alpha = 0.0f;
+            }
             if (!glitchConsumerPresent() && !nativeMenuAvailable()) {
                 g.alpha = 0.0f;
                 inputGateSetPrivate(false);
@@ -6215,7 +6264,7 @@ void menuTick(ID3D11Device* dev) {
             menuPanelSetMonitorGeometry(mg);
         }
         if (world) {
-            setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
+            setMenuHeadLock(showingOverlay && !layeredFps, s.overlayYaw, s.overlayPitch);
             setMenuVisible(g.alpha);
         }
         inputGateTick();
@@ -6227,6 +6276,7 @@ void menuTick(ID3D11Device* dev) {
         if (world) {
             hotkeysSuspend(false);
             setMenuVisible(0.0f);
+            if (s.overlayLayer) menuPanelClearNativeFpsOverlay();
         } else {
             inputGateSetPadPrivate(false, -1);
         }

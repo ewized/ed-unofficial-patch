@@ -5831,6 +5831,34 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         }
     }
 
+    {
+        const std::wstring dir = joinPath(scratch, L"settings-fg-reflex");
+        makeTree(dir);
+        const std::wstring path = joinPath(dir, L"edup.ini");
+        writeAll(path, "[fix]\r\nnvidia_reflex = off\r\nframe_generation = off\r\n");
+        SettingsModel model;
+        model.load(dir, "vr");
+        const size_t reflex = rowFor(model, "fix.nvidia_reflex");
+        const size_t fg = rowFor(model, "fix.frame_generation");
+        check(reflex != SIZE_MAX && fg != SIZE_MAX, "Reflex and frame generation are available in VR settings");
+        if (reflex != SIZE_MAX && fg != SIZE_MAX) {
+            check(model.set(fg, "auto"), "select native frame generation");
+            const auto& row = model.rows()[reflex];
+            check(row.value == "on" && row.choices.size() == 2 && row.choices[0].value == "on" &&
+                  row.choices[0].label == "On (required)" && row.choices[1].value == "boost",
+                  "FG offers required On and optional On + Boost in the profile editor");
+            const std::string selected = readAll(path);
+            expectEq(iniValue(selected, "fix.nvidia_reflex", ""), "off", "enabling FG preserves the saved Off preference");
+            check(!model.set(reflex, "off") && readAll(path) == selected,
+                  "the installer refuses Off while FG is selected and preserves the file");
+            check(model.set(fg, "off") && model.rows()[reflex].value == "off" && model.rows()[reflex].choices.size() == 3,
+                  "turning FG off restores the saved preference and all three choices");
+            check(model.set(fg, "2x") && model.set(reflex, "boost") && model.rows()[reflex].value == "boost",
+                  "Boost can be selected during FG");
+            check(model.set(fg, "off") && model.rows()[reflex].value == "boost", "an explicit Boost edit persists after FG");
+        }
+    }
+
     {   // A file from before the movie setting moved to [visual]: the window reads it the way the runtime does, through the moved-from map
         // (settings.cpp kMovedSettings, generated from edup.ini), in both views.
         const std::wstring dir = joinPath(scratch, L"flatset-window-moved");

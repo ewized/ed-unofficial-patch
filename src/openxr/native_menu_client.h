@@ -6,27 +6,44 @@
 #include <wrl/client.h>
 
 namespace edvr::openxr {
-// Calls are serialized by the XR owner. All provider methods except close
-// execute inside the synchronous game-producer callback supplied by the host.
+// Calls are serialized by the XR owner. Acquisition and eye treatment use
+// the host's producer callback. FPS raster reads and close are CPU-only.
 class NativeMenuClient final {
  public:
-  HRESULT acquire(HMODULE provider, ID3D11Device* device, uint64_t generation) {
+  HRESULT acquire(HMODULE provider, ID3D11Device* device, uint64_t generation, bool fpsLayerSupported=true) {
     if (table_.context) return E_PENDING;
     if (!provider || !device || !generation) return E_INVALIDARG;
     const auto entry = GetProcAddress(provider, "edvrAcquireNativeMenu");
     if (!entry || !owned(provider, entry)) return E_NOINTERFACE;
-    EdvrNativeMenuRequest request{sizeof(request), EDVR_NATIVE_MENU_VERSION_1, device, generation};
-    EdvrNativeMenuTable candidate{sizeof(candidate), EDVR_NATIVE_MENU_VERSION_1};
-    const auto result = reinterpret_cast<decltype(&edvrAcquireNativeMenu)>(entry)(&request, &candidate);
+    const uint32_t version = fpsLayerSupported ? EDVR_NATIVE_MENU_VERSION_2 : EDVR_NATIVE_MENU_VERSION_1;
+    const uint32_t size = fpsLayerSupported ? uint32_t(sizeof(EdvrNativeMenuTable)) : EDVR_NATIVE_MENU_TABLE_V1_SIZE;
+    EdvrNativeMenuRequest request{sizeof(request), version, device, generation};
+    EdvrNativeMenuTable candidate{size, version};
+    const auto acquire = reinterpret_cast<decltype(&edvrAcquireNativeMenu)>(entry);
+    auto result = acquire(&request, &candidate);
+    if (fpsLayerSupported && (result == E_INVALIDARG || result == E_NOINTERFACE)) {
+      request.version = EDVR_NATIVE_MENU_VERSION_1;
+      candidate = {EDVR_NATIVE_MENU_TABLE_V1_SIZE, EDVR_NATIVE_MENU_VERSION_1};
+      result = acquire(&request, &candidate);
+    }
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
-    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_MENU_VERSION_1 ||
+    const bool fps = request.version == EDVR_NATIVE_MENU_VERSION_2;
+    if (candidate.size != (fps ? sizeof(candidate) : EDVR_NATIVE_MENU_TABLE_V1_SIZE) || candidate.version != request.version ||
         !candidate.context || !owned(provider, candidate.publishPose) ||
-        !owned(provider, candidate.treatEye) || !owned(provider, candidate.close)) return E_NOINTERFACE;
+        !owned(provider, candidate.treatEye) || !owned(provider, candidate.close) ||
+        (fps && !owned(provider, candidate.readFpsOverlay))) return E_NOINTERFACE;
     table_ = candidate;
     generation_ = generation;
     return S_OK;
   }
   bool acquired() const { return table_.context != nullptr; }
+  bool independentFpsOverlay() const {
+    return acquired() && table_.version == EDVR_NATIVE_MENU_VERSION_2 && table_.readFpsOverlay;
+  }
+  HRESULT readFpsOverlay(uint64_t knownRevision, EdvrNativeFpsOverlay& overlay, void* pixels, uint32_t capacity) const {
+    if (!independentFpsOverlay()) return S_FALSE;
+    return table_.readFpsOverlay(table_.context,knownRevision,&overlay,pixels,capacity);
+  }
   HRESULT publish(const GeometryInput& geometry, uint64_t referenceGeneration) {
     if (!acquired()) return S_FALSE;
     GeometrySnapshot snapshot{};

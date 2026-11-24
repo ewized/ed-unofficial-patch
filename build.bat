@@ -438,7 +438,7 @@ if not exist "%OBJ%\temporalshader" mkdir "%OBJ%\temporalshader"
     "tools\temporal_shader_build\temporal_shader_build.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edup] ERROR: temporal shader compiler build failed & exit /b 1 )
-REM The native runtime's stereo-renderer shaders (src\openxr\stereo_shader_source.h; five from F106) are compiled here too, into a header of their own
+REM The native runtime's stereo renderer and native UI overlay shaders are compiled here too, into a header of their own
 REM (--stereo-output), so edvr_openxr_runtime.dll creates them from bytes and carries no HLSL compiler: it imported d3dcompiler_47.dll until 2026-10-01
 REM for four D3DCompile calls. The runtime and the two rigs that compile d3d11_stereo.cpp find the header through /I"%GEN%"; the PE gate below fails the
 REM build if either DLL imports the compiler again.
@@ -494,10 +494,12 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDepthProbeSelftest ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrAcquireNativeTemporal ^
+    --extra-export edvrAcquireNativeFrameGeneration ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeReflexFrame ^
     --extra-export edvrAcquireNativeTiming ^
+    --extra-export edvrPublishNativePresentation ^
     --extra-export edvrAcquireDesktopWindow ^
     --extra-export edvrReadNativePresentTrace ^
     --extra-export "edvrNativeStartupRouting DATA" ^
@@ -875,6 +877,12 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\sky_ring.cpp" ^
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\frame_generation_ngx.cpp" ^
+    "src\d3d11\frame_generation_interop.cpp" ^
+    "src\d3d11\frame_generation_color.cpp" ^
+    "src\d3d11\frame_generation_output.cpp" ^
+    "src\d3d11\frame_generation_coordinator.cpp" ^
+    "src\d3d11\native_frame_generation.cpp" ^
     "src\d3d11\fsr3_engine.cpp" "src\d3d11\dittosr_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" "src\d3d11\flat_star_glow.cpp" "src\d3d11\flat_dof_blur.cpp" ^
@@ -912,7 +920,7 @@ if errorlevel 1 ( echo [edup] ERROR: rc.exe failed on the runtime version resour
 
 link.exe /nologo /DLL /MACHINE:X64 /INCREMENTAL:NO %EDUP_CPU_LINK% /PDB:"%BUILD%\d3d11.pdb" ^
     /DEF:"%GEN%\edvr_d3d11.def" /OUT:"%BUILD%\d3d11.dll" ^
-    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\miniz_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib bcrypt.lib %NGXLIB% %FSRLIB%
+    "%OBJ%\d3d11\*.obj" "%OBJ%\d3d11\dxbc_notice.res" "%OBJ%\d3d11\miniz_notice.res" "%OBJ%\d3d11\version.res" kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib d3d12.lib dxgi.lib advapi32.lib bcrypt.lib %NGXLIB% %FSRLIB%
 if errorlevel 1 ( echo [edup] ERROR: link failed & exit /b 1 )
 
 echo [edup] built %BUILD%\d3d11.dll
@@ -1434,6 +1442,141 @@ if errorlevel 1 ( echo [edup] ERROR: system_module_test build failed & exit /b 1
 "%OBJ%\system_module\system_module_test.exe" --dry-run || exit /b 1
 "%OBJ%\system_module\system_module_test.exe" --self-test || exit /b 1
 exit /b 0
+:rig_native_fg_test
+echo [edup] === native_fg_test.exe ===
+if not exist "%OBJ%\nativefg" mkdir "%OBJ%\nativefg"
+%CC% /nologo /W4 /WX /O2 /EHsc /std:c++17 /MT %EDUP_CPU_COMPILE% /I"third_party\openxr\include" ^
+    /Fo"%OBJ%\nativefg\\" /Fe"%BUILD%\native_fg_test.exe" "tools\native_fg_test\native_fg_test.cpp" ^
+    /link /INCREMENTAL:NO %EDUP_CPU_LINK% user32.lib
+if errorlevel 1 exit /b 1
+"%BUILD%\native_fg_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_frame_generation_coordinator_test
+echo [edup] === frame_generation_coordinator_test.exe ===
+if not exist "%OBJ%\fgcoord" mkdir "%OBJ%\fgcoord"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DEDVR_FRAME_GENERATION_COORDINATOR_TEST ^
+    /Fo"%OBJ%\fgcoord\\" /Fe"%OBJ%\fgcoord\coordinator_cpu_test.exe" ^
+    "tools\frame_generation_coordinator_test\cpu_test.cpp" "src\d3d11\frame_generation_coordinator.cpp" ^
+    "src\d3d11\frame_generation_color.cpp" "src\d3d11\frame_generation_interop.cpp" "src\d3d11\frame_generation_output.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fgcoord\coordinator_cpu_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_frame_generation_output_test
+echo [edup] === frame_generation_output_test.exe ===
+if not exist "%OBJ%\fgoutputcpu" mkdir "%OBJ%\fgoutputcpu"
+if not exist "%OBJ%\fgoutputgpu" mkdir "%OBJ%\fgoutputgpu"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DEDVR_FRAME_GENERATION_OUTPUT_TEST ^
+    /Fo"%OBJ%\fgoutputcpu\\" /Fe"%OBJ%\fgoutputcpu\output_cpu_test.exe" ^
+    "tools\frame_generation_output_test\frame_generation_output_test.cpp" "src\d3d11\frame_generation_output.cpp" "src\d3d11\frame_generation_interop.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fgoutputcpu\output_cpu_test.exe" --self-test || exit /b 1
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\fgoutputgpu\\" /Fe"%OBJ%\fgoutputgpu\output_gpu_test.exe" ^
+    "tools\frame_generation_output_test\gpu_test.cpp" "src\d3d11\frame_generation_output.cpp" "src\d3d11\frame_generation_interop.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+REM Explicit NVIDIA hand-off correctness runs are separate; default remains driver-free.
+"%OBJ%\fgoutputgpu\output_gpu_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_frame_generation_ngx_test
+echo [edup] === frame_generation_ngx_test.exe ===
+if not exist "%OBJ%\fgngx" mkdir "%OBJ%\fgngx"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX /DWIN32_LEAN_AND_MEAN %NGXFLAGS% /DEDVR_FRAME_GENERATION_NGX_TEST ^
+    /Fo"%OBJ%\fgngx\\" /Fe"%OBJ%\fgngx\frame_generation_ngx_test.exe" ^
+    "tools\frame_generation_ngx_test\cpu_test.cpp" "src\d3d11\frame_generation_ngx.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fgngx\frame_generation_ngx_test.exe" || exit /b 1
+REM The unavailable-backend contract must run even when this build has an SDK.
+if not exist "%OBJ%\fgngx_no_sdk" mkdir "%OBJ%\fgngx_no_sdk"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DEDVR_FRAME_GENERATION_NGX_TEST ^
+    /Fo"%OBJ%\fgngx_no_sdk\\" /Fe"%OBJ%\fgngx_no_sdk\frame_generation_ngx_no_sdk_test.exe" ^
+    "tools\frame_generation_ngx_test\cpu_test.cpp" "src\d3d11\frame_generation_ngx.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fgngx_no_sdk\frame_generation_ngx_no_sdk_test.exe" || exit /b 1
+REM Compile the explicit hardware probe, but this full-build gate runs only its DRY path.
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /O2 /DNOMINMAX /DWIN32_LEAN_AND_MEAN %NGXFLAGS% ^
+    /Fo"%OBJ%\fgngx\\" /Fe"%OBJ%\fgngx\frame_generation_ngx_probe.exe" ^
+    "tools\frame_generation_ngx_test\probe.cpp" "src\d3d11\frame_generation_ngx.cpp" ^
+    /link /INCREMENTAL:NO %NGXLIB% advapi32.lib user32.lib d3d12.lib dxgi.lib
+if errorlevel 1 exit /b 1
+"%OBJ%\fgngx\frame_generation_ngx_probe.exe" || exit /b 1
+exit /b 0
+
+:rig_native_fg_import_test
+if not exist "%OBJ%\fgimport" mkdir "%OBJ%\fgimport"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DNOMINMAX /DWIN32_LEAN_AND_MEAN ^
+    /Fo"%OBJ%\fgimport\\" /Fe"%OBJ%\fgimport\native_fg_import_test.exe" ^
+    "tools\native_fg_import_test\native_fg_import_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fgimport\native_fg_import_test.exe" || exit /b 1
+exit /b 0
+
+:rig_frame_generation_mv_test
+if not exist "%OBJ%\fgmv" mkdir "%OBJ%\fgmv"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DNOMINMAX /DWIN32_LEAN_AND_MEAN ^
+    /Fo"%OBJ%\fgmv\\" /Fe"%OBJ%\fgmv\frame_generation_mv_test.exe" ^
+    "tools\frame_generation_mv_test\frame_generation_mv_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib
+if errorlevel 1 exit /b 1
+"%OBJ%\fgmv\frame_generation_mv_test.exe" --self-test || exit /b 1
+"%OBJ%\fgmv\frame_generation_mv_test.exe" --warp || exit /b 1
+exit /b 0
+
+:rig_frame_generation_color_test
+echo [edup] === frame_generation_color_test.exe ===
+if not exist "%OBJ%\fgcolor" mkdir "%OBJ%\fgcolor"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\fgcolor\\" /Fe"%OBJ%\fgcolor\frame_generation_color_test.exe" ^
+    "tools\frame_generation_color_test\frame_generation_color_test.cpp" "src\d3d11\frame_generation_color.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib delayimp.lib /DELAYLOAD:d3d11.dll /DELAYLOAD:d3dcompiler_47.dll
+if errorlevel 1 exit /b 1
+"%OBJ%\fgcolor\frame_generation_color_test.exe" --self-test || exit /b 1
+"%OBJ%\fgcolor\frame_generation_color_test.exe" --gpu || exit /b 1
+exit /b 0
+
+:rig_frame_generation_interop_test
+echo [edup] === frame_generation_interop_test.exe ===
+if not exist "%OBJ%\fginterop" mkdir "%OBJ%\fginterop"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\fginterop\\" /Fe"%OBJ%\fginterop\frame_generation_interop_test.exe" ^
+    "tools\frame_generation_interop_test\frame_generation_interop_test.cpp" "src\d3d11\frame_generation_interop.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\fginterop\frame_generation_interop_test.exe" || exit /b 1
+python "tools\frame_generation_interop_test\source_check.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_frame_generation_interop_gpu_test
+echo [edup] === frame_generation_interop_gpu_test.exe (CPU by default) ===
+if not exist "%OBJ%\fginteropgpu" mkdir "%OBJ%\fginteropgpu"
+%CC% /nologo /MT /std:c++17 /EHsc /W4 /WX /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /I"%GEN%" ^
+    /Fo"%OBJ%\fginteropgpu\\" /Fe"%OBJ%\fginteropgpu\frame_generation_interop_gpu_test.exe" ^
+    "tools\frame_generation_interop_test\gpu_test.cpp" "src\d3d11\frame_generation_interop.cpp" "src\d3d11\frame_generation_color.cpp" "src\d3d11\map_smaa.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+REM Hardware sharing is a separate explicit root-controlled run, never automatic.
+"%OBJ%\fginteropgpu\frame_generation_interop_gpu_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_layer_fg_test
+echo [edup] === ui_layer_fg_test.exe ===
+if not exist "%OBJ%\uifg" mkdir "%OBJ%\uifg"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /WX /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
+    /Fo"%OBJ%\uifg\\" /Fe"%OBJ%\uifg\ui_layer_fg_test.exe" ^
+    "tools\ui_layer_fg_test\ui_layer_fg_test.cpp" "src\d3d11\map_smaa.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib
+if errorlevel 1 ( echo [edup] ERROR: UI FG adapter test build failed & exit /b 1 )
+"%OBJ%\uifg\ui_layer_fg_test.exe" || exit /b 1
+REM Explicit software-GPU correctness gate; no game, XR, NVAPI or NGX calls.
+"%OBJ%\uifg\ui_layer_fg_test.exe" --gpu || exit /b 1
+exit /b 0
+
 :rig_native_temporal_test
 echo [edup] === native_temporal_test.exe ===
 if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
@@ -1441,6 +1584,7 @@ if not exist "%OBJ%\native_temporal" mkdir "%OBJ%\native_temporal"
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
+    "tools\native_temporal_test\frame_generation_off_stubs.cpp" ^
     "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
@@ -1464,6 +1608,7 @@ if not exist "%OBJ%\native_sharpen_test" mkdir "%OBJ%\native_sharpen_test"
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_sharpen_test\\" /Fe"%BUILD%\native_sharpen_test.exe" ^
     "tools\native_sharpen_test\native_sharpen_test.cpp" "src\d3d11\native_sharpen.cpp" ^
+    "tools\native_temporal_test\frame_generation_off_stubs.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edup] ERROR: native sharpen contract test build failed & exit /b 1 )

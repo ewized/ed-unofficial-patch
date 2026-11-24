@@ -24,6 +24,12 @@ constexpr Mode parseMode(std::string_view word) noexcept {
     return Mode::Off;
 }
 
+// Frame generation requires low latency. Keep the stored preference separate
+// so disabling generation restores the user's choice.
+constexpr Mode forFrameGeneration(Mode requested, bool selected) noexcept {
+    return selected && requested == Mode::Off ? Mode::On : requested;
+}
+
 constexpr const char* modeWord(Mode mode) noexcept {
     switch (mode) {
         case Mode::On:    return "on";

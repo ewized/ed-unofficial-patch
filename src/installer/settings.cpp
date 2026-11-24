@@ -2,11 +2,14 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
 #include "detect.h"
 #include "mirror.h"
 #include "../common/flat_profile_keys.h"
 #include "../common/hotkey.h"
 #include "../common/iniedit.h"
+#include "../common/native_fg_multiplier.h"
 #include "../common/native_reflex_setting.h"
 #include "state.h"
 
@@ -14,6 +17,11 @@ namespace edvr::installer {
 namespace {
 
 #include "settings_schema.inc"  // generated: kSettings[]
+
+// The installer edits a profile. Only the game can confirm its driver mode.
+bool profileRequiresReflex(bool flat, const std::string& text) {
+    return !flat && nativeFgSelection(iniValue(text, "fix.frame_generation", "off")).enabled();
+}
 
 }  // namespace
 
@@ -235,6 +243,7 @@ void SettingsModel::refreshRows() {
     // The flat selection shows the rows the flat profile reads (flat_profile_keys.h, the runtime's own list); the
     // VR selection shows every setting.
     const bool flatRows = m_profile == "flat";
+    const bool requiresReflex = profileRequiresReflex(flatRows, m_text);
     for (const SettingDef& def : settingDefs()) {
         if (flatRows) {
             const std::string dotted = std::string(def.section) + "." + def.key;
@@ -269,8 +278,16 @@ void SettingsModel::refreshRows() {
                 break;
             }
         }
-        if (dotted == "fix.nvidia_reflex")
-            row.value = native_reflex::modeWord(native_reflex::parseMode(row.value));
+        if (dotted == "fix.nvidia_reflex") {
+            const auto saved = native_reflex::parseMode(row.value);
+            row.value = native_reflex::modeWord(native_reflex::forFrameGeneration(saved, requiresReflex));
+            if (requiresReflex) {
+                row.choices.erase(std::remove_if(row.choices.begin(), row.choices.end(),
+                    [](const Choice& choice) { return choice.value == "off"; }), row.choices.end());
+                for (Choice& choice : row.choices)
+                    if (choice.value == "on") choice.label = "On (required)";
+            }
+        }
         row.isRecommended = sameValue(def, row.value, def.recommended);
         m_rows.push_back(row);
     }
@@ -290,6 +307,13 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     const std::string leaf = toUtf8(leafOf(m_iniPath));
     bool fromShared = false;
     m_text = currentText(&fromShared);
+    // Respect a frame generation selection made after this row was drawn.
+    if (dotted == "fix.nvidia_reflex" && native_reflex::parseMode(value) == native_reflex::Mode::Off &&
+        profileRequiresReflex(m_profile == "flat", m_text)) {
+        m_error = "Turn off VR frame generation before selecting Off for NVIDIA low latency.";
+        refreshRows();
+        return false;
+    }
 
     // The merge engine, used for one value: merging a document with itself is a
     // no-op (installer_test proves it), so the only change is the forced value

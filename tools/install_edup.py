@@ -91,6 +91,11 @@ the effective ini selects fsr4 and the DLLs are missing or differ from the build
 The release packages carry the three files, and the launcher installs them as it
 installs XeSS's; AMD's DLLs keep AMD's own signature and are never re-signed.
 
+For native VR Frame Generation, --frame-generation installs the separately
+provided nvngx_dlssg.dll and NVIDIA-DLSS-FG-LICENSE.txt from build/. It checks
+both files against the pinned NVIDIA Streamline 2.14.16 release. Only this
+explicit switch selects the pair, even when --all is set.
+
 Exit 0 when everything asked for landed and verified, 1 otherwise.
 """
 
@@ -1122,7 +1127,9 @@ def _validate_v2_receipt_in(r):
     targets.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
     targets["reflex_license"] = os.path.join(target, fetch_reflex.LICENSE_NAME)
     # A both install records the flat half's settings file as its own entry.
-    if r["kind"] == NATIVE_KIND: targets["ini_flat"] = _ini_target(target, "flat")
+    if r["kind"] == NATIVE_KIND:
+        targets["ini_flat"] = _ini_target(target, "flat")
+        targets.update((key, os.path.join(target, name)) for key, name in FG_PAYLOAD)
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate ED-UP v2 components")
@@ -1985,6 +1992,13 @@ def _selects_xess(target, scope):
 # (src/common/temporal_mode.h temporalEngineFor: dlaa and dlss are the Nvidia engine).
 DLSS_FAMILY_MODES = ("dlss", "dlaa")
 
+# Explicit experimental payload; never selected by --all or a missing-file
+# repair. Public NVIDIA Streamline 2.14.16 release, NGX FG 310.9.16.
+FG_PAYLOAD = (("frame_generation", "nvngx_dlssg.dll"),
+              ("frame_generation_license", "NVIDIA-DLSS-FG-LICENSE.txt"))
+FG_RUNTIME_SHA256 = "8D59D49B36410DD6B62FEF2503A5871D347415BD85D943FA0848563A95DD50C7"
+FG_LICENSE_SHA256 = "3027F23CA5A46DD9CB8183FBD522983A86F64D7DAAC5982912BF9F214671F294"
+
 
 def _selects_dlss(target, scope):
     """Whether the settings a scope's game reads select DLSS or DLAA; see _selects_xess."""
@@ -2297,7 +2311,7 @@ def _equivalent_startup_config(actual, expected):
 
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                             include_dlss=False, include_xess=False, include_ini=False, scope="both",
-                            keep_backups=KEEP_BACKUPS, include_fsr4=False):
+                            keep_backups=KEEP_BACKUPS, include_fsr4=False, include_frame_generation=False):
     """Stage a scope's graphics payload and optional native components. A
     good install ends by pruning old backups (prune_backups); a dry run says
     what that would remove."""
@@ -2317,6 +2331,15 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         errors.append(str(error))
     if include_dlss and not os.path.isfile(os.path.join(build_dir(root), "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(build_dir(root), "nvngx_dlss.dll"))
+    if include_frame_generation:
+        if not native:
+            errors.append("frame generation requires a VR scope")
+        for (_, name), expected in zip(FG_PAYLOAD, (FG_RUNTIME_SHA256, FG_LICENSE_SHA256)):
+            source = os.path.join(build_dir(root), name)
+            if not os.path.isfile(source):
+                errors.append("missing optional frame-generation source %s" % source)
+            elif sha256(source) != expected:
+                errors.append("%s differs from the pinned NVIDIA release" % name)
     xess_names = (("xess", "libxess.dll"), ("xess_fg", "libxess_fg.dll"), ("xess_ll", "libxell.dll"),
                   ("xess_license", "INTEL-XESS-LICENSE.txt"),
                   ("xess_third_party", "INTEL-XESS-THIRD-PARTY.txt"))
@@ -2405,6 +2428,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                              "\n       ".join(leftovers))
     if verify_only:
         ok = True
+        if include_frame_generation:
+            for _, name in FG_PAYLOAD:
+                source = os.path.join(build_dir(root), name)
+                destination = os.path.join(target, name)
+                if not os.path.isfile(destination) or sha256(destination) != sha256(source):
+                    print("[edup] frame-generation verify mismatch: %s" % destination)
+                    ok = False
         for key in payload:
             dst = p[key + "_target"]
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
@@ -2550,7 +2580,8 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
-    for key, name in xess_active:
+    fg_active = FG_PAYLOAD if include_frame_generation else ()
+    for key, name in xess_active + fg_active:
         src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
         entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
@@ -2976,6 +3007,61 @@ def _scope_self_test():
 
         def args_for(g, *extra, tag="t"):
             return ["--root", root, "--target", g, "--tag", tag] + list(extra)
+
+        # The opt-in FG payload uses the real transaction/receipt/restore route.
+        # Substitute only the release pins, so these harmless bytes are never
+        # mistaken for a real DLL or loaded by any test.
+        old_fg_pins = FG_RUNTIME_SHA256, FG_LICENSE_SHA256
+        fg_bytes, fg_notice = b"FG-RUNTIME-FIXTURE", b"FG-NOTICE-FIXTURE"
+        try:
+            globals()["FG_RUNTIME_SHA256"] = hashlib.sha256(fg_bytes).hexdigest().upper()
+            globals()["FG_LICENSE_SHA256"] = hashlib.sha256(fg_notice).hexdigest().upper()
+            Path(root, "build", "nvngx_dlssg.dll").write_bytes(fg_bytes)
+            Path(root, "build", "NVIDIA-DLSS-FG-LICENSE.txt").write_bytes(fg_notice)
+            g = game("fg-opt-in", user_ini=b"[user]\nkeep-fg=1\n")
+            Path(g, "nvngx_dlssg.dll").write_bytes(b"ORIGINAL-FG")
+            before = tree(g)
+            args = args_for(g, "--scope", "vr", "--frame-generation", tag="fg")
+            check(run(args + ["--dry-run"])[0] == 0 and tree(g) == before,
+                  "FG dry run changed files or directories")
+            for extra in (("--scope", "flat"), ("--compile-only",), ("--suspend",),
+                          ("--resume",), ("--native-openxr",),
+                          ("--restore-native", os.path.join(g, "absent.json"))):
+                check(run(args_for(g, "--frame-generation", *extra))[0] == "refused" and tree(g) == before,
+                      "FG accepted incompatible route or changed files: " + repr(extra))
+            code, text = run(args)
+            check(code == 0, "FG opt-in install failed: " + text)
+            check(Path(g, "nvngx_dlssg.dll").read_bytes() == fg_bytes and
+                  Path(g, "NVIDIA-DLSS-FG-LICENSE.txt").read_bytes() == fg_notice,
+                  "FG runtime or notice was not installed")
+            check(run(args + ["--verify-only"])[0] == 0, "FG verify-only failed")
+            fg_receipt = os.path.join(g, "edup_native_receipt.json")
+            check({key for key, _ in FG_PAYLOAD}.issubset(
+                  e["key"] for e in verify_native_receipt(fg_receipt, g)["files"]),
+                  "FG receipt does not retain both payload entries")
+            Path(g, "nvngx_dlssg.dll").write_bytes(b"CHANGED")
+            check(run(args + ["--verify-only"])[0] == 1, "FG verify accepted changed runtime")
+            Path(g, "nvngx_dlssg.dll").write_bytes(fg_bytes)
+            check(run(["--restore-native", fg_receipt])[0] == 0 and
+                  Path(g, "nvngx_dlssg.dll").read_bytes() == b"ORIGINAL-FG" and
+                  not Path(g, "NVIDIA-DLSS-FG-LICENSE.txt").exists(),
+                  "FG restore did not restore old runtime/remove new notice")
+            g = game("fg-not-implicit")
+            check(run(args_for(g, "--scope", "vr", "--all"))[0] == 0 and
+                  not Path(g, "nvngx_dlssg.dll").exists(), "--all implicitly installed FG")
+            g = game("fg-wrong-pin")
+            before = tree(g)
+            Path(root, "build", "nvngx_dlssg.dll").write_bytes(b"WRONG-RUNTIME")
+            check(run(args_for(g, "--frame-generation", "--dry-run"))[0] == "refused" and tree(g) == before,
+                  "FG accepted an unpinned runtime")
+            Path(root, "build", "nvngx_dlssg.dll").write_bytes(fg_bytes)
+            Path(root, "build", "NVIDIA-DLSS-FG-LICENSE.txt").write_bytes(b"WRONG-NOTICE")
+            check(run(args_for(g, "--frame-generation", "--dry-run"))[0] == "refused" and tree(g) == before,
+                  "FG accepted an unpinned notice")
+        finally:
+            globals()["FG_RUNTIME_SHA256"], globals()["FG_LICENSE_SHA256"] = old_fg_pins
+            Path(root, "build", "nvngx_dlssg.dll").unlink()
+            Path(root, "build", "NVIDIA-DLSS-FG-LICENSE.txt").unlink()
 
         # --scope both --ini: two settings files, each backed up, the VR payload.
         g = game("both", user_ini=b"[user]\nkeep=1\n")
@@ -3588,6 +3674,8 @@ def _main(argv=None):
                     help="compatibility alias: native runtime is always installed")
     ap.add_argument("--dlss", action="store_true",
                     help="also install build/nvngx_dlss.dll")
+    ap.add_argument("--frame-generation", action="store_true",
+                    help="install the pinned NVIDIA VR Frame Generation runtime and notice")
     ap.add_argument("--xess", action="store_true",
                     help="also install the XeSS-SR runtime and its notices (either scope)")
     ap.add_argument("--fsr4", action="store_true",
@@ -3641,6 +3729,11 @@ def _main(argv=None):
     if args.self_test:
         return _run_self_test_labelled()
 
+    if args.frame_generation and any((args.compile_only, args.native_openxr, args.native_receipt,
+                                     args.native_loader, args.native_runtime, args.restore_native,
+                                     args.retire_stale_native_receipt, args.suspend, args.resume)):
+        ap.error("--frame-generation is only for the standard VR install and --verify-only")
+
     if args.compile_only and (args.retire_stale_native_receipt or args.restore_native or args.suspend
                               or args.resume or args.native_openxr):
         ap.error("--compile-only is for the standard install and --verify-only; "
@@ -3660,6 +3753,8 @@ def _main(argv=None):
     if args.profile is not None:
         print("[edup] --profile is deprecated; use --scope %s" % args.profile)
     scope = args.scope or args.profile or "both"
+    if args.frame_generation and scope == "flat":
+        ap.error("--frame-generation requires --scope vr or both")
 
     if args.keep_backups < 1:
         ap.error("--keep-backups must be at least 1: the newest backup is never pruned")
@@ -3765,7 +3860,8 @@ def _main(argv=None):
                                    include_xess=(args.xess or (args.all and os.path.isfile(xess_source))),
                                    include_fsr4=(args.fsr4 or (args.all and os.path.isfile(fsr4_source))),
                                    include_ini=args.ini, scope=scope,
-                                   keep_backups=args.keep_backups)
+                                   keep_backups=args.keep_backups,
+                                   include_frame_generation=args.frame_generation)
 
 
 def _prune_self_test():

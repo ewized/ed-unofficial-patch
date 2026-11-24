@@ -390,6 +390,24 @@ int wmain(int argc, wchar_t** argv) {
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == 4 && g_latencyCalls.back().mode == Mode::Boost,
               "switching back to VR restores the saved request");
+
+        cfg.set("fix.nvidia_reflex", "off");
+        cfg.set("fix.frame_generation", "2x");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 5 && g_latencyCalls.back().mode == Mode::On,
+              "selecting frame generation requests low latency before the first generated frame");
+        cfg.set("fix.frame_generation", "auto");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 5 && cfg.getString("fix.nvidia_reflex", "") == "off",
+              "a cadence change preserves the saved Off preference without a driver write");
+        cfg.set("fix.frame_generation", "off");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 6 && g_latencyCalls.back().mode == Mode::Off,
+              "disabling frame generation restores the saved Off preference");
+        cfg.set("fix.nvidia_reflex", "boost");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 7 && g_latencyCalls.back().mode == Mode::Boost,
+              "explicit boost remains available with frame generation off");
     }
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
@@ -6587,7 +6605,7 @@ int wmain(int argc, wchar_t** argv) {
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
-    check(g_latencyCalls.size() == 5 && g_latencyCalls.back().device == device.Get() &&
+    check(g_latencyCalls.size() == 8 && g_latencyCalls.back().device == device.Get() &&
           g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
           "closing the XR session withdraws its driver request once");
     edvr::Config::get().set("fix.nvidia_reflex", "on");
@@ -6629,6 +6647,9 @@ int wmain(int argc, wchar_t** argv) {
         using edvr::native_reflex::ModeStatus;
         using edvr::native_reflex::modeStatusForUser;
         using edvr::native_reflex::updateOnGamePresent;
+        auto& cfg = edvr::Config::get();
+        cfg.set("fix.nvidia_reflex", "off");
+        cfg.set("fix.frame_generation", "2x");
         g_reportFrameAvailable = false;
         auto pendingRequest = request;
         pendingRequest.generation = 44;
@@ -6638,18 +6659,21 @@ int wmain(int argc, wchar_t** argv) {
         const size_t whileUnavailable = g_latencyCalls.size();
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == whileUnavailable && modeStatusForUser() == ModeStatus::ConfirmedOff,
-              "a saved On setting cannot enable Reflex before frame-source qualification");
+              "selected frame generation cannot enable Reflex before frame-source qualification");
 
         g_reportFrameAvailable = true;
         updateOnGamePresent(device.Get());
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == whileUnavailable + 1 &&
-              g_latencyCalls.back().mode == edvr::native_reflex::Mode::On && modeStatusForUser() == ModeStatus::ConfirmedOn,
-              "the qualified source enables the saved On mode once");
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::On && modeStatusForUser() == ModeStatus::ConfirmedOn &&
+              cfg.getString("fix.nvidia_reflex", "") == "off",
+              "the qualified source enables the frame generation interlock once and preserves saved Off");
         const size_t beforeClose = g_latencyCalls.size();
         check(pendingTable.close(pendingTable.context) == S_OK && g_latencyCalls.size() == beforeClose + 1 &&
               g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
               "closing after qualification withdraws the owned On mode");
+        cfg.set("fix.frame_generation", "off");
+        cfg.set("fix.nvidia_reflex", "on");
     }
     {
         using edvr::native_reflex::ModeStatus;
