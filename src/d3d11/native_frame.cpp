@@ -37,6 +37,11 @@ std::atomic<uint64_t> g_heldLatches{0};   // TEMPORARY (concourse vr probe): lat
 struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
     uint64_t generation = 0;
+    // Pool slots are published once. Proof readers compare this immutable
+    // identity without borrowing the device or reading mutable mode history.
+    ID3D11Device* lowLatencyIdentity = nullptr;
+    std::atomic<uint64_t> lowLatencyProof{0};
+    std::atomic<uint64_t> lowLatencyQualification{0};
     edvr::native_reflex::ModeHistory lowLatency;
     edvr::native_reflex::FrameDriver* lowLatencyDriver = nullptr; // borrowed from explicit session owner
     DWORD lowLatencyProducerThread = 0;
@@ -74,6 +79,28 @@ constexpr uint64_t kLowLatencyAvailable = uint64_t{1} << 60;
 constexpr uint64_t kLowLatencyNoSession = UINT64_MAX;
 std::atomic<uint64_t> g_lowLatencyStamp{kLowLatencyNoSession};
 std::atomic<edvr::native_reflex::ModeStatus> g_lowLatencyStatus{edvr::native_reflex::ModeStatus::Unavailable};
+std::atomic<const State*> g_lowLatencyProofOwner{nullptr};
+uint64_t g_lowLatencyProofSerial = 0; // native-frame owner under g_mutex
+
+void publishLowLatencyProof(State& state, bool changed) noexcept {
+    using namespace edvr::native_reflex;
+    const auto qualification = fullFrameQualificationEpoch.load(std::memory_order_acquire);
+    if (!changed && availableForUser() && state.lowLatencyProof.load(std::memory_order_relaxed) &&
+        state.lowLatencyQualification.load(std::memory_order_relaxed) != qualification) {
+        state.lowLatencyProof.store(0, std::memory_order_release);
+        const auto result = detail::observe(state.device, state.lowLatency.requested());
+        state.lowLatency.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
+    }
+    const auto mode = state.lowLatency.confirmedMode();
+    if (!state.lowLatencyDriver || !availableForUser() || !state.lowLatency.needsReset() ||
+        !mode || *mode == Mode::Off) {
+        state.lowLatencyProof.store(0, std::memory_order_release);
+    } else if (!state.lowLatencyProof.load(std::memory_order_relaxed)) {
+        state.lowLatencyQualification.store(qualification, std::memory_order_release);
+        state.lowLatencyProof.store(++g_lowLatencyProofSerial, std::memory_order_release);
+        g_lowLatencyProofOwner.store(&state, std::memory_order_release);
+    }
+}
 
 uint64_t lowLatencyConfigStamp() {
     return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile()) |
@@ -98,11 +125,14 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
             mode = forFrameGeneration(requested, selected.enabled());
         }
         if (stamp != lowLatencyConfigStamp()) return;
+        if (state.lowLatency.requested() != mode || state.lowLatency.retryNeeded())
+            state.lowLatencyProof.store(0, std::memory_order_release);
         changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);
     }
     // The Present that changed the mode precedes the new request.
     if (fromPresent && !changed) notePresent(state.lowLatency, state.device, state.generation);
     if (fromPresent) reportFrameSession(state.generation);
+    publishLowLatencyProof(state, changed);
     g_lowLatencyStatus.store(state.lowLatency.status(), std::memory_order_release);
     g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0) |
                                (state.lowLatency.retryNeeded() ? kLowLatencyNeedsRefresh : 0),
@@ -694,6 +724,8 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    state->lowLatencyProof.store(0, std::memory_order_release);
+    g_lowLatencyProofOwner.store(nullptr, std::memory_order_release);
     edvr::native_reflex::stopFrameSession(state->generation);
     state->lowLatencyDriver = nullptr;
     edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
@@ -720,6 +752,16 @@ native_reflex::ModeStatus native_reflex::modeStatusForUser() noexcept {
     return g_lowLatencyStatus.load(std::memory_order_acquire);
 }
 
+uint64_t native_reflex::confirmedFrameGenerationProof(ID3D11Device* device, uint64_t generation) noexcept {
+    const auto* owner = g_lowLatencyProofOwner.load(std::memory_order_acquire);
+    if (!owner || owner->lowLatencyIdentity != device || owner->generation != generation ||
+        !runtimeVrProfile() || graphicsRuntimeDisabled() || !availableForUser()) return 0;
+    const auto token = owner->lowLatencyProof.load(std::memory_order_acquire);
+    if (owner->lowLatencyQualification.load(std::memory_order_acquire) !=
+        fullFrameQualificationEpoch.load(std::memory_order_acquire)) return 0;
+    return token == owner->lowLatencyProof.load(std::memory_order_acquire) ? token : 0;
+}
+
 void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     if (!device) return;
     const auto cached = g_lowLatencyStamp.load(std::memory_order_acquire);
@@ -728,7 +770,9 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
         // The active transport owns the cadence and checks the producer.
         // It can publish new frame-source availability even with stable settings.
         reportFrameSession(0);
-        return;
+        const auto* owner = g_lowLatencyProofOwner.load(std::memory_order_acquire);
+        if (!availableForUser() || !owner || owner->lowLatencyQualification.load(std::memory_order_acquire) ==
+            fullFrameQualificationEpoch.load(std::memory_order_acquire)) return;
     }
     // Foreign Presents cannot advance readbacks or change the saved mode.
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -854,8 +898,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_current || g_used == kPoolSize) return E_PENDING;
     State& state = g_pool[g_used++];
-    state = {};
-    state.device = request->gameDevice;
+    state.device = state.lowLatencyIdentity = request->gameDevice;
     state.generation = request->generation;
     state.active = true;
     g_current = &state;

@@ -194,15 +194,14 @@ Result applyFrameMode(FrameDriver& frameDriver, ID3D11Device* device, Mode mode,
         pending.retry = true;
         return pending;
     }
-    // The game-sleep bit can describe our calls in Off or the preceding XR
-    // session. Continue to check effective mode and interval until we own a
-    // mode request.
+    // The device can retain its game-sleep bit across XR sessions. Admission
+    // to the enrolled enable path also needs confirmed initial Off and an
+    // accepted Sleep in this session.
     const bool ownGameSleep = admission == FirstSleepGate::Admission::Owned;
-    auto result = requestMode(mode, alreadyOwned,
+    const auto result = frameDriver.modeAdmission_.request(mode, alreadyOwned, ownGameSleep,
+        frameDriver.frames_.firstFrame() != 0,
         [&](GetSleepStatus& status) { return readStatus(device, driver, status); },
-        [&](SetSleepMode& params) { return setMode(device, driver, params); },
-        ownGameSleep, true);
-    if (result.setStatus == 0) frameDriver.configured_.store(true, std::memory_order_release);
+        [&](SetSleepMode& params) { return setMode(device, driver, params); });
     if (!ownGameSleep) frameDriver.firstSleep_.finish(false);
     return result;
 }
@@ -278,7 +277,7 @@ void FrameDriver::reportFailure(std::atomic<bool>& logged, const char* event, in
 
 FrameDriver::SleepResult FrameDriver::sleepFrame(uint64_t sourceFrameId) noexcept {
     using namespace detail;
-    if (!configured_.load(std::memory_order_acquire)) return SleepResult::Skipped;
+    if (!modeAdmission_.configured()) return SleepResult::Skipped;
     SleepResult result = SleepResult::Skipped;
     const bool accepted = frames_.sleep(sourceFrameId, [&] {
         const auto admission = firstSleep_.beginSleep();

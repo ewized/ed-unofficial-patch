@@ -23,10 +23,13 @@ enum Consumer : unsigned { Discarded, Unsubmitted, Attaching, Submitted };
 bool complete(uint64_t actual, uint64_t target) noexcept {
     return target && actual != UINT64_MAX && actual >= target;
 }
-bool reusable(unsigned owners, uint64_t ready, uint64_t target, unsigned consumer,
-              uint64_t consumed, uint64_t retireValue) noexcept {
-    return owners == 1 && (!target || complete(ready, target)) &&
-        (consumer == Discarded || (consumer == Submitted && complete(consumed, retireValue)));
+template<class RetirementComplete>
+bool reusable(long owners, uint64_t ready, uint64_t target, const std::atomic<unsigned>& consumer,
+              RetirementComplete retirementComplete) noexcept {
+    if (owners != 1 || (target && !complete(ready, target))) return false;
+    // Retire writes the fence and value while Attaching, then publishes both with Submitted.
+    const auto state = consumer.load(std::memory_order_acquire);
+    return state == Discarded || (state == Submitted && retirementComplete());
 }
 bool sameObject(IUnknown* left, IUnknown* right) noexcept {
     ComPtr<IUnknown> a, b;
@@ -165,14 +168,20 @@ HRESULT WINAPI frameGenerationOutputDiscard(void* opaque) noexcept {
     return static_cast<Token*>(opaque)->lease->consumer.compare_exchange_strong(expected, Discarded,
         std::memory_order_acq_rel) ? S_OK : E_UNEXPECTED;
 }
-HRESULT FrameGenerationOutputTicket::acquireBatch(EdvrFgBatch* output) const noexcept {
-    if (!output || output->size != sizeof(*output) || output->version != EDVR_FG_BATCH_VERSION_3)
-        return E_INVALIDARG;
-    if (!lease || unsafe || !finalFence || !finalValue) return E_FAIL;
+HRESULT FrameGenerationOutputTicket::exportStatus() const noexcept {
+    if (!accepted || !lease || unsafe || !finalFence || !finalValue) return E_FAIL;
+    if (lease->exported.load(std::memory_order_acquire)) return S_FALSE;
     const auto done = finalFence->GetCompletedValue();
     if (done == UINT64_MAX) return DXGI_ERROR_DEVICE_REMOVED;
     if (!complete(done, finalValue)) return S_FALSE;
     if (GetTickCount64() - lease->submittedMs >= lease->timeoutMs) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+    return S_OK;
+}
+HRESULT FrameGenerationOutputTicket::acquireBatch(EdvrFgBatch* output) const noexcept {
+    if (!output || output->size != sizeof(*output) || output->version != EDVR_FG_BATCH_VERSION_3)
+        return E_INVALIDARG;
+    const auto status = exportStatus();
+    if (status != S_OK) return status;
     try {
         auto* token = new Token(lease);
         bool expected = false;
@@ -228,10 +237,9 @@ struct FrameGenerationOutput::Impl {
     bool canReuse(const std::shared_ptr<FrameGenerationOutputLease>& slot) noexcept {
         if (!slot) return true;
         if (slot->unsafe) return false;
-        const auto consumer = slot->consumer.load(std::memory_order_acquire);
-        const auto done = consumer == Submitted ? slot->consumerFence->GetCompletedValue() : 0;
-        return reusable(unsigned(slot.use_count()), fence->GetCompletedValue(), slot->value,
-            consumer, done, slot->consumerValue);
+        return reusable(slot.use_count(), fence->GetCompletedValue(), slot->value, slot->consumer, [&] {
+            return slot->consumerFence && complete(slot->consumerFence->GetCompletedValue(), slot->consumerValue);
+        });
     }
     bool shader() noexcept {
         const HMODULE compiler = systemModule(L"d3dcompiler_47.dll");
@@ -540,6 +548,41 @@ FrameGenerationOutputStatus FrameGenerationOutput::status() const noexcept {
     std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->status;
 }
 
+#ifdef EDVR_FRAME_GENERATION_COORDINATOR_TEST
+bool FrameGenerationOutput::testSeedRetirement(ID3D12Fence* completion,
+    const std::shared_ptr<FrameGenerationInteropLease> (&pins)[kSlots], const EdvrFgBatch (&batches)[kSlots],
+    FrameGenerationOutputTicket (&tickets)[kSlots]) noexcept {
+    if (impl_ || !completion) return false;
+    try {
+        auto data = std::make_unique<Impl>();
+        data->owner = GetCurrentThreadId();
+        data->fence = completion;
+        data->timeoutMs = 5000;
+        data->status.initialized = true;
+        data->status.failure = FrameGenerationOutputFailure::None;
+        data->drained = false;
+        for (unsigned i = 0; i < kSlots; ++i) {
+            auto& slot = data->slots[i];
+            slot = std::make_shared<FrameGenerationOutputLease>();
+            slot->input = pins[i];
+            slot->ready = completion;
+            slot->value = ++data->serial;
+            slot->submittedMs = GetTickCount64();
+            slot->timeoutMs = data->timeoutMs;
+            slot->batch = batches[i];
+            slot->batch.readyValue = slot->value;
+        }
+        data->lastFence = data->serial;
+        data->status.submitted = kSlots;
+        for (unsigned i = 0; i < kSlots; ++i) {
+            tickets[i] = {true, false, completion, data->slots[i]->value, data->slots[i]};
+        }
+        impl_ = data.release();
+        return true;
+    } catch (...) { return false; }
+}
+#endif
+
 #ifdef EDVR_FRAME_GENERATION_OUTPUT_TEST
 unsigned frameGenerationOutputTestProtocol() noexcept {
     unsigned failures = 0;
@@ -554,16 +597,31 @@ unsigned frameGenerationOutputTestProtocol() noexcept {
         check(frameGenerationOutputRetire(token, nullptr, 1) == E_INVALIDARG && lease->consumer.load() == Unsubmitted);
         check(frameGenerationOutputRetire(token, HANDLE(uintptr_t(1)), 0) == E_INVALIDARG && lease->consumer.load() == Unsubmitted);
         check(frameGenerationOutputRetire(token, HANDLE(uintptr_t(1)), UINT64_MAX) == E_INVALIDARG);
-        check(!reusable(1, 4, 4, lease->consumer.load(), 4, 4));
+        unsigned retirementReads = 0;
+        uint64_t consumed = 7;
+        const auto retirementComplete = [&] {
+            ++retirementReads;
+            return complete(consumed, 8);
+        };
+        check(!reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 0);
         check(frameGenerationOutputDiscard(token) == S_OK && lease->consumer.load() == Discarded);
         check(frameGenerationOutputDiscard(token) == E_UNEXPECTED);
-        check(!reusable(2, 4, 4, Discarded, 0, 0));
-        check(!reusable(1, 3, 4, Discarded, 0, 0));
-        check(reusable(1, 4, 4, Discarded, 0, 0));
-        check(!reusable(1, UINT64_MAX, 4, Discarded, 0, 0));
-        check(!reusable(1, 4, 4, Submitted, 7, 8));
-        check(reusable(1, 4, 4, Submitted, 8, 8));
-        check(!reusable(1, 4, 4, Submitted, UINT64_MAX, 8));
+        check(!reusable(2, 4, 4, lease->consumer, retirementComplete));
+        check(!reusable(1, 3, 4, lease->consumer, retirementComplete));
+        check(reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 0);
+        check(!reusable(1, UINT64_MAX, 4, lease->consumer, retirementComplete));
+        // Pause Retire between its compare-exchange and its release-store.
+        // Even a reuse check past the ownership and producer gates must leave its fields alone.
+        lease->consumer.store(Attaching);
+        check(!reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 0);
+        lease->consumer.store(Submitted, std::memory_order_release);
+        check(!reusable(2, 4, 4, lease->consumer, retirementComplete) && retirementReads == 0);
+        check(!reusable(1, 3, 4, lease->consumer, retirementComplete) && retirementReads == 0);
+        check(!reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 1);
+        consumed = 8;
+        check(reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 2);
+        consumed = UINT64_MAX;
+        check(!reusable(1, 4, 4, lease->consumer, retirementComplete) && retirementReads == 3);
         frameGenerationOutputRelease(token);
         check(lease.use_count() == 1);
         FrameGenerationOutputUi ui;

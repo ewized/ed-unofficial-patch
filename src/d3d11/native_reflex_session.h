@@ -14,6 +14,14 @@ struct FrameSession;
 
 // UI reads the last verified session capability without querying COM/NVAPI.
 inline std::atomic<bool> fullFrameAvailable{false};
+inline std::atomic<uint64_t> fullFrameQualificationEpoch{0};
+// The active transport serializes its capability writes. Each edge invalidates
+// evidence retained by consumers, even when they miss the intervening state.
+inline void publishFrameAvailability(bool qualified) noexcept {
+    if (fullFrameAvailable.load(std::memory_order_relaxed) == qualified) return;
+    fullFrameQualificationEpoch.fetch_add(1, std::memory_order_acq_rel);
+    fullFrameAvailable.store(qualified, std::memory_order_release);
+}
 // A runtime transport fault is distinct from initial unavailability. The mode
 // owner observes this latch at its next safe Present and withdraws its request.
 inline std::atomic<bool> fullFrameFaulted{false};

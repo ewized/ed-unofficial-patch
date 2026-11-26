@@ -85,18 +85,36 @@ static void contracts() {
     std::ifstream coordinator("src/d3d11/frame_generation_coordinator.cpp", std::ios::binary);
     check(bool(coordinator), "coordinator source available for producer handoff wiring");
     const std::string body((std::istreambuf_iterator<char>(coordinator)), {});
-    const auto handoff = [](const std::string& code) {
+    const auto function = [&](const char* signature) {
+        const auto start = body.find(signature);
+        const auto end = body.find("\n}", start);
+        check(start != std::string::npos && end != std::string::npos, "coordinator function available for wiring check");
+        return body.substr(start, end - start);
+    };
+    const char* retireCall = "uiLayerFgRetireStorage(context)";
+    auto creation = function("void nativeFgCaptureGuides(");
+    const auto handoff = [&](const std::string& code) {
         const auto init = code.find("if (!made->interop.initialize(init)");
-        const auto retire = code.find("uiLayerFgRetireStorage(context)");
+        const auto retire = code.find(retireCall);
         const auto assign = code.find("c->producer = std::move(made)");
         const auto begin = code.find("c->producer->interop.begin(context");
-        return init < retire && retire < assign && assign < begin &&
-            code.find("uiLayerFgRetireStorage(context)", retire + 1) == std::string::npos;
+        return init < retire && retire < assign && assign < begin && begin != std::string::npos &&
+            code.find(retireCall, retire + 1) == std::string::npos;
     };
-    check(handoff(body), "storage retirement occurs once in new-producer creation before assignment and first begin");
-    auto missing = body; const auto call = missing.find("uiLayerFgRetireStorage(context)");
-    if (call != std::string::npos) missing.erase(call, std::strlen("uiLayerFgRetireStorage(context)"));
-    check(!handoff(missing), "handoff wiring regression detects omitted generation retirement");
+    check(handoff(creation), "storage retirement occurs once in new-producer creation before assignment and first begin");
+    creation.erase(creation.find(retireCall), std::strlen(retireCall));
+    check(!handoff(creation), "handoff wiring regression detects omitted generation retirement");
+
+    const auto entry = function("void nativeFgServiceProducer(");
+    const auto serviceCall = entry.find("serviceProducer(*c)");
+    check(entry.find("generation == c->generation && owner(*c)") < serviceCall && serviceCall != std::string::npos,
+        "producer service requires the current generation and render owner");
+    const auto service = function("bool serviceProducer(");
+    const auto retired = service.find("c.producer.use_count() != 1 || !c.producer->interop.retired()");
+    const auto retireUi = service.find(retireCall);
+    const auto reset = service.find("c.producer.reset()");
+    check(retired < retireUi && retireUi < reset && reset != std::string::npos,
+        "producer service waits for outstanding leases before retiring UI storage and releasing the producer");
 }
 
 using Pixel = std::array<unsigned char, 4>;

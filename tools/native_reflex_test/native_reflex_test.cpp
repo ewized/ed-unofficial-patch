@@ -214,6 +214,128 @@ void reenrollOwnedSleepDevice() {
           "reenrollment never ignores an observed interval");
 }
 
+void unconfirmedEnrollmentOff() {
+    const auto read = [](detail::GetSleepStatus& status) { return driver.read(status); };
+    for (int readbackError : {-1, 0}) {
+        driver = {};
+        detail::FrameModeAdmission enrollment;
+        detail::FrameSleepHistory frames;
+        const auto set = [&](detail::SetSleepMode& params) {
+            const auto code = driver.set(params);
+            if (driver.writes.back() == Mode::Off) {
+                driver.status.lowLatencyMode = 1;
+                driver.readCode = readbackError;
+            }
+            return code;
+        };
+        const auto off = enrollment.request(Mode::Off, false, false, false, read, set);
+        check(off.setStatus == 0 && off.getStatus == readbackError && enrollment.configured() &&
+              (readbackError != 0 || off.readback.lowLatencyMode),
+              "accepted Off with mismatched or unavailable readback still configures Sleep instrumentation");
+        driver.readCode = 0;
+        driver.status.useGameSleep = 1;
+        const bool slept = frames.sleep(1, [] { return true; });
+        const auto enable = enrollment.request(Mode::Boost, false, slept, frames.firstFrame() != 0, read, set);
+        check(slept && enable.setStatus == detail::kUnavailable &&
+              driver.writes == std::vector<Mode>{Mode::Off},
+              "accepted Sleep cannot bypass an enabled baseline without confirmed initial Off");
+    }
+}
+
+void enableAfterEnrolledOff() {
+    const auto read = [](detail::GetSleepStatus& status) { return driver.read(status); };
+    int readbackError = 0;
+    const auto set = [&](detail::SetSleepMode& params) {
+        const int status = driver.set(params);
+        if (status == 0) driver.readCode = readbackError;
+        return status;
+    };
+    detail::FrameModeAdmission enrolled;
+    detail::FrameModeAdmission newSession;
+    detail::FrameSleepHistory frames;
+    detail::FrameSleepHistory noSleep;
+    const auto request = [&](detail::FrameModeAdmission& admission, const detail::FrameSleepHistory& sleeps,
+                             Mode mode, bool ownSleep) {
+        return admission.request(mode, false, ownSleep, sleeps.firstFrame() != 0, read, set);
+    };
+    driver = {};
+    driver.writeCode = -104;
+    check(request(newSession, noSleep, Mode::Off, false).setStatus == -104 && !newSession.configured(),
+          "a failed initial Off leaves the session unconfigured");
+    driver = {};
+    check(request(enrolled, frames, Mode::Off, false).setStatus == 0 && enrolled.configured(),
+          "a clean enrolled device accepts its initial application Off");
+
+    driver.status.lowLatencyMode = 1;
+    check(request(enrolled, frames, Mode::Boost, false).setStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off}, "Off alone cannot bypass an enabled baseline");
+    check(!frames.sleep(10, [] { return false; }) && !frames.firstFrame(),
+          "a failed Sleep supplies no current-session proof");
+    check(request(enrolled, frames, Mode::Boost, true).setStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off}, "retained device Sleep cannot serve as this session's Sleep");
+    check(frames.sleep(11, [] { return true; }), "the enrolled device accepts Sleep in the current session");
+    driver.status.sleepIntervalUs = 16000;
+    driver.status.useGameSleep = 1;
+
+    check(request(newSession, noSleep, Mode::Boost, true).setStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off},
+          "retained device Sleep does not carry enrollment admission to a new session");
+    check(request(newSession, frames, Mode::Boost, true).setStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off}, "Sleep alone cannot bypass an enabled baseline");
+    driver.readCode = -1;
+    check(request(enrolled, frames, Mode::Boost, true).setStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off}, "an unreadable baseline still refuses the setter");
+
+    driver.readCode = 0;
+    driver.writeCode = -104;
+    auto result = request(enrolled, frames, Mode::Boost, true);
+    check(result.setStatus == -104 && result.getStatus == detail::kUnavailable &&
+          driver.writes == std::vector<Mode>{Mode::Off, Mode::Boost},
+          "an enabled baseline cannot substitute for a refused Boost setter");
+
+    driver.writeCode = 0;
+    const unsigned readsBefore = driver.reads;
+    result = request(enrolled, frames, Mode::Boost, true);
+    ModeHistory mode;
+    mode.change(Mode::Boost, true);
+    mode.acceptRequest(result.enabledBaseline);
+    mode.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
+    check(result.setStatus == 0 && result.getStatus == 0 && result.readback.lowLatencyMode &&
+          driver.reads == readsBefore + 2 && driver.writes.back() == Mode::Boost &&
+          mode.needsReset() && mode.confirmedMode() == Mode::Boost,
+          "initial Off and accepted Sleep permit Boost, with confirmation from its fresh readback");
+
+    readbackError = -1;
+    result = enrolled.request(Mode::On, mode.needsReset(), true, frames.firstFrame() != 0, read, set);
+    mode.change(Mode::On, true);
+    mode.acceptRequest(result.enabledBaseline);
+    mode.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
+    check(result.setStatus == 0 && result.getStatus == -1 &&
+          mode.needsReset() && !mode.confirmedMode() && mode.status() == ModeStatus::ReadbackUnavailable,
+          "an accepted enable with unavailable fresh readback requires cleanup and earns no confirmation");
+
+    readbackError = 0;
+    driver.readCode = 0;
+    driver.applyWrites = false;
+    driver.writeCode = -104;
+    updateMode(mode, nullptr, Mode::Off, 7);
+    check(mode.needsReset() && mode.retryNeeded() && mode.status() == ModeStatus::WithdrawalRefused,
+          "refused Off keeps cleanup armed when effective enabled status preceded ownership");
+    driver.writeCode = 0;
+    presents(mode, 4);
+    updateMode(mode, nullptr, Mode::Off, 7);
+    presents(mode, 64);
+    closeMode(mode, nullptr, 7);
+    check(driver.writes == std::vector<Mode>{Mode::Off, Mode::Boost, Mode::Boost, Mode::On, Mode::Off, Mode::Off} &&
+          !mode.needsReset() && !mode.retryNeeded() && mode.status() == ModeStatus::DriverReportsOn,
+          "accepted application Off disarms withdrawal retries while still reporting effective driver On");
+
+    driver.status.useGameSleep = 0;
+    const auto writesBefore = driver.writes.size();
+    check(request(enrolled, frames, Mode::Boost, true).setStatus == detail::kUnavailable &&
+          driver.writes.size() == writesBefore, "fresh baseline must report game Sleep for enrolled enable");
+}
+
 void firstSleepModeRace() {
     using detail::FirstSleepGate;
     using Admission = FirstSleepGate::Admission;
@@ -407,6 +529,8 @@ int main(int argc, char** argv) {
     modeParameters();
     preserveExternalPolicy();
     reenrollOwnedSleepDevice();
+    unconfirmedEnrollmentOff();
+    enableAfterEnrolledOff();
     firstSleepModeRace();
     acceptedAndRefusedRequests();
     delayedCleanup();

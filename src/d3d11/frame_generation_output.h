@@ -34,6 +34,9 @@ struct FrameGenerationOutputTicket {
     ID3D12Fence* finalFence = nullptr;
     uint64_t finalValue = 0;
     std::shared_ptr<FrameGenerationOutputLease> lease;
+    // Non-consuming snapshot. S_OK means acquireBatch can export a fresh,
+    // fenced batch. S_FALSE means pending or already transferred.
+    HRESULT exportStatus() const noexcept;
     // CPU-only/nonblocking. Exactly one successful call transfers one ABI
     // token; S_FALSE means pending/already transferred. Handles and phaseMask
     // are exposed only after the publisher's completion fence actually passes.
@@ -64,6 +67,12 @@ public:
     bool collect() noexcept;
     bool drain(uint32_t timeoutMs = 0) noexcept;
     FrameGenerationOutputStatus status() const noexcept;
+#ifdef EDVR_FRAME_GENERATION_COORDINATOR_TEST
+    // Seed the three pending outputs on the test worker. Fence values 1..3
+    // drive the production collector and readiness checks without a GPU.
+    bool testSeedRetirement(ID3D12Fence*, const std::shared_ptr<FrameGenerationInteropLease> (&pins)[3],
+        const EdvrFgBatch (&batches)[3], FrameGenerationOutputTicket (&tickets)[3]) noexcept;
+#endif
 private:
     struct Impl;
     Impl* impl_ = nullptr;

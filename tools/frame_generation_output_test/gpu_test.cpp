@@ -254,10 +254,17 @@ void run() {
         check(ticket.accepted && !ticket.unsafe && ticket.finalFence && ticket.finalValue, "actual output command submission and final fence");
         check(captured->retire(ticket.finalFence, ticket.finalValue), "source retires ONCE after final HUD fence, never NGX-only");
         EdvrFgBatch batch{}; batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_3;
-        HRESULT acquired = S_FALSE; const auto started = GetTickCount64();
-        while (acquired == S_FALSE && GetTickCount64() - started < 3000) { acquired = ticket.acquireBatch(&batch); if (acquired == S_FALSE) Sleep(1); }
+        auto pending = ticket;
+        ++pending.finalValue; // The next output submission has not been queued.
+        check(pending.exportStatus() == S_FALSE && pending.acquireBatch(&batch) == S_FALSE && !batch.token,
+            "an unsignaled final fence keeps both readiness and token transfer pending");
+        pending = {};
+        HRESULT exportReady = S_FALSE; const auto started = GetTickCount64();
+        while (exportReady == S_FALSE && GetTickCount64() - started < 3000) { exportReady = ticket.exportStatus(); if (exportReady == S_FALSE) Sleep(1); }
+        check(exportReady == S_OK && ticket.exportStatus() == S_OK && !batch.token, "repeated readiness polls leave the batch available");
+        const HRESULT acquired = ticket.acquireBatch(&batch);
         hr(acquired, "acquire actually fenced output"); check(acquired == S_OK && batch.token, "one retained ABI batch transferred");
-        check(ticket.acquireBatch(&batch) == S_FALSE, "batch cannot transfer a second initial token");
+        check(ticket.exportStatus() == S_FALSE && ticket.acquireBatch(&batch) == S_FALSE, "transferred batch cannot advertise readiness or a second initial token");
         const bool hasGenerated = route == 0 || route >= 3;
         check(batch.uiFlags==(hasGenerated?EDVR_FG_UI_NATIVE_COVERAGE:0u),"only generated batches carry independent native-pose UI");
         check(batch.phaseMask == (hasGenerated ? (1u << multiplier) - 1 : 1u), "suppression/error never invents generated readiness");

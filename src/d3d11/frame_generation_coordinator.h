@@ -14,6 +14,8 @@ bool nativeFgAutoRequested() noexcept;
 void nativeFgAutoObserve(const fg_auto::Sample&) noexcept;
 fg_auto::Status nativeFgAutoStatus() noexcept;
 bool nativeFgRequested() noexcept;
+// Explicit Off excludes Auto's native cadence while it measures or recovers.
+bool nativeFgManualOff() noexcept;
 // Passive CPU snapshot for menu/monitor consumers; no resource creation or worker startup.
 // Returns false without a live context, retaining the configured request/state for a waiting UI.
 bool nativeFgStatusSnapshot(EdvrFgStatus*) noexcept;
@@ -23,6 +25,10 @@ HRESULT nativeFgAcquire(const EdvrFgRequest*, EdvrFgTable*) noexcept;
 // before COM, allocation, clocks or worker startup. beginTemporal is CPU-only;
 // all eye/guide/door hooks run on the validated temporal render owner.
 void nativeFgBeginTemporal(const EdvrNativeTemporalFrame&, bool reset, bool supported) noexcept;
+void nativeFgTemporalUnavailable(uint64_t generation) noexcept;
+// The active temporal render owner services fence-backed producer retirement
+// even while the session is presenting untreated native frames.
+void nativeFgServiceProducer(uint64_t generation) noexcept;
 void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source) noexcept;
 void nativeFgAfterTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* output) noexcept;
 bool nativeFgGuideEye(ID3D11Texture2D* exactSource, unsigned& anatomicalEye) noexcept;

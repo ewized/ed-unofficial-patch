@@ -1247,10 +1247,11 @@ void sourcePins(const std::string& root) {
   const size_t none = std::string::npos;
   // FrameBoundary: the hold is INSIDE the timed scope, the report follows it; the empty ends are reported too.
   const size_t scope = at(boundary, "{ SubmissionWallScope measured(&endFrameMs_);\n      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});\n      sink_.holdEndFrame(); }");
-  const size_t report = at(boundary, "sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_});");
+  const size_t layers = at(boundary, "end.layerCount = pixels ? (withOverlay ? 2u : 1u) : 0u; end.layers = pixels ? headers : nullptr;");
+  const size_t report = at(boundary, "sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});");
   const size_t scene = at(boundary, "if (!background) sink_.sceneFinished(pixels, lastResult_);");
-  check(scope != none && report != none && scene != none && scope < report && report < scene,
-        "G1.boundary: finish() holds inside the timed xrEndFrame scope, then reports the call, then tells the scene it finished");
+  check(layers != none && scope != none && report != none && scene != none && layers < scope && scope < report && report < scene,
+        "G1.boundary: finish() holds inside the timed xrEndFrame scope, reports the submitted overlay and call, then tells the scene it finished");
   check(at(boundary, "lastResult_ = endEmpty(frame_);") != none && at(boundary, "const auto ended = endEmpty(scratch);") != none &&
             at(boundary, "{ SubmissionWallScope measured(&ms); r = session_.end(frame, empty, {false, false}); }\n    sink_.endFrameReturned({sequence, ms, lastPeriod_, shouldRender, false, false, turbo_, r});") != none,
         "G1.boundary: the empty ends clear() and drain() make are timed and reported through the same hook");

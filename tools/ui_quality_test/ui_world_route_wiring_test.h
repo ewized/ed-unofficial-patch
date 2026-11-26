@@ -322,10 +322,11 @@ void testWiringDoor() {
           "begin(): the eye shift is advertised only while no map is open and the route does not own the next frame (the gate gains one lock-free read)");
     check(countOf(afterui::squeeze(temporalText), "vrWorldRouteOwnsNextFrame()") == 1, "...and that is the only place native_temporal asks");
     const std::string treat = bodyOf(temporalText, "HRESULT WINAPI treat(void* p,uint64_t seq,", "native_temporal treat()");
-    reportOrder(inOrder(treat, {"floorOutput(*s,eye,w,h,outW,outH);", "if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){s->treated[eye]=true;returnS_OK;}",
+    reportOrder(inOrder(treat, {"floorOutput(*s,eye,w,h,outW,outH);", "if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){"
+                                "edvr::nativeFgTemporalUnavailable(s->generation);s->treated[eye]=true;returnS_OK;}",
                                 "s->verdictPending[eye]", "void*raw=edvrTemporalAa("},
                         &missing),
-                missing, "treat(): the layer-only branch sits after the output sizing (the served floor's cut included) and before the history and the pass, and answers S_OK");
+                missing, "treat(): after output sizing, the layer-only branch reports temporal input unavailable to frame generation and answers S_OK before updating history");
     check(!has(treat.substr(0, treat.find("void*raw=edvrTemporalAa(")), "s->continuity[eye]=") && !has(treat.substr(0, treat.find("if(layerOnlyTreat(")), "hst.valid=true"),
           "...and leaves the eye's continuity alone (a later eye-route frame finds it broken and resets the history)");
     const std::string helper = bodyOf(temporalText, "bool layerOnlyTreat(State& s,", "layerOnlyTreat");

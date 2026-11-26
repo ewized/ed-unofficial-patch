@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 #include <cmath>
 #include <exception>
+#include <optional>
 #include <thread>
 #include <openxr/openxr.h>
 
@@ -24,6 +25,11 @@ class NativeFgClient final {
     unsigned next=0;
     bool ready=false;
   };
+  struct PollCounts {
+    uint64_t noExport=0,priorImportPending=0,futurePose=0,providerFencePending=0;
+    uint64_t imported=0,behindBeforeCopy=0,textureOpens=0,eyeCopies=0;
+  };
+  const PollCounts& pollCounts() const {return counts_;}
   ~NativeFgClient() {
     close(0);
     // Like EyeCapture's owner contract: ModuleBackend retains a whole failed
@@ -81,26 +87,31 @@ class NativeFgClient final {
     return S_OK;
   }
   // A pending, not-yet-signalled provider fence is held without a GPU wait.
-  // Once ready, each aliased source is opened/validated before ANY GPU read.
+  // S_OK publishes either private images or a handle-free behind receipt.
+  // Only batches still eligible for display open textures and submit reads.
   HRESULT poll(uint64_t generation,uint64_t reference,uint64_t config,unsigned multiplier,
-               uint32_t width,uint32_t height,XrTime now) {
+               uint32_t width,uint32_t height,XrTime now,uint64_t history,uint64_t displayed,
+               std::optional<EdvrFgBatch>& behind) {
+    behind.reset();
     if(quarantined_)return E_PENDING;
     if(!onOwner()||!table_.context||!device_)return S_FALSE;
     if(!nativeFgFixedMultiplier(multiplier))return E_INVALIDARG;
-    const HRESULT collected=collectImportPins();if(collected!=S_OK)return collected;
+    const HRESULT collected=collectImportPins();
+    if(collected==S_FALSE)++counts_.priorImportPending;
+    if(collected!=S_OK)return collected;
     if(images_.ready)return S_FALSE;
     if(!pending_.token) {
       pending_={sizeof(pending_),EDVR_FG_BATCH_VERSION_3};
       const HRESULT hr=table_.poll(table_.context,&pending_);
-      if(hr!=S_OK){pending_={};return hr;}
+      if(hr!=S_OK){if(hr==S_FALSE)++counts_.noExport;pending_={};return hr;}
     }
     const auto& b=pending_;
     const unsigned full=(1u<<multiplier)-1u;
     if(b.size!=sizeof(b)||b.version!=EDVR_FG_BATCH_VERSION_3||!b.token||
-       b.generation!=generation||b.referenceGeneration!=reference||b.configGeneration!=config||!b.historyGeneration||
+       b.generation!=generation||b.referenceGeneration!=reference||b.configGeneration!=config||!history||b.historyGeneration!=history||
        !b.currentSequence||(b.generatedCount&&b.currentSequence<=b.previousSequence)||b.multiplier!=multiplier||
        (b.phaseMask!=1u&&b.phaseMask!=full)||b.generatedCount!=((b.phaseMask==1u)?0u:multiplier-1u)||
-       b.width!=width||b.height!=height||!width||!height||
+       b.width!=width||b.height!=height||!width||!height||b.format!=DXGI_FORMAT_R8G8B8A8_UNORM||
        b.adapterLuidLow!=luid_.LowPart||b.adapterLuidHigh!=luid_.HighPart||
        !b.readyFence||!b.readyValue||b.currentPoseDisplayTime<=0||
        now-b.currentPoseDisplayTime>500000000||b.currentPoseDisplayTime-now>500000000||
@@ -109,58 +120,61 @@ class NativeFgClient final {
        (b.uiFlags!=0&&b.uiFlags!=EDVR_FG_UI_NATIVE_COVERAGE)||b.reserved||
        (b.uiFlags&&(!b.generatedCount||!b.uiTextures[0]||!b.uiTextures[1]))||
        (b.uiFlags&&(!b.nativeWorldTextures[0]||!b.nativeWorldTextures[1]))||
-       (!b.uiFlags&&(b.uiTextures[0]||b.uiTextures[1]||b.nativeWorldTextures[0]||b.nativeWorldTextures[1])))return reject(E_INVALIDARG);
-    if(b.currentPoseDisplayTime>now)return S_FALSE;
-    if(retiredValue_>=UINT64_MAX-1)return reject(E_UNEXPECTED);
+       (!b.uiFlags&&(b.uiTextures[0]||b.uiTextures[1]||b.nativeWorldTextures[0]||b.nativeWorldTextures[1])))return discardPending(E_INVALIDARG);
+    if(!validTextureHandles(b))return discardPending(E_INVALIDARG);
+    if(b.currentPoseDisplayTime>now){++counts_.futurePose;return S_FALSE;}
+    if(retiredValue_>=UINT64_MAX-1)return discardPending(E_UNEXPECTED);
     Microsoft::WRL::ComPtr<ID3D11Fence> ready;
-    HRESULT hr=device5_->OpenSharedFence(b.readyFence,IID_PPV_ARGS(&ready));if(FAILED(hr))return reject(hr);
+    HRESULT hr=device5_->OpenSharedFence(b.readyFence,IID_PPV_ARGS(&ready));if(FAILED(hr))return discardPending(hr);
     const uint64_t completed=ready->GetCompletedValue();
-    if(completed==UINT64_MAX)return reject(DXGI_ERROR_DEVICE_REMOVED);
-    if(completed<b.readyValue)return S_FALSE;
+    if(completed==UINT64_MAX)return discardPending(DXGI_ERROR_DEVICE_REMOVED);
+    if(completed<b.readyValue){++counts_.providerFencePending;return S_FALSE;}
+    // This endpoint already reached XR. Its provider fence proves completion
+    // of the advertised phases. Discard without opening or reading pixels;
+    // only a successful no-read disposition can return bootstrap evidence.
+    if(b.currentSequence<=displayed) {
+      const auto metadata=metadataOnly(b);
+      hr=discardPending(S_OK);
+      if(hr==S_OK){behind=metadata;++counts_.behindBeforeCopy;}
+      return hr;
+    }
     if(!importPins_.begin(Microsoft::WRL::ComPtr<IUnknown>(ready.Get())))return E_PENDING;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> inputs[EDVR_FG_MAX_PHASES][2];
     Microsoft::WRL::ComPtr<ID3D11Texture2D> nativeUi[2];
     Microsoft::WRL::ComPtr<ID3D11Texture2D> nativeWorld[2];
     Microsoft::WRL::ComPtr<ID3D11Device1> device1;
-    hr=device_.As(&device1);if(FAILED(hr))return reject(hr);
+    hr=device_.As(&device1);if(FAILED(hr))return discardPending(hr);
     for(unsigned phase=0;phase<=b.generatedCount;++phase)for(unsigned eye=0;eye<2;++eye) {
-      if(!b.textures[phase][eye])return reject(E_INVALIDARG);
-      for(unsigned earlier=0;earlier<phase*2+eye;++earlier)
-        if(b.textures[earlier/2][earlier%2]==b.textures[phase][eye])return reject(E_INVALIDARG);
+      ++counts_.textureOpens;
       hr=device1->OpenSharedResource1(b.textures[phase][eye],IID_PPV_ARGS(&inputs[phase][eye]));
-      if(FAILED(hr))return reject(hr);
+      if(FAILED(hr))return discardPending(hr);
       D3D11_TEXTURE2D_DESC desc{};inputs[phase][eye]->GetDesc(&desc);
       if(desc.Width!=width||desc.Height!=height||uint32_t(desc.Format)!=b.format||desc.MipLevels!=1||
          desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality||
-         desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return reject(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(inputs[phase][eye].Get())))return reject(E_OUTOFMEMORY);
+         desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return discardPending(E_INVALIDARG);
+      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(inputs[phase][eye].Get())))return discardPending(E_OUTOFMEMORY);
     }
     if(b.uiFlags)for(unsigned eye=0;eye<2;++eye) {
-      for(unsigned phase=0;phase<=b.generatedCount;++phase)for(unsigned e=0;e<2;++e)
-        if(b.uiTextures[eye]==b.textures[phase][e])return reject(E_INVALIDARG);
-      if(eye&&b.uiTextures[0]==b.uiTextures[1])return reject(E_INVALIDARG);
+      ++counts_.textureOpens;
       hr=device1->OpenSharedResource1(b.uiTextures[eye],IID_PPV_ARGS(&nativeUi[eye]));
-      if(FAILED(hr))return reject(hr);
+      if(FAILED(hr))return discardPending(hr);
       D3D11_TEXTURE2D_DESC desc{};nativeUi[eye]->GetDesc(&desc);
       if(desc.Width!=width||desc.Height!=height||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM||
          desc.MipLevels!=1||desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality)
-        return reject(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeUi[eye].Get())))return reject(E_OUTOFMEMORY);
+        return discardPending(E_INVALIDARG);
+      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeUi[eye].Get())))return discardPending(E_OUTOFMEMORY);
     }
     if(b.uiFlags)for(unsigned eye=0;eye<2;++eye) {
-      for(unsigned phase=0;phase<=b.generatedCount;++phase)for(unsigned e=0;e<2;++e)
-        if(b.nativeWorldTextures[eye]==b.textures[phase][e])return reject(E_INVALIDARG);
-      for(unsigned e=0;e<2;++e)if(b.nativeWorldTextures[eye]==b.uiTextures[e])return reject(E_INVALIDARG);
-      if(eye&&b.nativeWorldTextures[0]==b.nativeWorldTextures[1])return reject(E_INVALIDARG);
+      ++counts_.textureOpens;
       hr=device1->OpenSharedResource1(b.nativeWorldTextures[eye],IID_PPV_ARGS(&nativeWorld[eye]));
-      if(FAILED(hr))return reject(hr);
+      if(FAILED(hr))return discardPending(hr);
       D3D11_TEXTURE2D_DESC desc{};nativeWorld[eye]->GetDesc(&desc);
       if(desc.Width!=width||desc.Height!=height||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM||
          desc.MipLevels!=1||desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality)
-        return reject(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeWorld[eye].Get())))return reject(E_OUTOFMEMORY);
+        return discardPending(E_INVALIDARG);
+      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeWorld[eye].Get())))return discardPending(E_OUTOFMEMORY);
     }
-    hr=context4_->Wait(ready.Get(),b.readyValue);if(FAILED(hr))return reject(hr);
+    hr=context4_->Wait(ready.Get(),b.readyValue);if(FAILED(hr))return discardPending(hr);
     importPins_.readsMayStart();
     bool good=true;
     for(unsigned phase=0;phase<=b.generatedCount&&good;++phase)for(unsigned eye=0;eye<2&&good;++eye) {
@@ -169,13 +183,16 @@ class NativeFgClient final {
       // then performs exactly the normal encoded-eye decode/encode path.
       const vr::Texture_t texture{inputs[phase][eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
       good=images_.phases[phase].capture(vr::EVREye(eye),&texture)==vr::VRCompositorError_None;
+      if(good)++counts_.eyeCopies;
     }
     if(b.uiFlags)for(unsigned eye=0;eye<2&&good;++eye) {
       const vr::Texture_t texture{nativeUi[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
       good=images_.nativeUi.capture(vr::EVREye(eye),&texture)==vr::VRCompositorError_None;
+      if(good)++counts_.eyeCopies;
       if(good){
         const vr::Texture_t worldTexture{nativeWorld[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
         good=images_.nativeWorld.capture(vr::EVREye(eye),&worldTexture)==vr::VRCompositorError_None;
+        if(good)++counts_.eyeCopies;
       }
     }
     // Even a partial copy owns provider GPU reads. Retire, never discard it.
@@ -185,11 +202,7 @@ class NativeFgClient final {
     if(!importPins_.signal(value)){quarantined_=true;return E_UNEXPECTED;}
     const HRESULT retirement=table_.retire(b.token,retiredHandle_,value);
     if(FAILED(retirement)){importPins_.quarantine();quarantined_=true;return retirement;}
-    images_.metadata=b;images_.metadata.token=nullptr;
-    for(auto& pair:images_.metadata.textures)for(auto& handle:pair)handle=nullptr;
-    for(auto& handle:images_.metadata.uiTextures)handle=nullptr;
-    for(auto& handle:images_.metadata.nativeWorldTextures)handle=nullptr;
-    images_.metadata.readyFence=nullptr;
+    images_.metadata=metadataOnly(b);
     table_.release(b.token);pending_={};
     if(!good)return E_FAIL;
     if(!notedBatch_||(images_.metadata.generatedCount&&!notedGenerated_)) {
@@ -201,7 +214,7 @@ class NativeFgClient final {
         (unsigned long long)batch.historyGeneration,(unsigned long long)value);
       notedBatch_=true;if(batch.generatedCount)notedGenerated_=true;
     }
-    images_.next=images_.metadata.generatedCount?1u:0u;images_.ready=true;return S_OK;
+    images_.next=images_.metadata.generatedCount?1u:0u;images_.ready=true;++counts_.imported;return S_OK;
   }
   Images& images(){return images_;}
   // Nonblocking owner-side collection, including status calls while FG is Off.
@@ -219,8 +232,20 @@ class NativeFgClient final {
     if(!onOwner())return E_UNEXPECTED;
     importPins_.invalidate();
     images_.ready=false;
-    if(pending_.token&&!quarantined_)reject(S_FALSE);
+    if(pending_.token&&!quarantined_)discardPending(S_FALSE);
     return table_.context?table_.invalidate(table_.context,reason):S_FALSE;
+  }
+  // Manual Off can release local full-eye copies without closing the
+  // provider. Keep every source and destination alive through import retirement.
+  HRESULT releaseInactiveImages() {
+    if(!onOwner())return E_ACCESSDENIED;
+    if(pending_.token)return S_FALSE;
+    const auto collected=collectImportPins();
+    if(collected!=S_OK)return collected;
+    for(auto& image:images_.phases)image.reset();
+    images_.nativeUi.reset();images_.nativeWorld.reset();
+    images_.ready=false;images_.next=0;images_.metadata={};
+    return S_OK;
   }
   // The XR owner stops once. Give already-submitted import fences and the
   // provider's worker one shared deadline to finish, keeping both pinned until
@@ -255,6 +280,29 @@ class NativeFgClient final {
     if(retiredHandle_){CloseHandle(retiredHandle_);retiredHandle_=nullptr;}return S_OK;
   }
  private:
+  static bool validTextureHandles(const EdvrFgBatch& batch) {
+    HANDLE seen[2*EDVR_FG_MAX_PHASES+4]{};unsigned count=0;
+    const auto distinct=[&](HANDLE handle) {
+      if(!handle)return false;
+      for(unsigned i=0;i<count;++i)if(seen[i]==handle)return false;
+      seen[count++]=handle;return true;
+    };
+    for(unsigned phase=0;phase<=batch.generatedCount;++phase)
+      for(auto handle:batch.textures[phase])if(!distinct(handle))return false;
+    if(batch.uiFlags) {
+      for(auto handle:batch.uiTextures)if(!distinct(handle))return false;
+      for(auto handle:batch.nativeWorldTextures)if(!distinct(handle))return false;
+    }
+    return true;
+  }
+  static EdvrFgBatch metadataOnly(EdvrFgBatch batch) {
+    batch.token=nullptr;batch.readyFence=nullptr;
+    for(auto& pair:batch.textures)for(auto& handle:pair)handle=nullptr;
+    for(auto& handle:batch.uiTextures)handle=nullptr;
+    for(auto& handle:batch.nativeWorldTextures)handle=nullptr;
+    return batch;
+  }
+  PollCounts counts_{};
   bool onOwner()const{return owner_==std::this_thread::get_id();}
   template<class T>static bool owned(HMODULE provider,T address) {
     if(!address)return false;HMODULE actual=nullptr;
@@ -270,9 +318,13 @@ class NativeFgClient final {
       if(view.fov[0]>=view.fov[1]||view.fov[3]>=view.fov[2])return false;
     }return true;
   }
-  HRESULT reject(HRESULT result) {
+  HRESULT discardPending(HRESULT result) {
     if(!importPins_.cancelBeforeReads()){importPins_.quarantine();quarantined_=true;return E_PENDING;}
-    if(pending_.token) {const HRESULT hr=table_.discard(pending_.token);if(FAILED(hr)){quarantined_=true;return hr;}table_.release(pending_.token);}
+    if(pending_.token) {
+      const HRESULT hr=table_.discard(pending_.token);
+      if(hr!=S_OK){quarantined_=true;return FAILED(hr)?hr:E_UNEXPECTED;}
+      table_.release(pending_.token);
+    }
     pending_={};return result;
   }
   EdvrFgTable table_{};EdvrFgBatch pending_{};Images images_;

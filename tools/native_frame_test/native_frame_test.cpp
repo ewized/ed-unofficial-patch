@@ -155,6 +155,8 @@ std::vector<uint64_t> g_frameReports;
 bool g_reportFrameAvailable = true;
 bool g_frameTransportAvailable = true;
 bool g_refuseOff = false;
+bool g_deferOn = false;
+bool g_readbackUnavailable = false;
 std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
 }
 
@@ -164,6 +166,9 @@ Result applyFrameMode(FrameDriver&, ID3D11Device* device, Mode mode, bool alread
 }
 Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
     g_latencyCalls.push_back({device, mode, alreadyOwned});
+    if (g_deferOn && mode == Mode::On) {
+        Result result{"fixture_pending"}; result.retry = true; return result;
+    }
     if (g_refuseOff && mode == Mode::Off) return {"fixture_refused", true, -1};
     Result result{"fixture", true, 0, 0};
     result.readback.lowLatencyMode = mode != Mode::Off;
@@ -171,6 +176,7 @@ Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
 }
 Result observe(ID3D11Device*, Mode mode) {
     ++g_latencyObservations;
+    if (g_readbackUnavailable) return {"fixture_readback_unavailable"};
     Result result{"fixture", true, kUnavailable, 0};
     result.readback.lowLatencyMode = mode != Mode::Off;
     return result;
@@ -191,16 +197,16 @@ std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
 }
 FrameDriver* startFrameSession(ID3D11Device* device, uint64_t) {
     g_frameTransport = g_frameTransportAvailable ? openFrameDriver(device) : nullptr;
-    fullFrameAvailable.store(g_frameTransportAvailable && g_reportFrameAvailable);
+    publishFrameAvailability(g_frameTransportAvailable && g_reportFrameAvailable);
     return g_frameTransport.get();
 }
 void stopFrameSession(uint64_t) noexcept {
-    fullFrameAvailable.store(false);
+    publishFrameAvailability(false);
     g_frameTransport.reset();
 }
 void reportFrameSession(uint64_t generation) noexcept {
     g_frameReports.push_back(generation);
-    fullFrameAvailable.store(g_reportFrameAvailable);
+    publishFrameAvailability(g_reportFrameAvailable);
 }
 }
 
@@ -329,11 +335,13 @@ int wmain(int argc, wchar_t** argv) {
           "only one active provider session");
     {
         using edvr::native_reflex::Mode;
+        using edvr::native_reflex::confirmedFrameGenerationProof;
         using edvr::native_reflex::updateOnGamePresent;
         auto& cfg = edvr::Config::get();
         const auto profile = edvr::runtimeProfileValue();
         check(g_latencyCalls.size() == 1 && g_latencyCalls.back().mode == Mode::Off &&
               !g_latencyCalls.back().alreadyOwned, "missing NVIDIA low latency setting defaults to Off in VR");
+        check(!confirmedFrameGenerationProof(device.Get(), request.generation), "confirmed Off grants no frame-generation proof");
 
         cfg.set("fix.nvidia_reflex", "BoOsT");
         std::thread otherThread([&] { updateOnGamePresent(device.Get()); });
@@ -349,6 +357,10 @@ int wmain(int argc, wchar_t** argv) {
         check(g_latencyCalls.size() == 2 && g_latencyCalls.back().device == device.Get() &&
               g_latencyCalls.back().mode == Mode::Boost && !g_latencyCalls.back().alreadyOwned,
               "the enrolled producer applies the first enabled choice without prior mode ownership");
+        const auto boostProof = confirmedFrameGenerationProof(device.Get(), request.generation);
+        check(boostProof && !confirmedFrameGenerationProof(otherDevice.Get(), request.generation) &&
+              !confirmedFrameGenerationProof(device.Get(), request.generation + 1),
+              "confirmed owned Boost grants proof only for the acquired device and session");
 
         for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
         check(g_latencySamples.empty(), "the Present applying the mode is outside the new observation window");
@@ -364,23 +376,28 @@ int wmain(int argc, wchar_t** argv) {
         for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
         check(g_frameReports.size() == reports + 3,
               "stable Presents keep polling frame-source availability after the last readback");
+        check(confirmedFrameGenerationProof(device.Get(), request.generation) == boostProof,
+              "the same owned confirmation retains its proof across Presents and readbacks");
         g_reportFrameAvailable = false;
         reports = g_frameReports.size();
         updateOnGamePresent(device.Get());
         check(g_frameReports.size() == reports + 1 && !edvr::native_reflex::availableForUser(),
               "stable reporting still publishes the session's updated capability");
+        check(!confirmedFrameGenerationProof(device.Get(), request.generation), "lost qualification revokes the proof immediately");
         // Restore the controlled callback result before the next Present so
         // this reporting check does not request a separate mode transition.
         g_reportFrameAvailable = true;
-        edvr::native_reflex::fullFrameAvailable.store(true);
+        edvr::native_reflex::publishFrameAvailability(true);
+        check(!confirmedFrameGenerationProof(device.Get(), request.generation), "renewed qualification cannot reuse the old proof");
         reports = g_frameReports.size();
         cfg.set("fix.nvidia_reflex", "boost");
         updateOnGamePresent(device.Get());
         check(g_frameReports.size() == reports + 1 && g_frameReports.back() == request.generation,
               "a refreshed INI with the same mode reports the enrolled session once");
-        check(g_latencyCalls.size() == stableDriverCalls && g_latencyObservations == stableReadbacks &&
+        const auto renewedProof = confirmedFrameGenerationProof(device.Get(), request.generation);
+        check(renewedProof && renewedProof != boostProof && g_latencyCalls.size() == stableDriverCalls && g_latencyObservations == stableReadbacks + 1 &&
               g_latencySamples == std::vector<unsigned>{4, 16, 64},
-              "continued session reporting does not duplicate driver mode requests or completed readbacks");
+              "new qualification rechecks the owned mode once without repeating its request");
 
         edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
         updateOnGamePresent(device.Get());
@@ -6677,19 +6694,30 @@ int wmain(int argc, wchar_t** argv) {
     }
     {
         using edvr::native_reflex::ModeStatus;
+        using edvr::native_reflex::confirmedFrameGenerationProof;
         using edvr::native_reflex::modeStatusForUser;
         using edvr::native_reflex::updateOnGamePresent;
         auto& config = edvr::Config::get();
         auto retryRequest = request;
         retryRequest.generation = 45;
         EdvrNativeFrameTable retryTable{sizeof(retryTable), EDVR_NATIVE_FRAME_VERSION_1};
-        check(edvrAcquireNativeFrame(&retryRequest, &retryTable) == S_OK && modeStatusForUser() == ModeStatus::ConfirmedOn,
+        g_deferOn = true;
+        check(edvrAcquireNativeFrame(&retryRequest, &retryTable) == S_OK && modeStatusForUser() == ModeStatus::Pending &&
+              !confirmedFrameGenerationProof(device.Get(), retryRequest.generation), "a pending On request grants no proof");
+        g_deferOn = false;
+        updateOnGamePresent(device.Get());
+        check(modeStatusForUser() == ModeStatus::ConfirmedOn && confirmedFrameGenerationProof(device.Get(), retryRequest.generation),
               "the acquired On mode has a matching immediate driver readback");
+        g_readbackUnavailable = true;
+        for (unsigned i = 0; i < 4; ++i) updateOnGamePresent(device.Get());
+        check(modeStatusForUser() == ModeStatus::ReadbackUnavailable && !confirmedFrameGenerationProof(device.Get(), retryRequest.generation),
+              "unavailable later driver readback revokes the owned proof");
+        g_readbackUnavailable = false;
         g_refuseOff = true;
         config.set("fix.nvidia_reflex", "off");
         updateOnGamePresent(device.Get());
         const size_t refused = g_latencyCalls.size();
-        check(modeStatusForUser() == ModeStatus::WithdrawalRefused,
+        check(modeStatusForUser() == ModeStatus::WithdrawalRefused && !confirmedFrameGenerationProof(device.Get(), retryRequest.generation),
               "a refused Off publishes the withdrawal failure for F8");
         g_refuseOff = false;
         std::thread foreign([&] { for (unsigned i = 0; i < 5; ++i) updateOnGamePresent(device.Get()); });

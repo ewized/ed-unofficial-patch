@@ -505,6 +505,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvr::uiLayerMapRunEnd(nullptr);   // the Galaxy Map's run of sprites leaves EDVR's targets bound; this pass reads and sets the output merger (ui_layer.h)
   struct InsideTreat{InsideTreat(){t_insideTreat=true;}~InsideTreat(){t_insideTreat=false;}} insideTreat;
   if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||!source||!output||!outBox||eye>1||seq!=s->sequence||s->treated[eye]||!s->begun||!sameDevice(s->device,source))return E_INVALIDARG;
+  edvr::nativeFgServiceProducer(s->generation);
   if(box&&(!finite(box,4)||box[0]==box[2]||box[1]==box[3]))return E_INVALIDARG;
   if(box) for(int i=0;i<4;++i) if(box[i]<0.0f||box[i]>1.0f)return E_INVALIDARG;
   D3D11_TEXTURE2D_DESC d{};source->GetDesc(&d);
@@ -544,8 +545,9 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     // F202: and the eye's scene depth for the scope lens (the right eye's, while a press of the sights is open): the near plane is this frame's matrix query's when the game made one, else the last one's.
     edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,(s->projectionKnown[eye]&&s->projectionSequence[eye]==seq)?s->nearZ[eye]:s->nearLast[eye]);
   }
-  if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
+  if(!s->currentSettings.on||s->standDown||flipU||flipV){edvr::nativeFgTemporalUnavailable(s->generation);edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){
+    edvr::nativeFgTemporalUnavailable(s->generation);
     if(s->missingProjections++<4)edvr::Log::get().note("native temporal: eye %u sequence %llu has no matrix query for this frame; history invalidated.",eye,(unsigned long long)seq);
     s->treated[eye]=true;s->history[eye]={};
     // A cached game projection is not evidence that the newly advertised
@@ -564,7 +566,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // exactly the size the pass would have handed on (the served floor's cut included) and the layer never re-sizes
   // between the two routes. Everything the pass would have updated for this eye -- its history, its continuity -- is
   // left alone; the next eye-route frame finds the continuity broken and resets.
-  if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){s->treated[eye]=true;return S_OK;}
+  if(layerOnlyTreat(*s,seq,eye,outW?outW:w,outH?outH:h,d.Format,b,output,outBox)){edvr::nativeFgTemporalUnavailable(s->generation);s->treated[eye]=true;return S_OK;}
   if(s->verdictPending[eye]) {
     const uint32_t verdict=edvr::jumpVerdictPacked();
     if(verdict!=s->verdictSeen[eye] || ++s->verdictWaits[eye]>=4) {
@@ -628,7 +630,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvr::nativeFgBeforeTemporalEye(seq,eye,source);
   void* raw=edvrTemporalAa(source,int(eye),b,s->frusta[eye],prev,px,py,pd,pt,pto,s->nearZ[eye],s->farZ[eye],headDegrees,s->currentSettings.motion,s->currentSettings.blend,s->currentSettings.clamp,outW,outH,flags);
   s->treated[eye]=true;
-  if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
+  if(!raw){edvr::nativeFgAfterTemporalEye(seq,eye,nullptr);edvr::nativeFgTemporalUnavailable(s->generation);s->standDown=true;edvr::Log::get().note("native temporal: pass refused eye %u; future jitter disabled, current raw image retains its rendered FOV.",eye);return S_FALSE;}
   ID3D11Texture2D* result=static_cast<ID3D11Texture2D*>(raw);result->AddRef();*output=result;++s->treatedCount;
   // fix.ui_quality's door (ui_layer.h): the pass handed this eye on; the
   // layer arms for the next frame only behind a frame the pass produced.

@@ -195,7 +195,7 @@ static bool wiredMark(const std::string& layer, const std::string& vscreen) {
 // temporal client's mode-off branch tells the scope lens's depth step before it returns, with the picture, the region and the near plane; the step clears the slot first, fills the right
 // eye's from the depth probe's scene depth while a press is open, and gives it the infinite-far near depth.
 static bool wiredOffAa(const std::string& layer, const std::string& nt, const std::string& tp, const std::string& door) {
-    const size_t off = nt.find("if(!s->currentSettings.on){"), call = nt.find("edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,"), early = nt.find("if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated");
+    const size_t off = nt.find("if(!s->currentSettings.on){"), call = nt.find("edvr::temporalPassNoteOffAaSceneDepth(int(eye),source,region,"), early = nt.find("if(!s->currentSettings.on||s->standDown||flipU||flipV){edvr::nativeFgTemporalUnavailable(s->generation);edvrEyeCaptureUntreated");
     const size_t fn = tp.find("void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uint32_t region[4], float nearZ) {");
     if (fn == std::string::npos) return false;
     const std::string body = tp.substr(fn, 5200);

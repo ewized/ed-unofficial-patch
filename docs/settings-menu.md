@@ -308,22 +308,28 @@ after the driver confirms the mode. Turning frame generation off restores the
 saved preference. The installer's **On (required)** label describes the
 configured profile's request. F8 reports the driver's status during a session.
 
-ED-UP checks the device's existing low latency and sleep state before it
-changes the mode. A reported existing policy or an unreadable baseline prevents
-ED-UP from taking ownership. The graphics log records the request and immediate
-result (`native_reflex`). After an accepted request it samples driver status
-after 4, 16 and 64 successful game Presents (`native_reflex_readback`). A
-failed owned withdrawal, or an enabled/unknown final Off readback, schedules
-bounded retries after 4, 16 and 64 subsequent successful Presents. Normal VR
-shutdown retains one final Off attempt. F8 shows driver proof or failure
-separately from the saved choice.
+An existing driver policy or an unreadable baseline blocks initial Reflex
+enrollment. Once the driver has confirmed the initial **Off** request and
+accepted ED-UP's Sleep call in that session, a later readback with game Sleep
+active can permit ED-UP to send an **On** or **On + Boost** request. ED-UP
+reads the driver mode again after the request to confirm the effective state.
+The graphics log records each request and immediate result (`native_reflex`)
+and samples accepted requests after 4, 16 and 64 successful game Presents
+(`native_reflex_readback`).
 
-The driver reports the effective low latency bit. Boost is recorded as a
-request, and its effect would need a GPU clock measurement. The feature uses
-NVAPI mode controls, per-frame Sleep, latency markers and latency reports.
-OpenXR continues to pace the headset. See the [frame timing and measurement
-limits](input-latency.md#reflex-frame-timing). [NVIDIA's NVAPI
-reference](https://docs.nvidia.com/nvapi/group__dx.html)
+While ED-UP owns the request, a refused **Off** request or a final readback
+that reports **On** or is unreadable schedules retries after 4, 16 and 64
+subsequent successful Presents. Normal VR shutdown makes a final **Off**
+attempt if ED-UP still owns the request. If the driver already reported
+effective **On** before ED-UP enabled low latency through the session check
+above, an accepted **Off** request ends ED-UP's retries and cleanup. The
+driver can still report **On**, and F8 displays that result.
+
+The driver reports the effective low latency bit. The log records the Boost
+request, and measuring its effect requires GPU clock data. Reflex markers and
+reports cover application and GPU timing. Measuring physical head motion to
+headset display requires a separate measurement. OpenXR continues to pace the
+headset. [NVIDIA Reflex SDK integration guide](https://github.com/NVIDIA-RTX/REFLEX/blob/main/NVIDIA%20Reflex%20SDK%20Integration%20Guide.pdf), [NVIDIA NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
 
 ### XeSS Frame Generation rows (2026-11-12)
 

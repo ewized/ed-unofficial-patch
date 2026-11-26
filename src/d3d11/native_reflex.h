@@ -63,6 +63,10 @@ enum class ModeStatus : uint8_t {
 // Snapshot of the current session's driver evidence for the settings menu.
 ModeStatus modeStatusForUser() noexcept;
 
+// Zero unless this exact native session owns a driver-confirmed enabled mode
+// and its full frame transport is qualified. A renewed confirmation has a new token.
+uint64_t confirmedFrameGenerationProof(ID3D11Device*, uint64_t generation) noexcept;
+
 inline constexpr const char* kModeUnavailableHint =
     "On and On + Boost need supported NVIDIA VR and an eye view under Mirror window > Image. Off remains available.";
 
@@ -138,8 +142,16 @@ public:
         retryNeeded_ = true;
     }
 
-    void acceptRequest() noexcept {
-        if (requested_ != Mode::Off) needsReset_ = true;
+    void acceptRequest(bool enabledBaseline = false) noexcept {
+        if (requested_ != Mode::Off) {
+            needsReset_ = true;
+            enabledBeforeOwnership_ |= enabledBaseline;
+        } else if (enabledBeforeOwnership_) {
+            // Off withdrew our request. The effective driver mode can still
+            // be enabled by the policy observed before ownership.
+            needsReset_ = false;
+            enabledBeforeOwnership_ = false;
+        }
         presents_ = 0;
         observing_ = true;
     }
@@ -195,6 +207,7 @@ private:
     bool noted_ = false;
     bool frameDriver_ = false;
     bool needsReset_ = false;
+    bool enabledBeforeOwnership_ = false;
     bool observing_ = false;
     bool retryNeeded_ = false;
 };
@@ -363,6 +376,7 @@ struct Result {
     int getStatus = kUnavailable;
     GetSleepStatus readback{};
     bool retry = false;
+    bool enabledBaseline = false;
 };
 
 // Until our first accepted Sleep, a mode baseline and the vendor Sleep call
@@ -396,8 +410,8 @@ private:
     std::atomic<Activity> activity_;
 };
 
-// Only the game-sleep bit can be explained by an accepted ED-UP Sleep on
-// this device. An enabled mode or a nonzero interval remains external policy.
+// During cold enrollment, refuse an unexplained enabled mode, interval, or
+// game-sleep bit. Only accepted ED-UP Sleep can explain a stale game-sleep bit.
 constexpr bool hasExternalDriverPolicy(const GetSleepStatus& status, bool ownGameSleep) noexcept {
     return status.lowLatencyMode || status.sleepIntervalUs ||
            (status.useGameSleep && !ownGameSleep);
@@ -420,11 +434,12 @@ void readMode(Result& result, Mode mode, Read read) {
     }
 }
 
-// Before taking ownership, leave existing game or driver policy alone.
-// GetSleepStatus cannot recover the previous Boost or optimization parameters.
+// Require a readable baseline before taking ownership. An effective mode
+// and the last Sleep interval can change after our own enrollment and Sleep.
+// https://github.com/NVIDIA/nvapi/blob/main/nvapi.h#L16662-L16689
 template<class Read, class Set>
 Result requestMode(Mode mode, bool alreadyOwned, Read read, Set set,
-                   bool ownGameSleep = false, bool optimizeMarkers = false) {
+                   bool ownGameSleep = false, bool optimizeMarkers = false, bool enrolledWithSleep = false) {
     Result result{"set_failed", true};
     if (!alreadyOwned) {
         result.readback.version = version1(sizeof(result.readback));
@@ -434,8 +449,11 @@ Result requestMode(Mode mode, bool alreadyOwned, Read read, Set set,
             return result;
         }
         if (hasExternalDriverPolicy(result.readback, ownGameSleep)) {
-            result.reason = "existing_driver_policy";
-            return result;
+            if (!enrolledWithSleep || !result.readback.useGameSleep || mode == Mode::Off) {
+                result.reason = "existing_driver_policy";
+                return result;
+            }
+            result.enabledBaseline = result.readback.lowLatencyMode != 0;
         }
     }
     auto params = modeParameters(mode, optimizeMarkers);
@@ -446,6 +464,33 @@ Result requestMode(Mode mode, bool alreadyOwned, Read read, Set set,
     if (result.setStatus == 0) readMode(result, mode, read);
     return result;
 }
+
+// Mode admission belongs to this enrollment. The provider serializes mode
+// updates and the game thread reads configured() before calling Sleep.
+class FrameModeAdmission {
+public:
+    bool configured() const noexcept {
+        return initialMode_.load(std::memory_order_acquire) != InitialMode::Unconfigured;
+    }
+
+    template<class Read, class Set>
+    Result request(Mode mode, bool alreadyOwned, bool ownGameSleep, bool sleptThisSession, Read read, Set set) {
+        const auto initial = initialMode_.load(std::memory_order_relaxed);
+        const bool enrolledWithSleep = initial == InitialMode::ConfirmedOff && ownGameSleep && sleptThisSession;
+        auto result = requestMode(mode, alreadyOwned, read, set, ownGameSleep, true, enrolledWithSleep);
+        if (result.setStatus == 0 && initial == InitialMode::Unconfigured) {
+            const bool confirmedOff = mode == Mode::Off && !alreadyOwned && result.getStatus == 0 &&
+                                      !result.readback.lowLatencyMode;
+            initialMode_.store(confirmedOff ? InitialMode::ConfirmedOff : InitialMode::Other,
+                               std::memory_order_release);
+        }
+        return result;
+    }
+
+private:
+    enum class InitialMode : uint8_t { Unconfigured, ConfirmedOff, Other };
+    std::atomic<InitialMode> initialMode_{InitialMode::Unconfigured};
+};
 
 // Driver adapters. The Windows native-frame rig supplies controlled substitutes.
 Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned);
@@ -465,7 +510,7 @@ public:
     FrameDriver& operator=(const FrameDriver&) = delete;
 
     bool ready() const noexcept {
-        return configured_.load(std::memory_order_acquire) && !frames_.retired();
+        return modeAdmission_.configured() && !frames_.retired();
     }
 
     // Attempt Sleep once per strictly increasing source ID. A true result
@@ -494,7 +539,7 @@ private:
     ID3D11Device* const device_;
     detail::FrameSleepHistory frames_;
     detail::FirstSleepGate firstSleep_;
-    std::atomic<bool> configured_{false};
+    detail::FrameModeAdmission modeAdmission_;
     std::atomic<bool> loggedSleepFailure_{false};
     std::atomic<bool> loggedMarkerFailure_{false};
     std::atomic<bool> loggedReportFailure_{false};
@@ -520,7 +565,7 @@ inline bool updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, ui
         history.deferRequest();
         if (isRetry) return true;
     } else if (result.setStatus == 0) {
-        history.acceptRequest();
+        history.acceptRequest(result.enabledBaseline);
         history.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
     } else if (history.requiresDriver()) {
         history.refuseRequest();

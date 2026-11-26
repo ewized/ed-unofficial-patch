@@ -75,7 +75,7 @@ void faultSession(const std::shared_ptr<FrameSession>& session) noexcept {
     std::lock_guard<std::mutex> lock(capabilityMutex);
     if (!session->active.load(std::memory_order_acquire) ||
         std::atomic_load_explicit(&published(), std::memory_order_acquire) != session) return;
-    fullFrameAvailable.store(false, std::memory_order_release);
+    publishFrameAvailability(false);
     fullFrameFaulted.store(true, std::memory_order_release);
 }
 struct TickState { uint64_t token = 0, generation = 0; };
@@ -380,7 +380,7 @@ HRESULT WINAPI closeProvider(void* context) {
         {
             std::lock_guard<std::mutex> capabilityLock(capabilityMutex);
             if (std::atomic_load_explicit(&published(), std::memory_order_acquire) == session)
-                fullFrameAvailable.store(false, std::memory_order_release);
+                publishFrameAvailability(false);
         }
         std::lock_guard<std::mutex> lock(session->recordsMutex);
         for (auto& frame : session->frames)
@@ -502,7 +502,7 @@ FrameDriver* startFrameSession(ID3D11Device* device, uint64_t generation) {
     auto* borrowed = session->driver.get();
     {
         std::lock_guard<std::mutex> lock(capabilityMutex);
-        fullFrameAvailable.store(false, std::memory_order_release);
+        publishFrameAvailability(false);
         fullFrameFaulted.store(false, std::memory_order_release);
         std::atomic_store_explicit(&published(), std::move(session), std::memory_order_release);
     }
@@ -516,7 +516,7 @@ void stopFrameSession(uint64_t generation) noexcept {
     if (!session || session->generation != generation) return;
     {
         std::lock_guard<std::mutex> lock(capabilityMutex);
-        fullFrameAvailable.store(false, std::memory_order_release);
+        publishFrameAvailability(false);
         fullFrameFaulted.store(false, std::memory_order_release);
         session->active.store(false, std::memory_order_release);
         std::atomic_store_explicit(&published(), std::shared_ptr<FrameSession>{}, std::memory_order_release);
@@ -544,8 +544,8 @@ void reportFrameSession(uint64_t generation) noexcept {
         std::lock_guard<std::mutex> lock(capabilityMutex);
         if (session->active.load(std::memory_order_acquire) &&
             std::atomic_load_explicit(&published(), std::memory_order_acquire) == session)
-            fullFrameAvailable.store(!frameSessionFaulted() && capable &&
-                session->providerAcquired.load(std::memory_order_acquire), std::memory_order_release);
+            publishFrameAvailability(!frameSessionFaulted() && capable &&
+                session->providerAcquired.load(std::memory_order_acquire));
     }
     // Mode availability and SDK markers stay live independently of detailed
     // collection. Copy the ring only for an enabled capture or a health summary.

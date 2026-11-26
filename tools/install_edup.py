@@ -1158,6 +1158,8 @@ def _validate_v2_receipt_in(r):
         want = os.path.abspath(targets[e["key"]])
         if e.get("target") != want or not _under(want, target):
             raise ValueError("unsafe native v2 target")
+        if e["key"] in FG_KEYS:
+            _check_fg_target(want, target)
         if not _valid_hash(e.get("installed_sha256")) or _hash_or_missing(want) != e["installed_sha256"]:
             raise ValueError("active native file changed: " + e["key"])
         backup, before = e.get("backup"), e.get("before_sha256")
@@ -1198,6 +1200,8 @@ def restore_native_v2(receipt_path, dry_run=False):
                 if sha256(path) != entry["installed_sha256"]:
                     raise ValueError("restore snapshot verification failed: " + entry["key"])
             for entry, path in snapshots:
+                if entry["key"] in FG_KEYS:
+                    _check_fg_target(entry["target"], receipt["target"])
                 changed.append((entry, path))
                 if entry["backup"]:
                     shutil.copy2(entry["backup"], entry["target"])
@@ -1211,6 +1215,8 @@ def restore_native_v2(receipt_path, dry_run=False):
             rollback_ok = True
             for entry, path in reversed(changed):
                 try:
+                    if entry["key"] in FG_KEYS:
+                        _check_fg_target(entry["target"], receipt["target"])
                     shutil.copy2(path, entry["target"])
                     if sha256(entry["target"]) != entry["installed_sha256"]:
                         raise ValueError("restore rollback hash mismatch")
@@ -1996,6 +2002,7 @@ DLSS_FAMILY_MODES = ("dlss", "dlaa")
 # repair. Public NVIDIA Streamline 2.14.16 release, NGX FG 310.9.16.
 FG_PAYLOAD = (("frame_generation", "nvngx_dlssg.dll"),
               ("frame_generation_license", "NVIDIA-DLSS-FG-LICENSE.txt"))
+FG_KEYS = frozenset(key for key, _ in FG_PAYLOAD)
 FG_RUNTIME_SHA256 = "8D59D49B36410DD6B62FEF2503A5871D347415BD85D943FA0848563A95DD50C7"
 FG_LICENSE_SHA256 = "3027F23CA5A46DD9CB8183FBD522983A86F64D7DAAC5982912BF9F214671F294"
 
@@ -2309,6 +2316,15 @@ def _equivalent_startup_config(actual, expected):
     return b"\r" not in normalized and normalized == expected
 
 
+def _check_fg_target(destination, target):
+    """FG is written in place when replacing a file. Refuse redirected destinations."""
+    expected = os.path.join(os.path.realpath(target), os.path.basename(destination))
+    if (not _under(destination, target) or os.path.islink(destination)
+            or os.path.normcase(os.path.realpath(destination)) != os.path.normcase(expected)
+            or (os.path.isfile(destination) and os.stat(destination).st_nlink > 1)):
+        raise ValueError("unsafe frame-generation target: %s" % destination)
+
+
 def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                             include_dlss=False, include_xess=False, include_ini=False, scope="both",
                             keep_backups=KEEP_BACKUPS, include_fsr4=False, include_frame_generation=False):
@@ -2331,15 +2347,23 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         errors.append(str(error))
     if include_dlss and not os.path.isfile(os.path.join(build_dir(root), "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(build_dir(root), "nvngx_dlss.dll"))
+    fg_entries = []
     if include_frame_generation:
         if not native:
             errors.append("frame generation requires a VR scope")
-        for (_, name), expected in zip(FG_PAYLOAD, (FG_RUNTIME_SHA256, FG_LICENSE_SHA256)):
-            source = os.path.join(build_dir(root), name)
-            if not os.path.isfile(source):
-                errors.append("missing optional frame-generation source %s" % source)
-            elif sha256(source) != expected:
-                errors.append("%s differs from the pinned NVIDIA release" % name)
+        for (key, name), expected in zip(FG_PAYLOAD, (FG_RUNTIME_SHA256, FG_LICENSE_SHA256)):
+            source = os.path.abspath(os.path.join(build_dir(root), name))
+            destination = os.path.abspath(os.path.join(target, name))
+            try:
+                _check_fg_target(destination, target)
+                if not os.path.isfile(source):
+                    raise ValueError("missing optional frame-generation source %s" % source)
+                if sha256(source) != expected:
+                    raise ValueError("%s differs from the pinned NVIDIA release" % name)
+                fg_entries.append({"key": key, "source": source, "target": destination,
+                                   "installed_sha256": expected})
+            except (OSError, ValueError) as error:
+                errors.append(str(error))
     xess_names = (("xess", "libxess.dll"), ("xess_fg", "libxess_fg.dll"), ("xess_ll", "libxell.dll"),
                   ("xess_license", "INTEL-XESS-LICENSE.txt"),
                   ("xess_third_party", "INTEL-XESS-THIRD-PARTY.txt"))
@@ -2428,13 +2452,15 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                              "\n       ".join(leftovers))
     if verify_only:
         ok = True
-        if include_frame_generation:
-            for _, name in FG_PAYLOAD:
-                source = os.path.join(build_dir(root), name)
-                destination = os.path.join(target, name)
-                if not os.path.isfile(destination) or sha256(destination) != sha256(source):
-                    print("[edup] frame-generation verify mismatch: %s" % destination)
-                    ok = False
+        for e in fg_entries:
+            try:
+                _check_fg_target(e["target"], target)
+                for path in (e["source"], e["target"]):
+                    if _hash_or_missing(path) != e["installed_sha256"]:
+                        raise ValueError("frame-generation verify mismatch: %s" % path)
+            except (OSError, ValueError) as error:
+                print("[edup] %s" % error)
+                ok = False
         for key in payload:
             dst = p[key + "_target"]
             if not os.path.isfile(dst) or sha256(dst) != sha256(p[key]):
@@ -2580,13 +2606,18 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
-    fg_active = FG_PAYLOAD if include_frame_generation else ()
-    for key, name in xess_active + fg_active:
+    for key, name in xess_active:
         src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
         entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
                         "backup": _native_backup_name(dst, tag, stamp) if os.path.isfile(dst) else None,
                         "before_sha256": sha256(dst) if os.path.isfile(dst) else None,
                         "installed_sha256": sha256(src)})
+    fg_keys = {e["key"] for e in fg_entries}
+    for e in fg_entries:
+        dst = e["target"]
+        e["before_sha256"] = _hash_or_missing(dst)
+        e["backup"] = _native_backup_name(dst, tag, stamp) if e["before_sha256"] is not None else None
+        entries.append(e)
     for key, name in fsr4_active:
         src = os.path.join(build_dir(root), name); dst = os.path.join(target, name)
         entries.append({"key": key, "source": os.path.abspath(src), "target": os.path.abspath(dst),
@@ -2691,6 +2722,10 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         for path in (receipt, legacy_receipt):
             if _file_stat_identity(path) != planned_stat[path]:
                 raise ValueError("another install changed %s since this plan; nothing was written" % path)
+        for e in fg_entries:
+            _check_fg_target(e["target"], target)
+            if _hash_or_missing(e["source"]) != e["installed_sha256"]:
+                raise ValueError("frame-generation source changed since preflight: %s" % e["source"])
         if native: os.makedirs(os.path.dirname(p["config"]), exist_ok=True)
         for path, previous in rotations:
             # _rename_no_replace never overwrites: _native_backup_name picked a name no file holds.
@@ -2705,11 +2740,16 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         receipt_owned = True
         for e in entries:
             if e["backup"]:
-                _reserve_backup(e["backup"]); shutil.copy2(e["target"], e["backup"])
-                if sha256(e["backup"]) != e["before_sha256"]: raise ValueError("backup verification failed: %s" % e["key"])
+                _reserve_backup(e["backup"])
                 made.append(e)
+                shutil.copy2(e["target"], e["backup"])
+                if sha256(e["backup"]) != e["before_sha256"]: raise ValueError("backup verification failed: %s" % e["key"])
         for e in entries:
-            if e["key"] == "reflex_license" and e["backup"] is None:
+            if e["key"] in fg_keys:
+                _check_fg_target(e["target"], target)
+                if e["backup"] and _hash_or_missing(e["target"]) != e["before_sha256"]:
+                    raise ValueError("frame-generation target changed since planning: %s" % e["target"])
+            if (e["key"] == "reflex_license" or e["key"] in fg_keys) and e["backup"] is None:
                 # A competing creator owns its file. Journal this path only
                 # after our exclusive open succeeds, even if the copy fails.
                 with open(e["source"], "rb") as source, open(e["target"], "xb") as output:
@@ -2742,11 +2782,13 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
             return 1
         for e in reversed(changed):
             try:
+                if e["key"] in fg_keys:
+                    _check_fg_target(e["target"], target)
                 if e["backup"]: shutil.copy2(e["backup"], e["target"])
                 elif os.path.exists(e["target"]): os.remove(e["target"])
                 if _hash_or_missing(e["target"]) != e["before_sha256"]:
                     raise OSError("rollback verification failed: " + e["key"])
-            except OSError: rollback_ok = False
+            except (OSError, ValueError): rollback_ok = False
         if rollback_ok:
             for e in made:
                 try: os.remove(e["backup"])
@@ -3046,6 +3088,102 @@ def _scope_self_test():
                   Path(g, "nvngx_dlssg.dll").read_bytes() == b"ORIGINAL-FG" and
                   not Path(g, "NVIDIA-DLSS-FG-LICENSE.txt").exists(),
                   "FG restore did not restore old runtime/remove new notice")
+            fg_source = Path(root, "build", "nvngx_dlssg.dll")
+            fg_notice_source = Path(root, "build", "NVIDIA-DLSS-FG-LICENSE.txt")
+            g = game("fg-restore-aliased-destination")
+            link = Path(g, fg_source.name)
+            link.write_bytes(b"ORIGINAL-FG")
+            check(run(args_for(g, "--scope", "vr", "--frame-generation"))[0] == 0,
+                  "FG restore alias fixture install failed")
+            external = Path(tmp, "fg-restore-external.dll")
+            external.write_bytes(fg_bytes)
+            link.unlink()
+            os.link(external, link)
+            before = tree(g)
+            restore = ["--restore-native", os.path.join(g, "edup_native_receipt.json")]
+            check(run(restore + ["--dry-run"])[0] == 1 and tree(g) == before,
+                  "FG restore preview accepted an aliased runtime")
+            check(run(restore)[0] == 1 and tree(g) == before and external.read_bytes() == fg_bytes,
+                  "FG restore wrote through a runtime alias")
+
+            validate_pair = _scope_pe.validate_native_pair
+
+            def swap_before_planning(*args):
+                fg_source.write_bytes(b"SWAPPED-RUNTIME")
+
+            g = game("fg-source-swap")
+            before = tree(g)
+            try:
+                _scope_pe.validate_native_pair = swap_before_planning
+                check(run(args_for(g, "--scope", "vr", "--frame-generation"))[0] == 1 and tree(g) == before,
+                      "FG accepted runtime swapped between preflight and planning")
+            finally:
+                _scope_pe.validate_native_pair = validate_pair
+                fg_source.write_bytes(fg_bytes)
+
+            g = game("fg-verify-swap")
+            args = args_for(g, "--scope", "vr", "--frame-generation")
+            check(run(args)[0] == 0, "FG verify swap fixture install failed")
+            Path(g, fg_source.name).write_bytes(b"SWAPPED-RUNTIME")
+            before = tree(g)
+            try:
+                _scope_pe.validate_native_pair = swap_before_planning
+                check(run(args + ["--verify-only"])[0] == 1 and tree(g) == before,
+                      "FG verify accepted matching unpinned build and installed runtimes")
+            finally:
+                _scope_pe.validate_native_pair = validate_pair
+                fg_source.write_bytes(fg_bytes)
+
+            prior_fg = b"ORIGINAL-FG"
+            write_receipt = _write_new_receipt
+
+            def swap_before_copy(path, journal):
+                write_receipt(path, journal)
+                fg_notice_source.write_bytes(b"SWAPPED-NOTICE")
+
+            g = game("fg-late-source-swap")
+            Path(g, fg_source.name).write_bytes(prior_fg)
+            before = tree(g)
+            try:
+                globals()["_write_new_receipt"] = swap_before_copy
+                check(run(args_for(g, "--scope", "vr", "--frame-generation"))[0] == 1 and tree(g) == before,
+                      "FG late source swap failed to roll back runtime and notice")
+            finally:
+                globals()["_write_new_receipt"] = write_receipt
+                fg_notice_source.write_bytes(fg_notice)
+
+            g = game("fg-competing-create")
+            competing = Path(g, fg_notice_source.name)
+            Path(g, fg_source.name).write_bytes(prior_fg)
+            before = tree(g)
+            foreign = b"COMPETING-NOTICE"
+
+            def create_competing_file(path, journal):
+                write_receipt(path, journal)
+                competing.write_bytes(foreign)
+
+            try:
+                globals()["_write_new_receipt"] = create_competing_file
+                expected = sorted(before + [(competing.name, foreign)])
+                check(run(args_for(g, "--scope", "vr", "--frame-generation"))[0] == 1 and tree(g) == expected,
+                      "FG overwrote or deleted a competing notice or failed to roll back runtime")
+            finally:
+                globals()["_write_new_receipt"] = write_receipt
+
+            g = game("fg-aliased-destination")
+            outside = Path(tmp, "fg-outside-game.dll")
+            outside.write_bytes(b"OUTSIDE")
+            link = Path(g, fg_source.name)
+            try:
+                link.symlink_to(outside)
+            except OSError:
+                # Windows without symbolic-link privilege can still exercise a
+                # shared destination whose writes would escape the game.
+                os.link(outside, link)
+            before = tree(g)
+            check(run(args_for(g, "--scope", "vr", "--frame-generation"))[0] == "refused"
+                  and tree(g) == before and outside.read_bytes() == b"OUTSIDE",
+                  "FG did not refuse a destination aliased outside the game")
             g = game("fg-not-implicit")
             check(run(args_for(g, "--scope", "vr", "--all"))[0] == 0 and
                   not Path(g, "nvngx_dlssg.dll").exists(), "--all implicitly installed FG")

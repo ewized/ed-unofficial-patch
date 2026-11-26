@@ -287,6 +287,10 @@ void releaseDepth(EyeState& e) {
     if (e.depthSrv) { e.depthSrv->Release(); e.depthSrv = nullptr; }
     e.depthRes = nullptr;
 }
+void releaseFgMotion(EyeState& e) {
+    if (e.fgMvUav) { e.fgMvUav->Release(); e.fgMvUav = nullptr; }
+    if (e.fgMv) { e.fgMv->Release(); e.fgMv = nullptr; }
+}
 void releaseDl(EyeState& e) {
     if (e.zPrevUav) { e.zPrevUav->Release(); e.zPrevUav = nullptr; }
     if (e.zPrevSrv) { e.zPrevSrv->Release(); e.zPrevSrv = nullptr; }
@@ -300,8 +304,7 @@ void releaseDl(EyeState& e) {
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
-    if (e.fgMvUav) { e.fgMvUav->Release(); e.fgMvUav = nullptr; }
-    if (e.fgMv) { e.fgMv->Release(); e.fgMv = nullptr; }
+    releaseFgMotion(e);
     if (e.dlDecisionUav) { e.dlDecisionUav->Release(); e.dlDecisionUav = nullptr; }
     if (e.dlDepthUav) { e.dlDepthUav->Release(); e.dlDepthUav = nullptr; }
     if (e.dlColour) { e.dlColour->Release(); e.dlColour = nullptr; }
@@ -3779,6 +3782,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     bool viaCopy = false;
     if (ok) {
         EyeState& e = *eptr;
+        if (e.fgMv && edvr::nativeFgManualOff()) releaseFgMotion(e);
         if (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
             if (e.srcRes != static_cast<void*>(src) || !e.srcSrv) {
                 releaseSrc(e);
@@ -4949,9 +4953,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 } else if (probeTrace && !made) {
                     blendProbeGridRefuse("the pass's own textures were not made this frame");
                 }
-                const bool fgRequested = !amdEngine && !intelEngine && !fsr4Engine && !dittoEngine && edvr::nativeFgRequested();
+                unsigned fgAnatomicalEye = 2;
+                const bool fgEligible = !amdEngine && !intelEngine && !fsr4Engine && !dittoEngine &&
+                    edvr::nativeFgGuideEye(static_cast<ID3D11Texture2D*>(srcTex), fgAnatomicalEye);
                 bool fgMotionReady = false;
-                if (made && fgRequested) {
+                if (made && fgEligible) {
                     ID3D11ComputeShader* fgCs = motionFgShader(ctx, diagnostics, traceReady);
                     if (fgCs && !e.fgMv) {
                         if (!makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
@@ -5221,9 +5227,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         gpuCensusEnd(ctx, GpuCensusSection::DoorUpscaler);
                         usedDlaa = true;
                         e.dlHaveHistory = true;
-                        unsigned fgAnatomicalEye = 2;
-                        if (fgRequested &&
-                            edvr::nativeFgGuideEye(static_cast<ID3D11Texture2D*>(srcTex), fgAnatomicalEye)) {
+                        if (fgEligible) {
                             NativeFgGuides guide;
                             guide.eye = fgAnatomicalEye; guide.internalEye = static_cast<unsigned>(eye);
                             guide.source = static_cast<ID3D11Texture2D*>(srcTex);

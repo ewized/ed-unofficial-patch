@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <utility>
 #include <mutex>
 #include <new>
 #include <stdexcept>
@@ -40,6 +41,7 @@
 #include "native_menu_client.h"
 #include "native_temporal_client.h"
 #include "native_fg_client.h"
+#include "native_fg_admission.h"
 #include "native_fg_schedule.h"
 #include "native_fg_projection_policy.h"
 #include "native_fg_credit.h"
@@ -294,10 +296,17 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFgCreditLoan fgCreditLoan;
   std::shared_ptr<FgCreditRequest> fgCredit;
   std::atomic<bool> fgAvailable{false},fgEnabled{false};
+  bool fgResumedNative=false,fgConsumerAllocated=false;
   bool fgPreparingCredit=false,fgNativeOutstanding=false,fgNativePixels=false,fgFallbackValid=false,fgMenuVisible=false;
   uint32_t fgMultiplier=0,fgAcceptedEyes=0;
   uint64_t fgTick=0,fgNextCredit=0,fgConfig=0,fgHistory=0,fgDisplayedSequence=0;
   uint64_t fgNativePresented=0,fgGeneratedPresented=0,fgRepeated=0,fgEmpty=0,fgRefused=0,fgCredits=0,fgLastLineMs=0;
+  // XR-owner cumulative decisions, sampled alongside successful xrEndFrame counters.
+  uint64_t fgImages[1+unsigned(fghandoff::Images::OutsideWindow)]{};
+  uint64_t fgHandoffs[1+unsigned(fghandoff::Handoff::RecoveryDeferred)]{};
+  uint64_t fgNoRequester=0,fgCreditOutstanding=0,fgCreditSpaced=0,fgCreditOnMiss=0,fgCreditOnPhase=0,fgCreditRefused=0;
+  uint64_t fgPollFailed=0,fgNoRequestOutstanding=0;
+  uint64_t fgPresentationGeneration=0,fgPresentationLastMs=0;
   EdvrNativePresentation presentationCounts{};
   fglifecycle::Reporter fgLifecycle;
   fgbootstrap::Bootstrap fgBootstrap;
@@ -1630,6 +1639,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
     }
+    if(!fgPreparingCredit)fgResumedNative=false;
     if(!fgPreparingCredit&&!poseSeatReady())return vr::VRCompositorError_InvalidTexture;
     // No prior eye remains source-labelled when the next pose/frame can
     // start overwriting the producer's reusable output textures.
@@ -1993,7 +2003,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // so there is nothing left to gain here), the switch, and no earlier
     // pair's finish still outstanding.
     const bool eligible=published==vr::VRCompositorError_None&&pairReady&&
-      separateGraphics()&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
+      separateGraphics()&&!fgResumedNative&&!boundary.turbo()&&frameEndOverlapEnabled&&!pendingFrameEndFinish;
     const bool deferred=eligible&&service.submit([this]{finishPendingFrameEnd();},{},OwnerJobSite::FrameEndFinish);
     if(deferred){
       pendingFrameEndFinish=true;pendingFrameEndEye=eye;pendingFrameEndSequence=timingSequence;++frameEndOverlapCount;

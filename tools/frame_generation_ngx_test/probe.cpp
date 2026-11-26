@@ -133,7 +133,7 @@ bool followsMotion(const EdgeMeasurement& measured,const EdgeMeasurement& prior,
 // halfway image must pass while either endpoint, a swapped eye, a repeated
 // intermediate and a blend of the two endpoints must fail.
 bool edgeCheckSelfTest(){
-    constexpr int width=256,barWidth=64,previous=64,current=96;
+    static constexpr int width=256,barWidth=64,previous=64,current=96;
     const auto rowAt=[](int left,unsigned eye){
         std::array<uint8_t,width*4> row{};
         for(int x=0;x<width;++x){
@@ -170,7 +170,7 @@ void drawInputs(ID3D12GraphicsCommandList* list,D3D12_CPU_DESCRIPTOR_HANDLE hand
     list->ClearRenderTargetView(handle,foreground[plane],1,&rect);
 }
 
-FrameGenerationCamera camera(unsigned w,unsigned h,unsigned guideWidth,unsigned guideHeight,unsigned eye){
+FrameGenerationCamera camera(unsigned w,unsigned h,unsigned eye){
     FrameGenerationCamera c{};c.cameraNear=.1f;c.cameraFar=1000.f;c.cameraFOV=1.2f;c.cameraAspectRatio=float(w)/float(h);
     const float sy=1.f/std::tan(c.cameraFOV*.5f),sx=sy/c.cameraAspectRatio;
     c.cameraViewToClip[0][0]=sx;c.cameraViewToClip[1][1]=sy;
@@ -183,7 +183,9 @@ FrameGenerationCamera camera(unsigned w,unsigned h,unsigned guideWidth,unsigned 
     const float nearObjectDistance=c.cameraViewToClip[3][2]/(.25f+c.cameraViewToClip[2][2]);
     const float eyeOffset=4.f*nearObjectDistance/(float(h)*sy);
     c.cameraPos[0]=eye==0?-eyeOffset:eyeOffset;c.cameraUp[1]=c.cameraRight[0]=1;c.cameraFwd[2]=-1;
-    c.mvecScale[0]=1.f/guideWidth;c.mvecScale[1]=1.f/guideHeight;c.depthInverted=true;
+    // drawInputs writes current-to-previous motion in guide pixels. The DLSS-G
+    // Programming Guide specifies unit scale for pixel-valued inputs.
+    c.mvecScale[0]=c.mvecScale[1]=1.f;c.depthInverted=true;
     c.motionVectorsInvalidValue=65504.f;c.cameraMotionIncluded=true;return c;
 }
 bool texture(ID3D12Device* device,unsigned w,unsigned h,DXGI_FORMAT format,ComPtr<ID3D12Resource>& out){
@@ -269,7 +271,7 @@ int wmain(int argc,wchar_t** argv){
         if(FAILED(queue->Signal(producer.Get(),++producerValue)))return 6;
         producerGuard.value=producerValue;producerGuard.unfenced=false;
         FrameGenerationNgxInput input;input.sequence=frame;input.historyGeneration=1;input.pairedFullEyeGuides=true;input.producerFence=producer.Get();input.producerValue=producerValue;input.inputLease=resources;
-        for(unsigned e=0;e<2;++e){input.eyes[e].color=resources->resources[e][0].Get();input.eyes[e].depth=resources->resources[e][1].Get();input.eyes[e].motion=resources->resources[e][2].Get();input.eyes[e].camera=camera(width,height,guideWidth,guideHeight,e);input.eyes[e].camera.reset=frame==1;}
+        for(unsigned e=0;e<2;++e){input.eyes[e].color=resources->resources[e][0].Get();input.eyes[e].depth=resources->resources[e][1].Get();input.eyes[e].motion=resources->resources[e][2].Get();input.eyes[e].camera=camera(width,height,e);input.eyes[e].camera.reset=frame==1;}
         auto ticket=backend.submit(input);auto completion=ticket.poll();
         while(completion==FrameGenerationNgxCompletion::Pending){Sleep(1);completion=ticket.poll();}
         const auto s=backend.status();std::printf("native=%llu requested=%ux indexedFrames=%u evalAccepted=%u completion=%u evaluations=%llu failure=%u ngx=0x%08x warmup=%u reset_reasons=0x%02x\n",

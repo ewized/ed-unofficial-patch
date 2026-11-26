@@ -131,6 +131,16 @@ class FrameBoundary final {
     if (ownerThread() && session_.frameOpen() && !accepted_[0] && !accepted_[1])
       geometryReady_ = ready;
   }
+  // Resume an independently granted native credit in this real XR slot.
+  // An eye already captured on the owner needs no second producer copy.
+  bool resumeNativeCredit(const Frame& slot,unsigned admittedEyes,bool geometryReady) {
+    if(!ownerThread()||failed_||!session_.frameOpen()||turbo_||deferred_||resumedCredit_||accepted_[0]||accepted_[1]||
+       !slot.sequence||slot.sequence!=frame_.sequence||slot.generation!=frame_.generation||slot.owner!=frame_.owner||
+       admittedEyes>2)return false;
+    resumedCredit_=true;geometryReady_=geometryReady;
+    accepted_[0]=(admittedEyes&1u)!=0;accepted_[1]=(admittedEyes&2u)!=0;
+    return true;
+  }
   // Captures one eye and marks it accepted; never calls finish(). pairReady
   // is true once both eyes are in, at which point the caller may complete the
   // pair with finishPair() -- synchronously, right away, or deferred past
@@ -363,7 +373,7 @@ class FrameBoundary final {
       lastResult_ = endEmpty(frame_);
       if (lastResult_ != XR_SUCCESS) { failed_ = true; return lastResult_; }
     }
-    accepted_[0] = accepted_[1] = geometryReady_ = false;
+    accepted_[0] = accepted_[1] = geometryReady_ = resumedCredit_ = false;
     return XR_SUCCESS;
   }
 
@@ -457,7 +467,7 @@ class FrameBoundary final {
   const std::thread::id thread_;
   FramePacer* pacer_ = nullptr;
   Frame frame_{};
-  bool accepted_[2]{}, geometryReady_ = false, failed_ = false;
+  bool accepted_[2]{}, geometryReady_ = false, failed_ = false, resumedCredit_ = false;
   XrResult lastResult_ = XR_SUCCESS;
   double endFrameMs_ = 0;
   // Turbo bookkeeping. turbo_ is latched per waitAndBegin call from the

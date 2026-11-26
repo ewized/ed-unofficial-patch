@@ -5,8 +5,11 @@
 namespace edvr {
 void nativeFgSetRequestedMultiplier(uint32_t) noexcept {}
 bool nativeFgRequested() noexcept { return false; }
+bool nativeFgManualOff() noexcept { return true; }
 HRESULT nativeFgAcquire(const EdvrFgRequest*, EdvrFgTable*) noexcept { return E_NOINTERFACE; }
 void nativeFgBeginTemporal(const EdvrNativeTemporalFrame&, bool, bool) noexcept {}
+void nativeFgTemporalUnavailable(uint64_t) noexcept {}
+void nativeFgServiceProducer(uint64_t) noexcept {}
 void nativeFgBeforeTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
 void nativeFgAfterTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
 bool nativeFgGuideEye(ID3D11Texture2D*, unsigned&) noexcept { return false; }

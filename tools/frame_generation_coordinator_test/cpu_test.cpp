@@ -1,5 +1,6 @@
 #include "../../src/d3d11/frame_generation_coordinator.h"
 #include "../../src/d3d11/frame_generation_ngx.h"
+#include "../../src/d3d11/native_reflex.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/scene_projection_capture.h"
 #include "../../src/common/log.h"
@@ -17,6 +18,13 @@ extern "C" HRESULT WINAPI D3DCompile(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_M
 // These link-time tripwires guarantee that CPU fixtures cannot start a worker,
 // query NGX, capture HUD, or replace the real color/interop/output adapters.
 namespace edvr {
+namespace {
+uint64_t fixtureReflexProof = 0;
+}
+void nativeFgTestSetReflexProof(uint64_t proof) noexcept {fixtureReflexProof = proof;}
+uint64_t native_reflex::confirmedFrameGenerationProof(ID3D11Device* device, uint64_t generation) noexcept {
+    return device == reinterpret_cast<ID3D11Device*>(uintptr_t(1)) && generation == 7 ? fixtureReflexProof : 0;
+}
 Log& Log::get() {static Log* instance = new Log; return *instance;}
 void Log::note(const char*, ...) {}
 FrameGenerationNgx::~FrameGenerationNgx() {if (impl_) std::abort();}
