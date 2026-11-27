@@ -210,8 +210,9 @@ ST_NOW = "    uint32_t holdNowMs() const { return active_ ? static_cast<uint32_t
 ST_DONE = "            done_ = true;\n"
 ST_ELAPSED = "        const uint64_t elapsed = nowMs >= armedMs_ ? nowMs - armedMs_ : 0;\n"
 # frame_boundary.h
-FB_HOLD = "      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});\n      sink_.holdEndFrame(); }\n    sink_.endFrameReturned("
-FB_REPORT = "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});\n"
+FB_HOLD = "      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});\n      sink_.holdEndFrame(); }\n"
+FB_RECEIPT = "    const bool submitted = frame_.status == FrameStatus::Ended;\n"
+FB_REPORT = "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, submitted, background, turbo_, lastResult_, submitted && withOverlay});\n"
 FB_SHOULD = "    const bool shouldRender = frame_.shouldRender; // end() below clears it\n    const uint64_t sequence = frame_.sequence;\n"
 FB_EMPTYREPORT = "    sink_.endFrameReturned({sequence, ms, lastPeriod_, shouldRender, false, false, turbo_, r});\n"
 FB_EMPTYSCOPE = "    { SubmissionWallScope measured(&ms); r = session_.end(frame, empty, {false, false}); }\n"
@@ -320,16 +321,17 @@ MUTANTS = [
     M("episodes-summary-renamed", "P6", "episodes", [(EP_SUMHEAD, "\"native_end_frame_episode_summary,%s%s%sthreshold_periods=%.1f,")], "the summary has another name"),
     M("episodes-armed-changed", "P6", "episodes", [(EP_ARMED, "\"native_end_frame_episodes,armed=1,threshold_periods=%.1f,period=predicted_period,")], "the armed line names another period"),
     # ---- P7, P8: FrameBoundary -----------------------------------------------------------------------------------------------------------------
-    M("hold-after-the-timed-region", ("P8", "G1"), "boundary", [(FB_HOLD, "      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels}); }\n    sink_.holdEndFrame();\n    sink_.endFrameReturned(")],
+    M("hold-after-the-timed-region", ("P8", "G1"), "boundary", [(FB_HOLD, "      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels}); }\n    sink_.holdEndFrame();\n")],
       "the hold runs after the timed region, so xr_end_frame does not see it"),
+    M("intended-pixels-as-receipt", "P7", "boundary", [(FB_RECEIPT, "    const bool submitted = pixels;\n")], "the intended draw is reported even if the session ended without submitting it"),
     M("finish-reports-nothing", "P7", "boundary", [(FB_REPORT, "")], "finish() does not report the call"),
     M("report-should-render-false", "P7", "boundary", [(FB_SHOULD, "    const bool shouldRender = false;\n    const uint64_t sequence = frame_.sequence;\n")], "the vendor's answer is read after end() cleared it"),
     M("report-no-sequence", "P7", "boundary", [(FB_SHOULD, "    const bool shouldRender = frame_.shouldRender; // end() below clears it\n    const uint64_t sequence = 0;\n")], "the report has no sequence"),
-    M("report-always-layers", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, true, background, turbo_, lastResult_, withOverlay});\n")], "every end says it had layers"),
-    M("report-not-background", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, false, turbo_, lastResult_, withOverlay});\n")], "a loading frame is not said to be one"),
-    M("report-not-turbo", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, false, lastResult_, withOverlay});\n")], "deferred pacing is not said"),
-    M("report-no-period", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, 0, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});\n")], "the report has no period"),
-    M("report-no-time", "P8", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, 0.0, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});\n")], "the report has no duration"),
+    M("report-always-layers", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, true, background, turbo_, lastResult_, submitted && withOverlay});\n")], "every end says it had layers"),
+    M("report-not-background", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, submitted, false, turbo_, lastResult_, submitted && withOverlay});\n")], "a loading frame is not said to be one"),
+    M("report-not-turbo", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, submitted, background, false, lastResult_, submitted && withOverlay});\n")], "deferred pacing is not said"),
+    M("report-no-period", "P7", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, endFrameMs_, 0, shouldRender, submitted, background, turbo_, lastResult_, submitted && withOverlay});\n")], "the report has no period"),
+    M("report-no-time", "P8", "boundary", [(FB_REPORT, "    sink_.endFrameReturned({sequence, 0.0, lastPeriod_, shouldRender, submitted, background, turbo_, lastResult_, submitted && withOverlay});\n")], "the report has no duration"),
     M("empty-ends-unreported", "P7", "boundary", [(FB_EMPTYREPORT, "")], "the empty ends clear() and drain() make are not reported"),
     M("empty-ends-held", "P8", "boundary", [(FB_EMPTYSCOPE, "    { SubmissionWallScope measured(&ms); r = session_.end(frame, empty, {false, false}); sink_.holdEndFrame(); }\n")], "the hold also runs in the empty ends"),
     # ---- S1, S2: the judgement --------------------------------------------------------------------------------------------------------------------

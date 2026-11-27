@@ -112,7 +112,30 @@ NVSDK_NGX_DLSSG_Opt_Eval_Params sdkCamera(const FrameGenerationCamera& camera) {
 }
 // NGX Init may retain common info/path pointers. With no context-wide Shutdown,
 // this small original context descriptor intentionally lives for the process.
-struct Paths {std::wstring feature,data;const wchar_t* paths[1]{};NVSDK_NGX_FeatureCommonInfo common{};};
+struct Paths {
+    std::wstring feature,data;
+    const wchar_t* paths[1]{};
+    NVSDK_NGX_FeatureCommonInfo common{};
+    std::unique_ptr<Paths> next;
+};
+// A successful private initialization can retain its path list for the NGX
+// context lifetime. Module pinning keeps this list alive through process exit.
+std::mutex contextPathsMutex;
+std::unique_ptr<Paths> contextPaths;
+NVSDK_NGX_Result initializeDeviceContext(const FrameGenerationNgxInit& in) {
+    if(!in.privateNgxDevice)return NVSDK_NGX_Result_Success;
+    auto paths=std::make_unique<Paths>();
+    paths->feature=in.featureDirectory;paths->data=in.dataDirectory;
+    paths->paths[0]=paths->feature.c_str();paths->common.PathListInfo={paths->paths,1};
+    const auto result=NVSDK_NGX_D3D12_Init_with_ProjectID("c5f699da-4b32-4dd3-a623-764006836b5b",NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+        "EDUP-FG-0.1",paths->data.c_str(),in.device,&paths->common,NVSDK_NGX_Version_API);
+    if(ok(result)) {
+        std::lock_guard<std::mutex> retain(contextPathsMutex);
+        paths->next=std::move(contextPaths);contextPaths=std::move(paths);
+    }
+    return result;
+}
+
 }
 
 struct FrameGenerationNgxLease {
@@ -133,17 +156,19 @@ FrameGenerationNgxCompletion FrameGenerationNgxTicket::poll()const noexcept {
     if(!lease)return FrameGenerationNgxCompletion::Empty;
     if(!generatedCount||generatedCount>fg_ngx::kMaxGenerated||generatedCount!=lease->count)return FrameGenerationNgxCompletion::FailedEvaluation;
     if(!completionFence||!completionValue)return FrameGenerationNgxCompletion::FailedEvaluation;
-    if(lease->expired.load(std::memory_order_acquire))return FrameGenerationNgxCompletion::Expired;
-    if(fg_ngx::timedOut(GetTickCount64(),lease->submittedMs,lease->timeoutMs)){
-        lease->expired.store(true,std::memory_order_release);return FrameGenerationNgxCompletion::Expired;
-    }
     const auto value=completionFence->GetCompletedValue();
     if(value==UINT64_MAX)return FrameGenerationNgxCompletion::DeviceRemoved;
+    if(lease->expired.load(std::memory_order_acquire))return FrameGenerationNgxCompletion::Expired;
+    const bool aged=fg_ngx::timedOut(GetTickCount64(),lease->submittedMs,lease->timeoutMs);
     if(fg_ngx::completed(value,completionValue)){
+        if(aged)return FrameGenerationNgxCompletion::Stale;
         if(!evaluationSucceeded)return FrameGenerationNgxCompletion::FailedEvaluation;
         for(unsigned e=0;e<2;++e)for(unsigned i=0;i<generatedCount;++i)
             if(!fg_ngx::suppressionAllows(lease->mapped[e][i]))return FrameGenerationNgxCompletion::Suppressed;
         return FrameGenerationNgxCompletion::Ready;
+    }
+    if(aged){
+        lease->expired.store(true,std::memory_order_release);return FrameGenerationNgxCompletion::Expired;
     }
     return FrameGenerationNgxCompletion::Pending;
 }
@@ -169,7 +194,6 @@ struct FrameGenerationNgx::Impl {
     ComPtr<ID3D12CommandAllocator> createAllocator;ComPtr<ID3D12GraphicsCommandList> createList;
     ComPtr<ID3D12Resource> scratch[2],sentinel;
     NVSDK_NGX_Parameter* createParams[2]{};NVSDK_NGX_Handle* features[2]{};
-    Paths* paths=nullptr;
     HANDLE event=nullptr;
     uint64_t nextFence=0,lastFence=0,createSubmittedMs=0,lastSequence=0,lastGeneration=0;
     bool unsafePending=false,cleaned=false;
@@ -227,7 +251,11 @@ struct FrameGenerationNgx::Impl {
         lastFence=value;return true;
     }
     bool collectCompleted(uint64_t completed){
-        if(completed==UINT64_MAX)return fail(FrameGenerationNgxFailure::DeviceRemoved);
+        if(completed==UINT64_MAX) {
+            const auto reason=device?device->GetDeviceRemovedReason():DXGI_ERROR_DEVICE_REMOVED;
+            return fail(FrameGenerationNgxFailure::DeviceRemoved,NVSDK_NGX_Result_Success,
+                FAILED(reason)?reason:DXGI_ERROR_DEVICE_REMOVED);
+        }
         for(auto& slot:slots)if(slot.lease&&slot.lease->expired.load(std::memory_order_acquire))return fail(FrameGenerationNgxFailure::Timeout);
         if(fg_ngx::completed(completed,1))createSubmittedMs=0;
         if(lastFence&&!fg_ngx::completed(completed,lastFence)){
@@ -320,23 +348,23 @@ bool FrameGenerationNgx::initialize(const FrameGenerationNgxInit& in){
        (in.suppressionLayout!=FrameGenerationNgxSuppressionLayout::PrivatePerIndex&&in.suppressionLayout!=FrameGenerationNgxSuppressionLayout::SharedNativePair)||
        (in.colorFormat!=DXGI_FORMAT_R8G8B8A8_UNORM&&in.colorFormat!=DXGI_FORMAT_R16G16B16A16_FLOAT)||
        !in.featureDirectory||!in.dataDirectory)return s.fail(FrameGenerationNgxFailure::InvalidConfiguration);
-    s.device=in.device;s.paths=new Paths;s.paths->feature=in.featureDirectory;s.paths->data=in.dataDirectory;
-    s.paths->paths[0]=s.paths->feature.c_str();s.paths->common.PathListInfo={s.paths->paths,1};
-    if(in.privateNgxDevice){
-        s.stage(FrameGenerationNgxInitStage::NgxInitialize);
-        const auto r=NVSDK_NGX_D3D12_Init_with_ProjectID("c5f699da-4b32-4dd3-a623-764006836b5b",NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-            "EDUP-FG-0.1",s.paths->data.c_str(),in.device,&s.paths->common,NVSDK_NGX_Version_API);
-        if(!ok(r))return s.fail(FrameGenerationNgxFailure::NgxInitialize,r);
-    }
+    s.device=in.device;
+    if(in.privateNgxDevice)s.stage(FrameGenerationNgxInitStage::NgxInitialize);
+    const auto context=initializeDeviceContext(in);
+    if(!ok(context))return s.fail(FrameGenerationNgxFailure::NgxInitialize,context);
     s.stage(FrameGenerationNgxInitStage::Capabilities);
     NVSDK_NGX_Parameter* caps=nullptr;auto r=NVSDK_NGX_D3D12_GetCapabilityParameters(&caps);
     if(!ok(r)||!caps)return s.fail(FrameGenerationNgxFailure::Capability,r);
-    int available=0,needsDriver=0;unsigned maximum=1;
+    int available=0,needsDriver=0;
     const auto queried=caps->Get(NVSDK_NGX_Parameter_FrameGeneration_Available,&available);
     caps->Get(NVSDK_NGX_Parameter_FrameGeneration_NeedsUpdatedDriver,&needsDriver);
-    unsigned queriedMaximum=0;if(ok(caps->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&queriedMaximum))&&queriedMaximum>0)maximum=queriedMaximum;
-    NVSDK_NGX_D3D12_DestroyParameters(caps);s.status.available=ok(queried)&&available!=0;s.status.maximumGenerated=maximum;
-    if(!fg_ngx::supported(in.multiplier,s.status.available,needsDriver!=0,maximum))return s.fail(FrameGenerationNgxFailure::MultiplierUnsupported,queried);
+    unsigned queriedMaximum=0;
+    const bool maximumKnown=ok(caps->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,&queriedMaximum));
+    const auto limits=fg_ngx::capability(ok(queried),available!=0,needsDriver!=0,maximumKnown,queriedMaximum);
+    NVSDK_NGX_D3D12_DestroyParameters(caps);
+    s.status.available=ok(queried)&&available!=0;s.status.maximumGenerated=limits.maximumGenerated;
+    s.status.knownMaximumMultiplier=limits.maximumMultiplier;
+    if(!fg_ngx::supported(in.multiplier,s.status.available,needsDriver!=0,limits.maximumGenerated))return s.fail(FrameGenerationNgxFailure::MultiplierUnsupported,queried);
     s.stage(FrameGenerationNgxInitStage::GraphicsSetup);
     D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;q.Priority=D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
     HRESULT hr=in.device->CreateCommandQueue(&q,IID_PPV_ARGS(&s.queue));
@@ -444,6 +472,21 @@ FrameGenerationNgxStatus FrameGenerationNgx::testFeaturePreparation(unsigned eye
     local.config.creationMode=creationMode;local.status.creationMode=creationMode;
     if(eye>1){local.fail(FrameGenerationNgxFailure::InvalidConfiguration);return local.status;}
     local.prepareFeature(eye);return local.status;
+}
+unsigned frameGenerationNgxTestContextPaths(const FrameGenerationNgxInit& init,NVSDK_NGX_Result& result) {
+    result=initializeDeviceContext(init);
+    unsigned count=0;
+    std::lock_guard<std::mutex> retain(contextPathsMutex);
+    for(auto* p=contextPaths.get();p;p=p->next.get())++count;
+    return count;
+}
+FrameGenerationNgxTicket frameGenerationNgxTestTimedTicket(ID3D12Fence* fence) {
+    FrameGenerationNgxTicket ticket;
+    ticket.generatedCount=1;ticket.completionFence=fence;ticket.completionValue=1;
+    ticket.lease=std::make_shared<FrameGenerationNgxLease>();ticket.lease->count=1;
+    // Every observation is past the deadline, independent of machine uptime.
+    ticket.lease->submittedMs=0;ticket.lease->timeoutMs=0;
+    return ticket;
 }
 bool frameGenerationNgxTestEvaluation(unsigned multiplier,unsigned index,NVSDK_NGX_Parameter* params,NVSDK_NGX_DLSSG_Opt_Eval_Params* persistent,ID3D12Resource* disableOverride,const FrameGenerationCamera* camera){
     const auto count=fg_ngx::generatedCount(multiplier);if(!count||!index||index>count||!params||!persistent)return false;

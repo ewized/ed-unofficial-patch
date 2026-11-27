@@ -396,6 +396,14 @@ void nativeUiOverlaySelfTest(bool owned,bool omitOverlay=false) {
     const uint32_t expected=0xff000000u|encode(decode(188)+decode(8)*transmission)|
       (encode(decode(16)*transmission)<<8)|(encode(decode(48)*transmission)<<16);
     image=render();pixelNear(f.pixel(0,image,64,64),expected,"native UI: premultiplied linear over and exactly one encode");
+    for(unsigned eye=0;eye<2;++eye) {
+      overlay.views[eye].pose.position.x+=.025f;
+      XrCompositionLayerProjection translated{};f.runtime.trace.clear();
+      check(f.renderer.renderCaptured(f.views,space,world,translated,nullptr,nullptr,nullptr,0.f,
+        nullptr,0.f,nullptr,0.f,false,nullptr,nullptr,false,&overlay)==XR_ERROR_VALIDATION_FAILURE&&f.runtime.trace.empty(),
+        "native UI: translated protected coverage in either eye is refused before acquiring a swapchain image");
+      overlay.views[eye]=f.views[eye];
+    }
     overlay.views[0].fov.angleLeft=std::numeric_limits<float>::quiet_NaN();
     XrCompositionLayerProjection rejected{};f.runtime.trace.clear();
     check(f.renderer.renderCaptured(f.views,space,world,rejected,nullptr,nullptr,nullptr,0.f,

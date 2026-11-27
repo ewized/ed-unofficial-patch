@@ -1,5 +1,6 @@
 #pragma once
 #include "launch_centre_cases.h"
+#include "../../src/openxr/native_fg_overlay.h"
 #include "../../src/common/system_d3d11.h"
 
 namespace edvr::openxr::test::fgbootstrap_fixture {
@@ -9,6 +10,8 @@ struct ExclusiveExecutor final : ImmediateExecutor {
 struct ResumeSink final : FrameSink {
   XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
   unsigned capturedEyes=0,composed=0,finished=0;
+  NativeRuntimeHost* observer=nullptr;
+  void endFrameReturned(const EndFrameInfo& info) override {if(observer)observer->endFrameReturned(info);}
   XrResult composedResult=XR_SUCCESS;
   vr::EVRCompositorError capture(vr::EVREye eye,const vr::Texture_t*,const vr::VRTextureBounds_t*,vr::EVRSubmitFlags,bool pixels) override {
     if(!pixels)return vr::VRCompositorError_InvalidTexture;
@@ -29,7 +32,7 @@ struct Provider {
 } inline provider;
 inline HRESULT WINAPI status(void*,EdvrFgStatus* out){*out=provider.status;return S_OK;}
 inline HRESULT WINAPI begin(void*,const EdvrFgSource*){++provider.announced;return S_OK;}
-inline HRESULT WINAPI poll(void*,EdvrFgBatch* out){if(provider.taken)return S_FALSE;provider.taken=true;*out=provider.batch;return S_OK;}
+inline HRESULT WINAPI poll(void*,EdvrFgBatch* out){if(!out||!edvrFgBatchProtocol(out->size,out->version))return E_INVALIDARG;if(provider.taken)return S_FALSE;provider.taken=true;const auto size=out->size;std::memcpy(out,&provider.batch,size);return S_OK;}
 inline HRESULT WINAPI retain(void*){return S_OK;}
 inline void WINAPI release(void*){++provider.released;}
 inline HRESULT WINAPI retire(void*,HANDLE,uint64_t){++provider.retired;return S_OK;}
@@ -100,10 +103,207 @@ template<class Check> void runFgLatePhaseCases(Check check) {
     "FG late phases: obsolete history cannot supply a later phase");
   check(h.fgPhaseSalvaged==4&&h.fgPhasesExhausted==2,
     "FG late phases: count rescued selections and expired series separately from rejected owners and epochs");
+  for(bool ledger:{false,true})for(unsigned gap:{4u,20u,40u}) {
+    h.fgBootstrap.clear();prepare(4);
+    images.metadata.previousPoseDisplayTime=sourceTime-gap*period;
+    if(ledger)for(unsigned i=0;i<=2;++i)h.fgBootstrap.noteSlot(i+1,sourceTime+i*period,period,period);
+    const auto chosen=choose(2*period,true);
+    if(gap==40)check(chosen==Outcome::Late&&!images.next&&images.ready,
+      "FG hitch: no image fits the phase age budget; native B is immediately available");
+    else check(chosen==Outcome::Generated&&images.next==(gap==4?1u:3u),
+      "FG hitch: ordinary delay preserves index one; only the original timely later index survives a long source gap");
+  }
+  prepare(4);
+  images.metadata.previousPoseDisplayTime=1;
+  images.metadata.currentPoseDisplayTime=(std::numeric_limits<XrTime>::max)();
+  check(fgschedule::phaseTime(images.metadata,3)==6917529027641081855LL,
+    "FG hitch: original third phase instant is representable even when tripling the full source span would overflow");
+  for(unsigned eye=0;eye<2;++eye)for(float shift:{0.f,.0002f,.025f}) {
+    prepare(4);auto& b=images.metadata;
+    b.currentViews[eye].position[0]=shift;b.uiFlags=EDVR_FG_UI_NATIVE_COVERAGE;
+    const auto selected=choose(2*period,true);
+    if(shift)check(selected==Outcome::TranslatedCoverage&&!images.next&&images.ready,
+      "FG covered translation: either eye moving selects its complete native stereo endpoint");
+    else check(selected==Outcome::Generated&&images.next==1,
+      "FG covered rotation path remains available at coincident optical centers");
+    b.uiFlags=0;
+    check(choose(2*period,true)==Outcome::Generated&&images.next==1,
+      "FG empty coverage: translated world-only phases retain their SDK index");
+  }
+  prepare(4);auto& rounded=images.metadata;
+  rounded.uiFlags=EDVR_FG_UI_NATIVE_COVERAGE;
+  rounded.previousViews[1].position[0]=1.f;
+  rounded.currentViews[1].position[0]=std::nextafter(1.f,2.f);
+  // A and B differ by one float step. Quarter and halfway coordinates round
+  // to A; the third original image rounds to B on this eye.
+  for(auto* set:{&rounded.previousViews,&rounded.currentViews})for(auto& eye:*set) {
+    eye.orientation[3]=1.f;
+    eye.fov[0]=eye.fov[3]=-.7f;eye.fov[1]=eye.fov[2]=.7f;
+  }
+  for(unsigned phase=1;phase<rounded.multiplier;++phase) {
+    bool mappable=true;
+    for(unsigned eye=0;eye<2;++eye) {
+      const auto& a=rounded.previousViews[eye];const auto& b=rounded.currentViews[eye];
+      const auto target=fgschedule::view(a,b,float(phase)/float(rounded.multiplier));
+      mappable=mappable&&fgui::makeMapping(target,fgschedule::view(b,b,1.f)).valid;
+    }
+    check(fgschedule::coverageFits(rounded,phase)==mappable&&mappable==(phase==3),
+      "FG covered rounding: producer predicate matches actual mapped XR optical centers for every original index");
+  }
+  check(choose(2*period,true)==Outcome::Generated&&images.next==3&&
+    fgschedule::phaseTime(rounded,images.next)==sourceTime-period,
+    "FG covered rounding: an on-time batch skips both unregistrable images and presents original index three at its own pose");
+  check(choose(7*period,true)==Outcome::Generated&&images.next==3,
+    "FG covered rounding: late delivery can present the original eligible third SDK image");
+  const auto mixed=rounded;
+  for(unsigned age:{2u,7u}) {
+    h.fgBootstrap.clear();prepare(4);images.metadata=mixed;h.fgDisplayedSequence=71;
+    h.fgBootstrap.displayNative(70,1);h.fgBootstrap.displayNative(71,2);
+    check(choose(age*period,true)==Outcome::BehindWatermark,"FG covered rounding: receipt for a previously submitted native B stays behind");
+    h.fgBootstrap.completeNative(72);
+    const auto now=sourceTime+age*period;
+    check(h.fgBootstrap.deferNative(71,72,71,now,now,period,period,4)==(age==2),
+      "FG covered rounding: a genuine partial batch can prove a future handoff only within the unchanged first-phase deadline");
+  }
+}
+
+// Complete an ordinary stereo frame, then hand the game a deferred pose whose
+// real wait returns shouldRender=false. Both eye submissions succeed on the
+// second frame, but only the first composed projection reaches the runtime.
+template<class Check> void runFgSubmittedEndpointCases(Check check) {
+  launch_fixture::Fixture fixture;auto& h=fixture.host;
+  fgbootstrap_fixture::ResumeSink sink;sink.observer=&h;
+  FramePacer pacer;pacer.priorityHigh=false;pacer.bind(launch_fixture::wait,launch_fixture::session());
+  FrameBoundary boundary(h.state,sink,&pacer);
+  const fgbootstrap::Epoch epoch{h.runtimeGeneration,7,h.poses.read().originGeneration,3};
+  h.fgConfig=epoch.config;h.frameSpace=h.seated.frame().space;
+  h.frameSequenceOffset=68;
+  const auto grant=[&](FramePacing pacing) {
+    check(boundary.waitAndBegin(pacing)==XR_SUCCESS,"FG receipt: owner opens the expected runtime slot");
+    auto frame=boundary.frame();
+    check(h.applyFrameSequence(frame),"FG receipt: issue the real native source identity");
+    h.frameGeometry.displayTime=frame.predictedDisplayTime;
+    h.fgAnnouncedNative={epoch,frame.sequence,frame.predictedDisplayTime,h.frameSpace};
+    boundary.setGeometryReady(true);
+  };
+  const auto submit=[&] {
+    return boundary.submit(vr::Eye_Left,nullptr)==vr::VRCompositorError_None&&
+      boundary.submit(vr::Eye_Right,nullptr)==vr::VRCompositorError_None;
+  };
+  fixture.fake.shouldRender=true;
+  grant(FramePacing::Runtime);
+  check(submit()&&h.fgSubmittedNative.sequence==69,"FG receipt: successful native stereo layer records endpoint 69");
+  fixture.fake.shouldRender=false;fixture.fake.frameTime+=10;
+  grant(FramePacing::Deferred);
+  check(boundary.deferred()&&h.lastPublishedFrameSequence==70,"FG receipt: Turbo issued pose 70 before the runtime wait completed");
+  sink.capturedEyes=0;
+  check(h.fgHasSubmittedSeed(epoch),"FG receipt: a verified predecessor is available for positive generation after coverage probation");
+  h.fgSeedNativeFallback(epoch);
+  check(h.fgDisplayedSequence==69&&!h.fgFallbackValid,"FG receipt: issued-only pose cannot seed fallback pixels or a new watermark");
+  check(submit()&&sink.capturedEyes==3&&sink.composed==1&&h.presentationCounts.emptyFrames==1,
+    "FG receipt: deferred no-render accepted both eyes and ended with no second projection");
+  pacer.stop();
+  h.fgSeedNativeFallback(epoch);
+  check(h.fgDisplayedSequence==69&&!h.fgFallbackValid,"FG receipt: zero-layer success leaves the last native submission intact");
+  EdvrFgStatus status{};status.historyGeneration=epoch.history;
+  auto& images=h.frameGeneration.images();
+  const auto choose=[&](uint64_t previous) {
+    images.ready=true;auto& batch=images.metadata;batch={};
+    batch.generation=epoch.generation;batch.referenceGeneration=epoch.reference;
+    batch.configGeneration=epoch.config;batch.historyGeneration=epoch.history;
+    batch.previousSequence=previous;batch.currentSequence=previous+1;
+    batch.previousPoseDisplayTime=200;batch.currentPoseDisplayTime=220;
+    batch.multiplier=2;batch.generatedCount=1;batch.phaseMask=3;
+    return h.fgPrepareImages(status,230,10,true);
+  };
+  check(choose(68)==fghandoff::Images::BehindWatermark,"FG receipt: the submitted native endpoint is already behind");
+  check(choose(69)==fghandoff::Images::Generated&&images.next==1,
+    "FG receipt: a batch ending at the unshown pose can still interpolate from the real predecessor");
+  check(choose(70)==fghandoff::Images::PreviousMismatch&&!images.next,
+    "FG receipt: an unshown predecessor cannot start a generated series");
+  fixture.fake.shouldRender=true;fixture.fake.endResult=XR_ERROR_RUNTIME_FAILURE;fixture.fake.frameTime+=10;
+  grant(FramePacing::Runtime);
+  check(!submit()&&h.fgSubmittedNative.sequence==69,"FG receipt: failed stereo end leaves the successful endpoint intact");
+  auto cut=epoch;++cut.history;
+  h.fgSeedNativeFallback(cut);
+  check(!h.fgHasSubmittedSeed(cut)&&!h.fgDisplayedSequence&&!h.fgFallbackValid,"FG receipt: old history cannot seed a new generation");
+}
+
+// Supply real private endpoint textures in the Windows rig. The draw callback
+// records the selected source and returns a fake XR projection. The actual
+// prepared submission, session result, commitment and watermark run on the host.
+template<class Check,class Seed> void runFgCoverageEndpointCases(Check check,Seed seed) {
+  enum class Trial {Committed,MidPhaseCut,NoCommit,NoRender,FailedEnd,ChangedDuringDraw,OtherCut,OtherReason,OtherReference};
+  for(auto trial:{Trial::Committed,Trial::MidPhaseCut,Trial::NoCommit,Trial::NoRender,Trial::FailedEnd,Trial::ChangedDuringDraw,Trial::OtherCut,Trial::OtherReason,Trial::OtherReference}) {
+    launch_fixture::Fixture fixture;auto& h=fixture.host;
+    auto& images=h.frameGeneration.images();
+    if(!seed(images.phases[0])){check(false,"FG coverage: endpoint texture fixture");return;}
+    const fgbootstrap::Epoch epoch{h.runtimeGeneration,7,h.poses.read().originGeneration,3};
+    auto& b=images.metadata;
+    b={};b.generation=epoch.generation;b.configGeneration=epoch.config;b.historyGeneration=epoch.history;
+    b.referenceGeneration=epoch.reference;b.multiplier=2;b.generatedCount=1;b.phaseMask=3;
+    b.previousSequence=70;b.currentSequence=71;b.previousPoseDisplayTime=160;b.currentPoseDisplayTime=180;
+    b.width=b.height=4;
+    for(unsigned eye=0;eye<2;++eye) {
+      h.sizes[eye].recommendedImageRectWidth=h.sizes[eye].recommendedImageRectHeight=4;
+      b.currentViews[eye].orientation[3]=1;b.currentViews[eye].position[0]=eye?.035f:-.029f;
+      b.currentViews[eye].fov[0]=b.currentViews[eye].fov[3]=-.7f;b.currentViews[eye].fov[1]=b.currentViews[eye].fov[2]=.7f;
+    }
+    images.ready=true;h.fgConfig=epoch.config;h.fgHistory=epoch.history;h.fgMultiplier=2;
+    h.fgBootstrap.sync(epoch);h.fgBootstrap.displayNative(70);h.fgDisplayedSequence=70;
+    fixture.fake.shouldRender=trial!=Trial::NoCommit;
+    XrCompositionLayerProjectionView views[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projection.space=h.seated.frame().space;projection.viewCount=2;projection.views=views;
+    check(h.boundary.waitAndBegin()==XR_SUCCESS&&h.fgEndPrepared(&projection,edvr::NativePresentationKind::Generated,&b)==XR_SUCCESS&&
+      h.fgBootstrap.needsEndpoint(71)==fixture.fake.shouldRender,
+      "FG coverage: only an actual layer-bearing generated submission commits native B");
+    EdvrFgStatus cut{};cut.generation=epoch.generation;cut.configGeneration=epoch.config;
+    cut.requestedMultiplier=2;cut.state=EDVR_FG_UNAVAILABLE;cut.lastFailure=EDVR_FG_NATIVE_COVERAGE;
+    cut.historyGeneration=epoch.history+1;
+    if(trial==Trial::OtherCut)++cut.historyGeneration;
+    if(trial==Trial::OtherReason)cut.lastFailure=0;
+    if(trial==Trial::OtherReference)++b.referenceGeneration;
+    auto confirm=[&] {return h.fgCoverageWithdrawal(cut);};
+    fixture.fake.shouldRender=trial!=Trial::NoRender;fixture.fake.frameTime+=10;
+    if(trial==Trial::FailedEnd)fixture.fake.endResult=XR_ERROR_RUNTIME_FAILURE;
+    unsigned draws=0;
+    auto render=[&](const XrView (&endpoint)[2],XrTime time,const EyeCapture& pixels,XrCompositionLayerProjection& layer) {
+      ++draws;layer=projection;
+      check(time==180&& &pixels==&images.phases[0]&&endpoint[0].pose.position.x==b.currentViews[0].position[0]&&
+        endpoint[1].pose.position.x==b.currentViews[1].position[0],"FG coverage: settle the private whole native B with both original poses");
+      if(trial==Trial::ChangedDuringDraw)++cut.historyGeneration;
+      return XR_SUCCESS;
+    };
+    if(trial==Trial::MidPhaseCut) {
+      const auto prior=fixture.fake.endCalls;
+      check(h.boundary.waitAndBegin()==XR_SUCCESS&&h.fgYieldCoverageSlot(cut)&&fixture.fake.endCalls==prior+1&&
+        h.boundary.frame().status==FrameStatus::NoRender&&h.fgBootstrap.needsEndpoint(71),
+        "FG coverage: loss during a later generated draw closes that slot empty and preserves the already committed native B");
+      fixture.fake.frameTime+=10;
+    }
+    const auto before=fixture.fake.endCalls;
+    const auto result=h.fgSettleCoverageEndpoint(confirm,render);
+    if(trial==Trial::Committed||trial==Trial::MidPhaseCut) {
+      check(result==XR_SUCCESS&&draws==1&&fixture.fake.endCalls==before+1&&h.fgSubmittedNative.sequence==71&&
+        h.fgSubmittedNative.epoch==epoch&&!h.fgBootstrap.needsEndpoint(71)&&h.fgNativePresented==1,
+        "FG coverage: successful native B end settles the exact previous-epoch commitment once");
+      check(h.fgSettleCoverageEndpoint(confirm,render)==XR_SUCCESS&&draws==1&&fixture.fake.endCalls==before+1,
+        "FG coverage: a settled endpoint cannot end a second runtime slot");
+    } else {
+      check((result==XR_ERROR_RUNTIME_FAILURE)==(trial==Trial::FailedEnd)&&h.fgDisplayedSequence==70&&
+        !h.fgSubmittedNative.sequence&&!h.fgNativePresented&&
+        draws==unsigned(trial==Trial::ChangedDuringDraw||trial==Trial::FailedEnd),
+        "FG coverage: uncommitted, no-render, failed, superseded or unrelated cuts cannot advance the watermark");
+      if(trial==Trial::ChangedDuringDraw)check(fixture.fake.endCalls==before+1&&h.boundary.frame().status==FrameStatus::NoRender,
+        "FG coverage: a superseding cut during the draw closes the prepared slot empty");
+    }
+  }
 }
 
 template<class Check> void runFgBootstrapCases(Check check) {
   runFgLatePhaseCases(check);
+  runFgSubmittedEndpointCases(check);
   using Microsoft::WRL::ComPtr;
   using namespace fgbootstrap_fixture;
   {
@@ -217,6 +417,19 @@ template<class Check> void runFgBootstrapCases(Check check) {
   ComPtr<ID3D11Device> producer;ComPtr<ID3D11DeviceContext> producerContext;
   check(SUCCEEDED(create(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&producer,nullptr,&producerContext)),"FG bootstrap: separate producer device");
   if(!producer)return;
+  D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=4;td.ArraySize=td.MipLevels=td.SampleDesc.Count=1;
+  td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+  ComPtr<ID3D11Texture2D> sources[2];
+  check(SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[0]))&&SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[1])),"FG bootstrap: distinct native eyes");
+  if(!sources[0]||!sources[1])return;
+  runFgCoverageEndpointCases(check,[&](EyeCapture& capture) {
+    if(FAILED(capture.initialize(producer.Get())))return false;
+    for(unsigned eye=0;eye<2;++eye) {
+      const vr::Texture_t texture{sources[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
+      if(capture.capture(vr::EVREye(eye),&texture)!=vr::VRCompositorError_None)return false;
+    }
+    return true;
+  });
   launch_fixture::Fixture fixture;auto& h=fixture.host;
   ExclusiveExecutor executor; // This fixture alone owns both WARP context roles.
   check(fixture.initialized&&SUCCEEDED(h.captured.initializeShared(producer.Get(),device.Get(),&executor))&&SUCCEEDED(h.fgFallback.initialize(device.Get()))&&
@@ -226,11 +439,6 @@ template<class Check> void runFgBootstrapCases(Check check) {
   h.frameViews[0]=h.frameGeometry.views[0];h.frameViews[1]=h.frameGeometry.views[1];
   const fgbootstrap::Epoch epoch{h.runtimeGeneration,7,h.poses.read().originGeneration,3};
   h.fgBootstrap.sync(epoch);
-  D3D11_TEXTURE2D_DESC td{};td.Width=td.Height=4;td.ArraySize=td.MipLevels=td.SampleDesc.Count=1;
-  td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-  ComPtr<ID3D11Texture2D> sources[2];
-  check(SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[0]))&&SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[1])),"FG bootstrap: distinct native eyes");
-  if(!sources[0]||!sources[1])return;
   constexpr XrDuration period=11111111;
   const auto nativePair=[&](uint64_t sequence,bool right=true,bool promote=true) {
     fixture.fake.frameTime=1000000000+XrTime(sequence)*22222222;
@@ -265,6 +473,14 @@ template<class Check> void runFgBootstrapCases(Check check) {
   check(noEmpty&&fixture.fake.frameTime-1022222222>1500000000,"FG bootstrap: fresh native fallback prevents empty projections beyond 1.5 seconds");
   check(monotonic&&h.fgFallbackSequence==70&&pixel(0)==0xff000046u&&pixel(1)==0xff010046u,"FG bootstrap: newer stereo bytes/pose publish together without time reversal");
   check(!h.fgFallbackUsable(h.fgFallbackTime+500000001),"FG bootstrap: unchanged 500 ms fallback expiry");
+  h.temporalFrameEyes=3;
+  h.fgSubmittedNative={epoch,70,h.frameGeometry.displayTime,h.frameSpace};
+  h.fgSeedNativeFallback(epoch);
+  check(h.fgFallbackValid&&h.fgFallbackSequence==70&&pixel(0)==0xff000046u&&pixel(1)==0xff010046u,
+    "FG receipt: recovery copies both exact native eye pixels from the submitted source");
+  ++h.activeFrameSequence;
+  h.fgSeedNativeFallback(epoch);
+  check(!h.fgFallbackValid&&h.fgDisplayedSequence==70,"FG receipt: a different live capture cannot be copied for an older submitted endpoint");
   // Start an independent complete-pair/handoff case from a known endpoint,
   // even when the old-code negative above deliberately retained endpoint 1.
   h.fgFallbackValid=false;h.fgDisplayedSequence=0;nativePair(70);
@@ -338,8 +554,9 @@ template<class Check> void runFgBootstrapCases(Check check) {
     h.fgAvailable=true;
     Frame source{};source.sequence=90;source.predictedDisplayTime=fixture.fake.frameTime;
     h.fgAnnounceSource(source,h.frameGeometry);
-    check(provider.announced==1&&!fgadmission::providerReady(proof,h.runtimeGeneration),
-      "FG eligibility: ordinary native pose still announces a source during warmup");
+    check(provider.announced==1&&!fgadmission::providerReady(proof,h.runtimeGeneration)&&!h.fgEnabled&&
+      h.fgPresentationGeneration==h.runtimeGeneration,
+      "FG eligibility: ordinary selected warmup announces native sources and arms actual receipt telemetry before any generated pacing");
     proof.state=EDVR_FG_READY;proof.activeMultiplier=2;
     check(fgadmission::providerReady(proof,h.runtimeGeneration)&&h.fgCanSubmitBatch(candidate),"FG eligibility: current READY proof admits this exact batch");
     ++proof.generation;
@@ -365,6 +582,25 @@ template<class Check> void runFgBootstrapCases(Check check) {
     check(h.boundary.submit(vr::Eye_Left,&right)==vr::VRCompositorError_InvalidTexture&&
       h.boundary.submit(vr::Eye_Right,&right)==vr::VRCompositorError_None&&fixture.fake.endCalls==ends+1&&!h.state.frameOpen(),
       "FG eligibility: real accepted left survives proof loss and the ordinary right submit completes the no-render slot");
+    // Exercise the coverage-only withdrawal with zero and one accepted eye.
+    // No independent poll or second provider invalidation occurs on later idle ticks.
+    for(unsigned mask:{0u,1u}) {
+      h.fgHistory=epoch.history;proof.historyGeneration=epoch.history+1;proof.lastFailure=EDVR_FG_NATIVE_COVERAGE;
+      h.fgEnabled=true;h.fgNativeOutstanding=true;h.fgAcceptedEyes=mask;
+      h.fgBootstrap.sync(epoch);h.gameFrameCallMs=GetTickCount64();
+      const auto priorEnds=fixture.fake.endCalls,invalidations=provider.invalidations;
+      const auto imports=h.frameGeneration.pollCounts().imported;
+      check(h.fgTickOwner(operation)&&!h.fgEnabled&&h.fgResumedNative&&h.fgLastDisableReason==EDVR_FG_NATIVE_COVERAGE&&
+        h.state.frameOpen()&&fixture.fake.endCalls==priorEnds&&provider.invalidations==invalidations+1,
+        "FG coverage: withdrawal acknowledges the cut and hands the same incomplete credit to ordinary pacing");
+      if(!mask)check(h.boundary.submit(vr::Eye_Left,&right)==vr::VRCompositorError_None,"FG coverage: previously unsubmitted left eye remains due");
+      else check(h.boundary.submit(vr::Eye_Left,&right)==vr::VRCompositorError_InvalidTexture,"FG coverage: accepted left eye cannot be submitted twice");
+      check(h.boundary.submit(vr::Eye_Right,&right)==vr::VRCompositorError_None&&fixture.fake.endCalls==priorEnds+1&&
+        !h.state.frameOpen()&&!h.fgTickOwner(operation)&&provider.invalidations==invalidations+1&&
+        h.frameGeneration.pollCounts().imported==imports,
+        "FG coverage: ordinary right ends once and subsequent coverage-blocked ticks leave imports and provider retirement alone");
+    }
+    proof.lastFailure=0;proof.historyGeneration=epoch.history;
     h.fgAnnounceSource(source,h.frameGeometry);
     check(provider.announced==2,"FG eligibility: native sources continue while the provider recovers");
     ++proof.historyGeneration;proof.state=EDVR_FG_READY;proof.activeMultiplier=2;
@@ -382,11 +618,11 @@ template<class Check> void runFgBootstrapCases(Check check) {
   ComPtr<ID3D11Device5> device5;ComPtr<ID3D11Fence> fence;HANDLE fenceHandle=nullptr;
   bool shared=SUCCEEDED(device.As(&device5))&&SUCCEEDED(device5->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence)))&&
     SUCCEEDED(fence->CreateSharedHandle(nullptr,GENERIC_ALL,nullptr,&fenceHandle));
-  ComPtr<ID3D11Texture2D> sharedTextures[12];HANDLE textureHandles[12]{};
+  ComPtr<ID3D11Texture2D> sharedTextures[14];HANDLE textureHandles[14]{};
   auto sharedDesc=td;sharedDesc.MiscFlags=D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-  for(unsigned i=0;i<12&&shared;++i) {
-    ComPtr<IDXGIResource1> resource;
-    shared=SUCCEEDED(device->CreateTexture2D(&sharedDesc,nullptr,&sharedTextures[i]))&&SUCCEEDED(sharedTextures[i].As(&resource))&&
+  for(unsigned i=0;i<14&&shared;++i) {
+    ComPtr<IDXGIResource1> resource;auto description=sharedDesc;if(i==13)description.Width=8;
+    shared=SUCCEEDED(device->CreateTexture2D(&description,nullptr,&sharedTextures[i]))&&SUCCEEDED(sharedTextures[i].As(&resource))&&
       SUCCEEDED(resource->CreateSharedHandle(nullptr,DXGI_SHARED_RESOURCE_READ|DXGI_SHARED_RESOURCE_WRITE,nullptr,&textureHandles[i]));
   }
   check(shared,"FG bootstrap: real pending fence and texture handles");
@@ -395,7 +631,7 @@ template<class Check> void runFgBootstrapCases(Check check) {
     const bool adapterKnown=SUCCEEDED(device.As(&dxgi))&&SUCCEEDED(dxgi->GetAdapter(&adapter))&&SUCCEEDED(adapter->GetDesc(&adapterDesc));
     check(adapterKnown,"FG bootstrap: import adapter identity");
     provider.batch=batch(70,71);auto& pending=provider.batch;
-    pending.size=sizeof(pending);pending.version=EDVR_FG_BATCH_VERSION_3;pending.token=&provider;pending.width=pending.height=4;
+    pending.size=sizeof(pending);pending.version=EDVR_FG_BATCH_VERSION_4;pending.allocationId=1;pending.token=&provider;pending.width=pending.height=4;
     pending.format=DXGI_FORMAT_R8G8B8A8_UNORM;pending.readyFence=fenceHandle;pending.readyValue=1;
     pending.adapterLuidLow=adapterDesc.AdapterLuid.LowPart;pending.adapterLuidHigh=adapterDesc.AdapterLuid.HighPart;
     for(unsigned phase=0;phase<2;++phase)for(unsigned eye=0;eye<2;++eye)pending.textures[phase][eye]=textureHandles[phase*2+eye];
@@ -438,6 +674,11 @@ template<class Check> void runFgBootstrapCases(Check check) {
       "FG import: one fenced receipt permits exactly one cold trial and cannot replay");
     check(pollBatch(2,71)==S_FALSE&&!behind&&counts.noExport==1,"FG import: no further export repeats a receipt");
 
+    const auto retireImports=[&] {
+      images.ready=false;const auto deadline=GetTickCount64()+2000;HRESULT collected;
+      while((collected=h.frameGeneration.collectImportPins())==S_FALSE&&GetTickCount64()<deadline)Sleep(1);
+      check(collected==S_OK,"FG import: queued copies retire before the next token");
+    };
     pending.uiFlags=EDVR_FG_UI_NATIVE_COVERAGE;
     for(unsigned e=0;e<2;++e){pending.uiTextures[e]=textureHandles[8+e];pending.nativeWorldTextures[e]=textureHandles[10+e];}
     for(unsigned m=2;m<=4;++m) {
@@ -451,17 +692,87 @@ template<class Check> void runFgBootstrapCases(Check check) {
         "FG import: 2x/3x/4x already displayed split UI skips every world, UI and phase copy");
       provider.taken=false;
       check(pollBatch(m,70)==S_OK&&images.ready&&!behind&&images.metadata.generatedCount==m-1&&
-        counts.textureOpens==before.textureOpens+2*m+4&&counts.eyeCopies==before.eyeCopies+2*m+4&&
+        counts.textureOpens==before.textureOpens+(m==2?2*m+4:2)&&counts.eyeCopies==before.eyeCopies+2*m+4&&
+        counts.textureCacheHits==before.textureCacheHits+(m==2?0:2*m+2)&&
         counts.imported==before.imported+1&&images.nativeUi.texture(vr::Eye_Right)&&images.nativeWorld.texture(vr::Eye_Left),
-        "FG import: ahead split UI imports all stereo phases and UI/world textures through the real copy path");
-      images.ready=false;
-      const auto retireDeadline=GetTickCount64()+2000;
-      HRESULT collected;
-      while((collected=h.frameGeneration.collectImportPins())==S_FALSE&&GetTickCount64()<retireDeadline)Sleep(1);
-      check(collected==S_OK,"FG import: private copies retired before next fixture token");
+        "FG import: stable allocation opens only unseen roles while every stereo/UI/world copy remains");
+      retireImports();
     }
+    const auto allocationOne=pending;
+    // Once every plane exists, batch availability flags are not allocation
+    // identity. Warmed native-only/generated/native-only imports reuse it.
+    for(unsigned availability=0;availability<3;++availability) {
+      pending=allocationOne;
+      if(availability!=1){pending.generatedCount=0;pending.phaseMask=1;pending.uiFlags=0;
+        for(auto& handle:pending.uiTextures)handle=nullptr;
+        for(auto& handle:pending.nativeWorldTextures)handle=nullptr;}
+      provider.taken=false;const auto before=counts;const unsigned copies=availability==1?12:2;
+      check(pollBatch(4,70)==S_OK&&counts.textureOpens==before.textureOpens&&
+        counts.textureCacheHits==before.textureCacheHits+copies&&counts.eyeCopies==before.eyeCopies+copies,
+        "FG import cache: warmed allocation survives native-only/generated/native-only availability changes");
+      retireImports();
+    }
+    pending=allocationOne;
+    {
+      const auto before=counts;provider.taken=false;
+      check(pollBatch(4,70)==S_OK&&counts.textureOpens==before.textureOpens&&
+        counts.textureCacheHits==before.textureCacheHits+12&&counts.eyeCopies==before.eyeCopies+12,
+        "FG import cache: same allocation reuses all wrappers but preserves every private copy");
+      retireImports();
+      pending.textures[0][0]=textureHandles[12];provider.taken=false;
+      check(pollBatch(4,70)==E_INVALIDARG&&counts.textureOpens==before.textureOpens&&counts.eyeCopies==before.eyeCopies+12,
+        "FG import cache: same allocation cannot change its known role handle");
+      pending=allocationOne;pending.allocationId=2;pending.textures[0][0]=textureHandles[13];provider.taken=false;
+      const auto copied=counts.eyeCopies;
+      check(pollBatch(4,70)==E_INVALIDARG&&counts.eyeCopies==copied,
+        "FG import cache: a newly opened resource still requires the exact real texture descriptor");
+      pending=allocationOne;
+    }
+    // Exact legacy prefixes carry no allocation proof and always open anew.
+    for(unsigned version:{EDVR_FG_BATCH_VERSION_3,EDVR_FG_BATCH_VERSION_2}) {
+      pending=allocationOne;pending.version=version;pending.size=edvrFgBatchSize(version);pending.allocationId=0;
+      if(version==EDVR_FG_BATCH_VERSION_2){pending.generatedCount=0;pending.phaseMask=1;pending.uiFlags=0;
+        for(auto& handle:pending.uiTextures)handle=nullptr;for(auto& handle:pending.nativeWorldTextures)handle=nullptr;}
+      const unsigned opened=version==EDVR_FG_BATCH_VERSION_3?12:2;
+      for(unsigned repeat=0;repeat<2;++repeat){const auto before=counts;provider.taken=false;
+        check(pollBatch(4,70)==S_OK&&counts.textureOpens==before.textureOpens+opened&&counts.textureCacheHits==before.textureCacheHits,
+          "FG import cache: validated legacy batch remains an uncached import");retireImports();}
+    }
+    for(uint64_t allocation=2;allocation<=4;++allocation) {
+      pending=allocationOne;pending.allocationId=allocation;provider.taken=false;const auto before=counts;
+      check(pollBatch(4,70)==S_OK&&counts.textureOpens==before.textureOpens+12,
+        "FG import cache: new allocation with recycled numeric handles creates fresh wrappers");retireImports();
+    }
+    {
+      // Queue real import reads behind a separate-device gate, then drop every
+      // cache reference. The per-import owner must still block close/eviction.
+      ComPtr<ID3D11Fence> gate,releaseGate;HANDLE gateHandle=nullptr;
+      ComPtr<ID3D11Device5> releaseDevice;ComPtr<ID3D11DeviceContext4> releaseContext;
+      const bool gated=SUCCEEDED(device5->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&gate)))&&
+        SUCCEEDED(gate->CreateSharedHandle(nullptr,GENERIC_ALL,nullptr,&gateHandle))&&
+        SUCCEEDED(producer.As(&releaseDevice))&&SUCCEEDED(producerContext.As(&releaseContext))&&
+        SUCCEEDED(releaseDevice->OpenSharedFence(gateHandle,IID_PPV_ARGS(&releaseGate)))&&
+        SUCCEEDED(signalContext->Wait(gate.Get(),1));
+      struct ReleaseGateOnExit {
+        ID3D11DeviceContext4* context;ID3D11DeviceContext* flush;ID3D11Fence* fence;bool pending;
+        ~ReleaseGateOnExit(){if(pending&&context&&fence){context->Signal(fence,1);flush->Flush();}}
+      } releaseOnExit{releaseContext.Get(),producerContext.Get(),releaseGate.Get(),gated};
+      check(gated,"FG import cache: independent shared WARP gate");
+      if(gated) {
+        pending=allocationOne;pending.allocationId=5;provider.taken=false;
+        check(pollBatch(4,70)==S_OK,"FG import cache: actual reads queued behind consumer gate");
+        check(h.frameGeneration.invalidate(1)==S_OK&&h.frameGeneration.collectImportPins()==S_FALSE&&
+          h.frameGeneration.releaseInactiveImages()==S_FALSE&&h.frameGeneration.close(0)==E_PENDING,
+          "FG import cache: cache clear never releases unfenced consumer-read ownership");
+        const bool released=SUCCEEDED(releaseContext->Signal(releaseGate.Get(),1));producerContext->Flush();
+        if(released)releaseOnExit.pending=false;
+        check(released,"FG import cache: release queued reads from the independent device");retireImports();
+      }
+      if(gateHandle)CloseHandle(gateHandle);
+    }
+    pending=allocationOne;
     const auto valid=pending;
-    for(unsigned invalid=0;invalid<8;++invalid) {
+    for(unsigned invalid=0;invalid<10;++invalid) {
       pending=valid;provider.taken=false;
       switch(invalid) {
       case 0:++pending.historyGeneration;break;
@@ -472,6 +783,8 @@ template<class Check> void runFgBootstrapCases(Check check) {
       case 5:pending.nativeWorldTextures[1]=pending.uiTextures[0];break;
       case 6:pending.textures[3][1]=nullptr;break;
       case 7:pending.currentPoseDisplayTime-=500000001;break;
+      case 8:pending.allocationId=0;break;
+      case 9:pending.version=EDVR_FG_BATCH_VERSION_3;break;
       }
       const auto before=counts;
       check(pollBatch(4,71)==E_INVALIDARG&&!behind&&!images.ready&&counts.behindBeforeCopy==before.behindBeforeCopy&&

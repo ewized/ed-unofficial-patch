@@ -33,6 +33,14 @@ void prepareSuppressionFlag(bool sharedNativePair,unsigned index,bool reused,Tra
 constexpr unsigned generatedCount(unsigned multiplier) noexcept {
     return nativeFgFixedMultiplier(multiplier) ? multiplier - 1 : 0;
 }
+struct Capability {
+    unsigned maximumGenerated,maximumMultiplier;
+};
+inline Capability capability(bool queried,bool available,bool needsDriver,bool hasMaximum,unsigned reported) noexcept {
+    // NGX predating MultiFrameCountMax supports one generated frame.
+    const unsigned maximum=hasMaximum?reported:1u;
+    return {maximum,!queried?0u:(!available||needsDriver?1u:1u+(maximum<3u?maximum:3u))};
+}
 inline bool supported(unsigned multiplier,bool available,bool needsDriver,unsigned maximum) noexcept {
     const auto count=generatedCount(multiplier);return count&&available&&!needsDriver&&maximum>=count;
 }

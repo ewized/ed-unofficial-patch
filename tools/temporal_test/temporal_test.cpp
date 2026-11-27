@@ -12,6 +12,7 @@
 // replayed over a dumped event (eye run 050423: a parked camera's zero
 // taken as the view's and carried). The shader in
 // src/d3d11/temporal_shader_source.h transcribes the same functions.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -820,6 +821,31 @@ int main() {
         const auto dropped = gateEye(j, far1, p, still, W, tv);
         check(dropped.carried && !dropped.carriedJump && memcmp(tv, d1tv, sizeof(tv)) == 0,
               "a drop after a jump carries the translation before it (a jump carried: zero)");
+    }
+    // The scene chooser can alternate parallel source eyes while the head
+    // is stationary. Both targets must recover their own pose at both ends.
+    {
+        float eyes[2][12];
+        rows34(0,-.032f,0,0,eyes[0]); rows34(0,.032f,0,0,eyes[1]);
+        for (int prev = 0; prev < 2; ++prev) for (int target = 0; target < 2; ++target) {
+            const int now = 1 - prev;
+            float eyePrev[12]{}, eyeNow[12]{};
+            double relative[3][4]{};
+            check(edvr::temporalFgEyePair(eyes[prev], eyes[now], prev, now, target,
+                                          eyes, eyes, eyePrev, eyeNow) &&
+                  std::equal(eyePrev, eyePrev + 12, eyes[target]) &&
+                  std::equal(eyeNow, eyeNow + 12, eyes[target]),
+                  "source switch preserves both target-eye endpoints of a stationary head");
+            check(edvr::temporalRelativeEyeView(eyePrev,eyeNow,relative) &&
+                  relative[0][3]==0 && relative[1][3]==0 && relative[2][3]==0,
+                  "stationary selected-eye switch produces zero FG world translation");
+        }
+        float before[12], after[12];
+        rows34(10,.032f,0,0,eyes[1]);
+        check(!edvr::temporalFgEyePair(eyes[0],eyes[1],0,1,0,eyes,eyes,before,after),
+              "canted source switch with ambiguous basis refuses FG");
+        check(!edvr::temporalFgEyePair(eyes[0],eyes[1],-1,1,0,eyes,eyes,before,after),
+              "missing source-eye label refuses FG");
     }
     // A synthetic 20-degree canted pair, with independent camera rotation
     // and translation. The reference poses are composed directly as the game

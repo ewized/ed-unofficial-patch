@@ -1952,7 +1952,7 @@ int perfMonitorTiles(PerfTile* out, int max) {
     if (fg.visible) {
         if(fg.measurement==NativeFgMeasureState::Counting) {
             snprintf(v,sizeof(v),"%.1f",fg.generatedFps);
-            snprintf(sub,sizeof(sub),"fps; last 1 s");
+            snprintf(sub,sizeof(sub),"recent submit fps");
         } else {
             snprintf(v,sizeof(v),"--");
             snprintf(sub,sizeof(sub),"%s",nativeFgMeasureWord(fg.measurement));

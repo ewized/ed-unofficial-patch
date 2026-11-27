@@ -2,13 +2,18 @@
 #include "native_fg_multiplier.h"
 #include <windows.h>
 #include <d3d11.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define EDVR_NATIVE_FRAME_GENERATION_VERSION_1 1u
 #define EDVR_FG_MAX_PHASES 4u
 #define EDVR_FG_BATCH_VERSION_2 2u
 #define EDVR_FG_BATCH_VERSION_3 3u
+#define EDVR_FG_BATCH_VERSION_4 4u
 #define EDVR_FG_UI_NATIVE_COVERAGE 1u
+// Provider already cut this history on admitted, bilateral protected HUD motion.
+// The XR owner may acknowledge that cut after retiring its own import state.
+#define EDVR_FG_NATIVE_COVERAGE 0x10002u
 
 // Optional capability of a trusted paired graphics module. No STL or SDK
 // objects cross this boundary. All handles below are borrowed, process-local
@@ -72,7 +77,21 @@ struct EdvrFgBatch {
   // as generated phases. textures[0] still contains the full native image
   // for bootstrap/fade/fallback, never a partially reconstructed surrogate.
   HANDLE nativeWorldTextures[2];
+  // V4: process-monotonic, nonzero identity of this immutable output-slot
+  // texture allocation set. Any added/replaced texture gets a fresh identity.
+  // Numeric NT handle reuse never identifies an allocation incarnation.
+  uint64_t allocationId;
 };
+
+// Legacy callers own only their version's prefix. Never read/write past it.
+constexpr uint32_t edvrFgBatchSize(uint32_t version) noexcept {
+  return version==EDVR_FG_BATCH_VERSION_2?uint32_t(offsetof(EdvrFgBatch,nativeWorldTextures)):
+    version==EDVR_FG_BATCH_VERSION_3?uint32_t(offsetof(EdvrFgBatch,allocationId)):
+    version==EDVR_FG_BATCH_VERSION_4?uint32_t(sizeof(EdvrFgBatch)):0u;
+}
+constexpr bool edvrFgBatchProtocol(uint32_t size,uint32_t version) noexcept {
+  return size&&size==edvrFgBatchSize(version);
+}
 
 typedef HRESULT (WINAPI *EdvrFgGetStatus)(void*, EdvrFgStatus*);
 // CPU-only, XR owner, before releasing the native source credit. This metadata

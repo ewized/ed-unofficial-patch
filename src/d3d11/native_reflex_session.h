@@ -4,30 +4,23 @@
 #include <atomic>
 #include <memory>
 #include "../common/native_reflex_frame.h"
+#include "native_reflex.h"
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 
 namespace edvr::native_reflex {
-class FrameDriver;
 struct FrameSession;
 
 // UI reads the last verified session capability without querying COM/NVAPI.
-inline std::atomic<bool> fullFrameAvailable{false};
-inline std::atomic<uint64_t> fullFrameQualificationEpoch{0};
-// The active transport serializes its capability writes. Each edge invalidates
-// evidence retained by consumers, even when they miss the intervening state.
-inline void publishFrameAvailability(bool qualified) noexcept {
-    if (fullFrameAvailable.load(std::memory_order_relaxed) == qualified) return;
-    fullFrameQualificationEpoch.fetch_add(1, std::memory_order_acq_rel);
-    fullFrameAvailable.store(qualified, std::memory_order_release);
-}
+inline detail::FrameSourceQualification fullFrameQualification;
+uint64_t frameSessionClockMs() noexcept;
 // A runtime transport fault is distinct from initial unavailability. The mode
 // owner observes this latch at its next safe Present and withdraws its request.
 inline std::atomic<bool> fullFrameFaulted{false};
 inline bool frameSessionFaulted() noexcept { return fullFrameFaulted.load(std::memory_order_acquire); }
 inline bool availableForUser() noexcept {
-    return fullFrameAvailable.load(std::memory_order_acquire) && !frameSessionFaulted();
+    return fullFrameQualification.available() && !frameSessionFaulted();
 }
 
 // A successful begin retains the exact session/device through the real
@@ -53,7 +46,12 @@ void mouseMessageRemoved(bool down) noexcept;
 // Normal native-session lifecycle only. The returned transport is borrowed
 // until stopFrameSession for this generation. Engine callbacks take their own
 // strong snapshot before calling the driver without renderer locks held.
-FrameDriver* startFrameSession(ID3D11Device*, uint64_t generation);
+struct FrameSessionEnrollment {
+    FrameDriver* driver = nullptr;
+    bool pending = false;
+};
+FrameSessionEnrollment startFrameSession(ID3D11Device*, uint64_t generation);
+FrameSessionEnrollment retryFrameSession(ID3D11Device*, uint64_t generation, uint64_t now) noexcept;
 void stopFrameSession(uint64_t generation) noexcept;
 void reportFrameSession(uint64_t generation) noexcept;
 

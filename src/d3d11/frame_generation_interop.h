@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <limits>
 
 namespace edvr {
@@ -55,7 +56,7 @@ struct FrameGenerationInteropStatus {
     bool initialized{}, quarantined{};
     FrameGenerationInteropFailure failure{FrameGenerationInteropFailure::NotInitialized};
     HRESULT lastHresult{S_OK};
-    std::uint64_t published{}, busy{}, rejected{};
+    std::uint64_t published{}, busy{}, rejected{}, partialCheckpoints{};
 };
 class FrameGenerationInterop {
 public:
@@ -81,6 +82,11 @@ public:
     // One Signal+Flush follows all copies. Null UI never implicitly means empty.
     std::shared_ptr<FrameGenerationInteropLease> publish(ID3D11DeviceContext*,
         std::uint64_t sequence, std::uint64_t historyGeneration, unsigned requiredPlaneMask) noexcept;
+    // At producer handoff seal only new partial copies. After all producer
+    // routes quiesce, cancelQuiesced may retire that same slot without ever
+    // issuing a command on the game context.
+    bool checkpoint(ID3D11DeviceContext*) noexcept;
+    bool cancelQuiesced() noexcept;
     // Seal partial copies with a producer fence, cancel consumer use, never wait.
     bool abort(ID3D11DeviceContext*, std::uint64_t sequence, std::uint64_t historyGeneration) noexcept;
     // After producers and workers quiesce, all slots must have both fence proofs
@@ -95,6 +101,23 @@ private:
 
 // CPU policy shared by the adapter and synthetic fixtures. No COM calls here.
 namespace fg_interop {
+// A replacement may start while the old ring is still being read. Retain
+// exactly one displaced producer and defer another replacement until its
+// producer and consumer fences and external leases prove retirement.
+template<class Producer> class Retirement {
+    std::shared_ptr<Producer> pending_;
+public:
+    bool collect() noexcept {
+        if(pending_&&pending_->retired())pending_.reset();
+        return !pending_;
+    }
+    bool replace(std::shared_ptr<Producer>& activeProducer,std::shared_ptr<Producer> replacement) noexcept {
+        if(!collect())return false;
+        if(activeProducer&&!activeProducer->retired())pending_=std::move(activeProducer);
+        activeProducer=std::move(replacement);
+        return true;
+    }
+};
 constexpr unsigned slots = 3, eyes = 2, planes = unsigned(FrameGenerationPlane::Count);
 constexpr unsigned allPlanes = (1u << planes) - 1;
 inline bool owner(DWORD expected, DWORD current, const void* context, const void* provided) noexcept {

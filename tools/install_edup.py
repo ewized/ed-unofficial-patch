@@ -1096,20 +1096,12 @@ def _validate_v2_receipt(r):
         _BUILD_OVERRIDE = saved
 
 
-def _validate_v2_receipt_in(r):
-    if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") not in (NATIVE_KIND, FLAT_KIND) or r.get("state") != "installed":
-        raise ValueError("receipt is not an installed ED-UP v2 package")
-    target, root, files = r.get("target"), r.get("root"), r.get("files")
-    if not isinstance(target, str) or not os.path.isabs(target) or not os.path.isdir(target) or not isinstance(root, str) or not os.path.isabs(root):
-        raise ValueError("bad native v2 target/root")
-    if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
-        raise ValueError("bad native v2 files")
-    paths = _standard_native_paths(root, target) if r["kind"] == NATIVE_KIND else _flat_paths(root, target)
-    required = {"runtime", "graphics", "loader", "notice", "config"} if r["kind"] == NATIVE_KIND else {"graphics", "profile"}
+def _v2_component_targets(kind, target, paths, files):
+    """Map the allowed v2 component keys to their canonical install targets."""
     targets = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice") if key + "_target" in paths}
-    if r["kind"] == NATIVE_KIND: targets["config"] = paths["config"]
-    ini_target = _ini_target(target, "flat" if r["kind"] == FLAT_KIND else "vr")
-    if r["kind"] == FLAT_KIND:
+    if kind == NATIVE_KIND: targets["config"] = paths["config"]
+    ini_target = _ini_target(target, "flat" if kind == FLAT_KIND else "vr")
+    if kind == FLAT_KIND:
         # The one legacy shape accepted: a flat `ini` entry whose recorded
         # target is EXACTLY <target>\edup.ini. Every other check below still
         # runs on it, and any other path, for any kind, is refused as before.
@@ -1127,9 +1119,23 @@ def _validate_v2_receipt_in(r):
     targets.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
     targets["reflex_license"] = os.path.join(target, fetch_reflex.LICENSE_NAME)
     # A both install records the flat half's settings file as its own entry.
-    if r["kind"] == NATIVE_KIND:
+    if kind == NATIVE_KIND:
         targets["ini_flat"] = _ini_target(target, "flat")
         targets.update((key, os.path.join(target, name)) for key, name in FG_PAYLOAD)
+    return targets
+
+
+def _validate_v2_receipt_in(r):
+    if not isinstance(r, dict) or r.get("version") != 2 or r.get("kind") not in (NATIVE_KIND, FLAT_KIND) or r.get("state") != "installed":
+        raise ValueError("receipt is not an installed ED-UP v2 package")
+    target, root, files = r.get("target"), r.get("root"), r.get("files")
+    if not isinstance(target, str) or not os.path.isabs(target) or not os.path.isdir(target) or not isinstance(root, str) or not os.path.isabs(root):
+        raise ValueError("bad native v2 target/root")
+    if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
+        raise ValueError("bad native v2 files")
+    paths = _standard_native_paths(root, target) if r["kind"] == NATIVE_KIND else _flat_paths(root, target)
+    required = {"runtime", "graphics", "loader", "notice", "config"} if r["kind"] == NATIVE_KIND else {"graphics", "profile"}
+    targets = _v2_component_targets(r["kind"], target, paths, files)
     keys = [e["key"] for e in files]
     if len(keys) != len(set(keys)) or not required.issubset(keys) or set(keys) - targets.keys():
         raise ValueError("incomplete or duplicate ED-UP v2 components")
@@ -2242,22 +2248,13 @@ def retire_stale_native_receipt(target, tag, dry_run=False):
                 not isinstance(recorded_root, str) or not os.path.isabs(recorded_root):
             raise ValueError("native receipt target/root is invalid or foreign")
         paths = _standard_native_paths(recorded_root, target)
-        allowed = {key: paths[key + "_target"] for key in ("runtime", "graphics", "loader", "notice")}
-        allowed.update(config=paths["config"], profile=descriptor,
-                       ini=os.path.join(target, "edup.ini"), ini_flat=os.path.join(target, "edup-flat.ini"),
-                       dlss=os.path.join(target, "nvngx_dlss.dll"), xess=os.path.join(target, "libxess.dll"),
-                       xess_fg=os.path.join(target, "libxess_fg.dll"),
-                       xess_ll=os.path.join(target, "libxell.dll"),
-                       xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
-                       xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
-        allowed.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
-        allowed["reflex_license"] = os.path.join(target, fetch_reflex.LICENSE_NAME)
         files = old.get("files")
         if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
             raise ValueError("malformed native receipt files")
         keys = [e["key"] for e in files]
         if len(set(keys)) != len(keys) or not {"runtime", "graphics", "loader", "notice", "config"}.issubset(keys):
             raise ValueError("incomplete or duplicate native receipt files")
+        allowed = _v2_component_targets(NATIVE_KIND, target, paths, files)
         for entry in files:
             want = allowed.get(entry["key"])
             recorded = entry.get("target")
@@ -2265,6 +2262,9 @@ def retire_stale_native_receipt(target, tag, dry_run=False):
                     _real_path(recorded) != _real_path(want) or not _under(recorded, target) or \
                     not _valid_hash(entry.get("installed_sha256")):
                 raise ValueError("unsafe native receipt file")
+            if entry["key"] in FG_KEYS:
+                _check_fg_target(want, target)
+                _check_fg_target(recorded, target)
             backup, before = entry.get("backup"), entry.get("before_sha256")
             if backup is None:
                 if before is not None:
@@ -3686,10 +3686,10 @@ def _scope_self_test():
         check(code == 0 and "INTEL-XESS-LICENSE.txt is missing (an XeSS notice file" in text and "XeSS cannot run" not in text,
               "a missing XeSS notice file was reported as the runtime missing: %r" % text)
 
-        def stale_native(name):
+        def stale_native(name, *options):
             g = game("retire-" + name)
             Path(g, "d3d11.dll").write_bytes(b"OLDER-GRAPHICS")
-            code, text = run(args_for(g, "--scope", "both", tag="old"))
+            code, text = run(args_for(g, "--scope", "both", *options, tag="old"))
             check(code == 0, "retirement fixture install failed: " + text)
             for rel in ("openvr_api.dll", "edup_openxr.ini", "openxr_loader.dll", "OPENXR-LOADER-LICENSE.txt"):
                 Path(g, "Openvr", "win64", rel).unlink()
@@ -3738,11 +3738,70 @@ def _scope_self_test():
         g = stale_native("legacy-name")
         os.replace(Path(g, "edup_native_receipt.json"), Path(g, "edvr_native_receipt.json"))
         legacy_bytes = Path(g, "edvr_native_receipt.json").read_bytes()
+        before = tree(g)
+        check(retire(g, "--dry-run")[0] == 0 and tree(g) == before,
+              "legacy receipt retirement preview failed or wrote files")
         check(retire(g)[0] == 0, "a superseded receipt under the legacy name was not retired")
         legacy_archives = list(Path(g).glob("edvr_native_receipt.json.pre-retired-*.bak"))
         check(len(legacy_archives) == 1 and legacy_archives[0].read_bytes() == legacy_bytes and
               not Path(g, "edvr_native_receipt.json").exists() and not Path(g, "edup_native_receipt.json").exists(),
               "a legacy-named receipt was not archived under its own name")
+        try:
+            globals()["FG_RUNTIME_SHA256"] = hashlib.sha256(fg_bytes).hexdigest().upper()
+            globals()["FG_LICENSE_SHA256"] = hashlib.sha256(fg_notice).hexdigest().upper()
+            fg_source.write_bytes(fg_bytes)
+            fg_notice_source.write_bytes(fg_notice)
+            for receipt_name in _receipt_spellings(RECEIPT_NAMES[0]):
+                g = stale_native("fg-" + receipt_name, "--frame-generation")
+                plain = Path(g, receipt_name)
+                if receipt_name != RECEIPT_NAMES[0]:
+                    Path(g, RECEIPT_NAMES[0]).rename(plain)
+                    # Retirement proves the GUI state, independently of
+                    # whether optional FG files still exist in the game.
+                    for _, component in FG_PAYLOAD:
+                        Path(g, component).unlink()
+                before = tree(g)
+                original_receipt = plain.read_bytes()
+                check(run(args_for(g, "--scope", "flat", "--verify-only"))[0] == 1 and tree(g) == before,
+                      "active FG receipt did not block flat verification")
+                check(retire(g, "--dry-run")[0] == 0 and tree(g) == before,
+                      "FG receipt retirement preview failed or wrote files: " + receipt_name)
+                malformed = json.loads(original_receipt)
+                fg_entry = next(e for e in malformed["files"] if e["key"] == "frame_generation")
+                fg_entry["target"] = str(fg_source)
+                plain.write_text(json.dumps(malformed), encoding="utf-8")
+                invalid = tree(g)
+                check(retire(g)[0] == 1 and tree(g) == invalid,
+                      "FG retirement accepted a foreign component target: " + receipt_name)
+                plain.write_bytes(original_receipt)
+                fg_target = Path(g, fg_source.name)
+                live_fg = fg_target.read_bytes() if fg_target.is_file() else None
+                if live_fg is not None:
+                    fg_target.unlink()
+                os.link(fg_source, fg_target)
+                aliased = tree(g)
+                check(retire(g)[0] == 1 and tree(g) == aliased and fg_source.read_bytes() == fg_bytes,
+                      "FG retirement accepted an aliased component: " + receipt_name)
+                fg_target.unlink()
+                if live_fg is not None:
+                    fg_target.write_bytes(live_fg)
+                check(retire(g)[0] == 0, "FG receipt retirement failed: " + receipt_name)
+                archives = list(Path(g).glob(receipt_name + ".pre-retired-*.bak"))
+                if len(archives) == 1:
+                    expected = dict(before)
+                    expected.pop(receipt_name)
+                    expected[archives[0].name] = original_receipt
+                    check(dict(tree(g)) == expected, "FG retirement changed more than the receipt")
+                    check(run(args_for(g, "--scope", "flat"))[0] == 0 and
+                          run(args_for(g, "--scope", "flat", "--verify-only"))[0] == 0,
+                          "retired FG receipt still blocks flat install or verify")
+                else:
+                    check(False, "FG retirement did not archive under its original spelling")
+        finally:
+            globals()["FG_RUNTIME_SHA256"], globals()["FG_LICENSE_SHA256"] = old_fg_pins
+            fg_source.unlink()
+            fg_notice_source.unlink()
+
         for name in ("foreign", "malformed", "nonflat", "descriptor", "graphics", "native-owned", "vr-leftover", "vr-runtime", "current", "running"):
             g = stale_native(name)
             record = Path(g, "edup_install", "state.ini")

@@ -41,7 +41,7 @@ struct FrameGenerationInteropLease::Impl {
     ComPtr<ID3D12Fence> fence12, consumerFence;
     std::uint64_t producer{}, consumerValue{};
     std::atomic<unsigned> consumer{Canceled};
-    bool published{}, poisoned{};
+    bool published{}, poisoned{}, uncheckpointed{};
 };
 FrameGenerationInteropLease::FrameGenerationInteropLease(std::shared_ptr<Impl> value) : impl_(std::move(value)) {}
 FrameGenerationInteropLease::~FrameGenerationInteropLease() = default;
@@ -119,7 +119,7 @@ struct FrameGenerationInterop::Impl {
             data.poisoned = true; status.quarantined = true;
             return reject(FrameGenerationInteropFailure::Fence, hr);
         }
-        data.producer = value;
+        data.producer = value;data.uncheckpointed=false;
         return true;
     }
     bool image(Image& image, const D3D11_TEXTURE2D_DESC& source) noexcept {
@@ -225,6 +225,7 @@ bool FrameGenerationInterop::initialize(const FrameGenerationInteropInit& config
 ID3D12Device* FrameGenerationInterop::device12() const noexcept { return impl_ ? impl_->device12.Get() : nullptr; }
 bool FrameGenerationInterop::begin(ID3D11DeviceContext* context, std::uint64_t sequence, std::uint64_t generation) noexcept {
     if (!impl_ || !impl_->owner(context)) return false;
+    if(impl_->status.quarantined)return false;
     if (impl_->active >= 0) return impl_->reject(FrameGenerationInteropFailure::Busy);
     if (!sequence || !generation || sequence <= impl_->lastSequence) return impl_->reject(FrameGenerationInteropFailure::InvalidSequence);
     const HRESULT removed = impl_->device12->GetDeviceRemovedReason();
@@ -279,6 +280,7 @@ bool FrameGenerationInterop::capture(ID3D11DeviceContext* context, std::uint64_t
     image.view = {image.alias11.Get(), image.resource12.Get(), capturedDesc, identity,
         static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(sourceIdentity.Get())), D3D12_RESOURCE_STATE_COMMON};
     impl_->context4->CopyResource(image.alias11.Get(), source);
+    data.uncheckpointed=true;
     data.transaction.captured[eye] |= frameGenerationPlaneBit(role);
     return true;
 }
@@ -297,13 +299,28 @@ std::shared_ptr<FrameGenerationInteropLease> FrameGenerationInterop::publish(ID3
     ++impl_->status.published; impl_->status.failure = FrameGenerationInteropFailure::None;
     return slot.lease;
 }
+bool FrameGenerationInterop::checkpoint(ID3D11DeviceContext* context) noexcept {
+    if(!impl_||!impl_->owner(context)||impl_->active<0)return false;
+    auto& slot=*impl_->slots[impl_->active].storage;
+    if(slot.poisoned)return false;
+    if(!slot.uncheckpointed)return true;
+    if(!impl_->seal(slot))return false;
+    ++impl_->status.partialCheckpoints;return true;
+}
+bool FrameGenerationInterop::cancelQuiesced() noexcept {
+    if(!impl_||impl_->active<0)return true;
+    auto& slot=*impl_->slots[impl_->active].storage;
+    if(slot.uncheckpointed||slot.poisoned)return false;
+    slot.consumer.store(Canceled,std::memory_order_release);impl_->active=-1;
+    return true;
+}
 bool FrameGenerationInterop::abort(ID3D11DeviceContext* context, std::uint64_t sequence, std::uint64_t generation) noexcept {
     if (!impl_ || !impl_->owner(context)) return false;
     if (impl_->active < 0) return impl_->reject(FrameGenerationInteropFailure::InvalidSequence);
     auto& data = *impl_->slots[impl_->active].storage;
     if (!data.transaction.matches(sequence, generation)) return impl_->reject(FrameGenerationInteropFailure::InvalidSequence);
     const bool copied = data.transaction.captured[0] || data.transaction.captured[1];
-    const bool sealed = !copied || impl_->seal(data);
+    const bool sealed = !data.poisoned && (!copied || !data.uncheckpointed || impl_->seal(data));
     data.consumer.store(Canceled, std::memory_order_release); impl_->active = -1;
     return sealed;
 }

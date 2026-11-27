@@ -81,7 +81,7 @@ struct FrameGenerationNgxInput {
     // native sequence. This flag is a contract, not a backend observation.
     bool pairedFullEyeGuides=false;
 };
-enum class FrameGenerationNgxCompletion {Empty,Pending,Ready,Suppressed,Expired,DeviceRemoved,FailedEvaluation};
+enum class FrameGenerationNgxCompletion {Empty,Pending,Ready,Suppressed,Expired,DeviceRemoved,FailedEvaluation,Stale};
 struct FrameGenerationNgxLease;
 struct FrameGenerationNgxSuppressionSnapshot {
     bool fenced=false;
@@ -113,6 +113,7 @@ struct FrameGenerationNgxTicket {
 };
 struct FrameGenerationNgxStatus {
     bool initialized=false,available=false,failed=false,quarantined=false;
+    unsigned knownMaximumMultiplier=0; // 0 unknown, 1 unavailable, 2..4 supported
     unsigned requestedMultiplier=0,maximumGenerated=0;
     FrameGenerationNgxCreationMode creationMode=FrameGenerationNgxCreationMode::GenericScratchQuery;
     FrameGenerationNgxSuppressionLayout suppressionLayout=FrameGenerationNgxSuppressionLayout::PrivatePerIndex;
@@ -161,6 +162,8 @@ class FrameGenerationNgx {
 #if defined(EDVR_FRAME_GENERATION_NGX_TEST) && defined(EDVR_HAVE_NGX)
 // Uses the same official helper and persistent option storage as production;
 // the test binary supplies CPU-only public NGX entry-point stubs.
+unsigned frameGenerationNgxTestContextPaths(const FrameGenerationNgxInit&,NVSDK_NGX_Result&);
+FrameGenerationNgxTicket frameGenerationNgxTestTimedTicket(ID3D12Fence*);
 bool frameGenerationNgxTestEvaluation(unsigned multiplier,unsigned index,
     NVSDK_NGX_Parameter*,NVSDK_NGX_DLSSG_Opt_Eval_Params* persistent,ID3D12Resource* disableOverride=nullptr,
     const FrameGenerationCamera* camera=nullptr);

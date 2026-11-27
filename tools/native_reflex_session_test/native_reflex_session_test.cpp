@@ -169,8 +169,9 @@ void acquisition(Graphics& graphics, Graphics& foreign, EdvrNativeReflexFrameTab
     check(!activeSession() && markerOrder(90).empty(), "mouse messages without a session cannot create telemetry or a pending frame");
     auto missing = emptyTable();
     check(acquire(graphics.device.Get(), 41, missing) == E_PENDING, "provider refuses enrollment without an active native session");
-    const auto* driver = startFrameSession(graphics.device.Get(), 41);
-    check(!driver && activeSession() && !activeSession()->driver && rig::enrolled.load() && rig::initialized == 1,
+    const auto enrollment = startFrameSession(graphics.device.Get(), 41);
+    check(!enrollment.driver && !enrollment.pending && activeSession() && !activeSession()->driver() &&
+          rig::enrolled.load() && rig::initialized == 1,
           "WARP retains a PCL-only production session without a hardware Reflex driver");
     check(rig::observerInstalls == 1 && rig::inputInstalls == 0,
           "Reflex session enrollment installs only the passive message observer and leaves keyboard capture to the menu");
@@ -517,7 +518,10 @@ void staleOwners(Graphics& graphics, EdvrNativeReflexFrameTable oldTable) {
     check(snapshot(token).completed && activeSession()->completedFrames.load() == 1,
           "the replacement completes only through its own current source and Present receipt");
     callbacks->afterTick(callbacks->context, token);
-    check(table.close(table.context) == S_OK, "normal provider close deactivates its retained context");
+    const auto lastComplete = activeSession()->lastCompletedMs.load();
+    const auto closed = table.close(table.context);
+    check(lastComplete && closed == S_OK && !activeSession()->lastCompletedMs.load(),
+          "normal provider close revokes its last complete source as it deactivates the context");
     callbacks = beginTick(token + 1);
     if (callbacks) {
         {

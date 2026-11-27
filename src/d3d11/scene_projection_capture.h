@@ -8,22 +8,18 @@
 namespace edvr {
 enum class SceneProjectionSource : uint32_t { None, Legacy198, Clip270 };
 struct SceneProjectionCapture {
-    float a = 0, b = 0, legacyA = 0, legacyB = 0;
-    SceneProjectionSource source = SceneProjectionSource::None;
+    float legacyA = 0, legacyB = 0;
+    float clipA = 0, clipB = 0;
 };
-// Called on the full mapped scene CB before Unmap. Near-plane consistency is
-// checked again by temporalSceneProjection at the actual eye SR boundary.
-inline SceneProjectionCapture captureSceneProjection(const void* data, uint32_t bytes, float nearZ = 0) noexcept {
+
+// Keep both candidates from this exact mapped write. The eye whose depth
+// buffer is being decoded supplies its near plane later at the SR boundary.
+inline SceneProjectionCapture captureSceneProjection(const void* data, uint32_t bytes) noexcept {
     SceneProjectionCapture result;
     if (!data || bytes < 796u * sizeof(float)) return result;
     const auto* source = static_cast<const unsigned char*>(data);
     std::memcpy(&result.legacyA, source + 794u * sizeof(float), sizeof(float));
     std::memcpy(&result.legacyB, source + 795u * sizeof(float), sizeof(float));
-    if (temporalSceneProjection(result.legacyA, result.legacyB, nearZ, &result.a, &result.b)) {
-        result.source = SceneProjectionSource::Legacy198;
-        return result;
-    }
-    result.a = result.b = 0;
     if (bytes < 274u * 16u) return result;
     // Existing draw_record_tag::worldClip and flatJitterForwardColumns own
     // this layout: clip = x*r270 + y*r271 + z*r272 + r273. Therefore
@@ -42,12 +38,22 @@ inline SceneProjectionCapture captureSceneProjection(const void* data, uint32_t 
     const double a=dot(z,w)/ww,b=double(rows[14])-a*rows[15];
     const double scale=(std::max)({std::fabs(z[0]),std::fabs(z[1]),std::fabs(z[2])});
     for(unsigned i=0;i<3;++i) if(std::fabs(z[i]-a*w[i])>1e-5*scale+1e-12) return result;
-    if (!std::isfinite(a) || !std::isfinite(b) || a>0 || b<=0 ||
-        !temporalSceneProjection(static_cast<float>(a),static_cast<float>(b),nearZ,&result.a,&result.b)) {
-        result.a=result.b=0;return result;
+    if (std::isfinite(a) && std::isfinite(b) && a <= 0 && b > 0) {
+        result.clipA = static_cast<float>(a);
+        result.clipB = static_cast<float>(b);
     }
-    result.source=SceneProjectionSource::Clip270;
     return result;
+}
+
+// Prefer the legacy row when both candidates describe this eye's depth.
+// temporalSceneProjection also supplies SR's infinite-far fallback on a miss.
+inline SceneProjectionSource resolveSceneProjection(const SceneProjectionCapture& captured,
+                                                    float nearZ, float* a, float* b) noexcept {
+    if (temporalSceneProjection(captured.legacyA, captured.legacyB, nearZ, a, b))
+        return SceneProjectionSource::Legacy198;
+    if (temporalSceneProjection(captured.clipA, captured.clipB, nearZ, a, b))
+        return SceneProjectionSource::Clip270;
+    return SceneProjectionSource::None;
 }
 inline const char* sceneProjectionSourceName(SceneProjectionSource source) noexcept {
     switch (source) {

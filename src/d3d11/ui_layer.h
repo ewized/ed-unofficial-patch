@@ -520,9 +520,10 @@ inline UiLayerFgRefusal uiLayerFgAdmission(const UiLayerFgFacts& f) noexcept {
 class UiLayerFgSnapshot;
 struct UiLayerFgPlanes {
     UiLayerFgInfo info;
-    // Borrowed, immutable pixels; retain the snapshot through every GPU reader's
-    // completion fence. Layer is null only for an empty snapshot; multiply is
-    // null when useMult is false.
+    // With uiLayerFgGetPlanes, pixels are immutable while the snapshot is
+    // retained. In a capture sink, these are live producer textures borrowed
+    // only for the duration of the callback. Layer is null for an empty
+    // publication, and multiply is null when useMult is false.
     ID3D11Texture2D* layer = nullptr;
     ID3D11Texture2D* multiply = nullptr;
     float layerUv[4] = {0, 0, 1, 1};
@@ -536,6 +537,12 @@ bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>& snapshot
 // planes, SMAA and the established render-owner binding. Ordinary frames do not
 // call this. A foreign owner/context refuses without changing either eye.
 bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept;
+// Read current eye coverage at the render owner's ordinary pre-composition
+// door. A false return means unknown and clears hasUi. On success hasUi
+// describes the admitted publication for this exact sequence, eye and temporal
+// texture. This query records no GPU commands and needs no FG producer.
+bool uiLayerFgObserveCoverage(uint64_t sequence, unsigned eye, ID3D11Texture2D* frame,
+    const uint32_t region[4], const float layerUv[4], bool& hasUi) noexcept;
 // Capture frame must be this eye/sequence's exact temporal output, before RCAS
 // and before uiLayerComposite. Unknown post-sharpen identity is refused. The
 // coordinator may separately bind later RCAS world color to this immutable lease.
@@ -543,6 +550,14 @@ std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
     ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
     ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
     UiLayerFgInfo* info = nullptr) noexcept;
+// Delivers the same validated publication on the owning immediate context.
+// The sink must enqueue any copies before returning and retain the source
+// objects until its producer fence completes. Only the copied destination
+// may be queued for another context or consumed asynchronously.
+using UiLayerFgCaptureSink = bool(*)(void*, const UiLayerFgPlanes&) noexcept;
+bool uiLayerFgCaptureTo(ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgCaptureSink sink, void* cookie, UiLayerFgInfo* info = nullptr) noexcept;
 // The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
 // (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
 bool uiLayerDoorFromPass(uint32_t eye);

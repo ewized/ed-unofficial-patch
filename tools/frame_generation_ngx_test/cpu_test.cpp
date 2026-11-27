@@ -5,6 +5,7 @@
 #include "nvsdk_ngx_defs_dlssg.h"
 #endif
 #include <cstdio>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -16,6 +17,9 @@ unsigned checks=0,failures=0;
 void check(bool pass,const char* name){++checks;if(!pass){++failures;std::printf("FAIL %s\n",name);}}
 #ifdef EDVR_HAVE_NGX
 constexpr auto fail=NVSDK_NGX_Result_FAIL_FeatureNotSupported;
+unsigned pathCalls=0;bool pathFixture=false;
+NVSDK_NGX_Result pathResult=NVSDK_NGX_Result_Success;
+const wchar_t* retainedPath=nullptr;
 unsigned evaluations=0;NVSDK_NGX_Result evaluationResult=NVSDK_NGX_Result_Success;
 bool initFixture=false;NVSDK_NGX_Parameter* fixtureParameters=nullptr;
 NVSDK_NGX_Result scratchResult=NVSDK_NGX_Result_Success,createResult=NVSDK_NGX_Result_Success;
@@ -40,6 +44,52 @@ struct Parameters:NVSDK_NGX_Parameter {
     NVSDK_NGX_Result Get(const char*,void**)const override{return fail;}
     void Reset()override{ui.clear();floats.clear();pointers.clear();}
 };
+class ObservedFence final : public ID3D12Fence {
+public:
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {return E_NOINTERFACE;}
+    ULONG STDMETHODCALLTYPE AddRef() override {return 2;}
+    ULONG STDMETHODCALLTYPE Release() override {return 1;}
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void**) override {return E_NOTIMPL;}
+    UINT64 STDMETHODCALLTYPE GetCompletedValue() override {return value_.load();}
+    HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64, HANDLE) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE Signal(UINT64 value) override {value_.store(value);return S_OK;}
+private:
+    std::atomic<UINT64> value_{0};
+};
+void contextPathLifetime() {
+    using namespace edvr;
+    FrameGenerationNgxInit init;init.privateNgxDevice=false;init.ngxAlreadyInitialized=true;
+    init.featureDirectory=L"feature";init.dataDirectory=L"retained-data";
+    NVSDK_NGX_Result result{};pathFixture=true;
+    check(frameGenerationNgxTestContextPaths(init,result)==0&&!pathCalls,"borrowed NGX context allocates no retained descriptor");
+    init.privateNgxDevice=true;init.ngxAlreadyInitialized=false;pathResult=fail;
+    check(frameGenerationNgxTestContextPaths(init,result)==0&&result==fail&&pathCalls==1,"failed private NGX init releases its descriptor");
+    pathResult=NVSDK_NGX_Result_Success;
+    check(frameGenerationNgxTestContextPaths(init,result)==1&&result==pathResult&&pathCalls==2,"successful private context retains its one descriptor");
+    init.privateNgxDevice=false;init.ngxAlreadyInitialized=true;
+    check(frameGenerationNgxTestContextPaths(init,result)==1&&pathCalls==2&&retainedPath&&std::wstring(retainedPath)==L"retained-data",
+        "borrowed reinitialization leaves the original NGX context paths valid with no extra owner");
+    pathFixture=false;
+}
+void lateObservation() {
+    using namespace edvr;
+    ObservedFence fence;
+    fence.Signal(1);
+    auto complete=frameGenerationNgxTestTimedTicket(&fence);
+    check(complete.poll()==FrameGenerationNgxCompletion::Stale&&complete.poll()==FrameGenerationNgxCompletion::Stale,
+        "late CPU observer retires a fenced stale ticket without latching a timeout");
+    fence.Signal(0);
+    auto pending=frameGenerationNgxTestTimedTicket(&fence);
+    check(pending.poll()==FrameGenerationNgxCompletion::Expired,"an expired and still pending fence remains terminal");
+    fence.Signal(1);
+    check(pending.poll()==FrameGenerationNgxCompletion::Expired,"later completion cannot erase a previously observed pending timeout");
+    fence.Signal(UINT64_MAX);
+    check(complete.poll()==FrameGenerationNgxCompletion::DeviceRemoved,"a removed device cannot masquerade as stale pixels");
+}
 void coupledInputRing(){
     using namespace edvr;
     // Producer ring ownership, NGX input pins and output's independent original
@@ -113,7 +163,9 @@ FlagTrace recordFlags(bool shared,bool reused,int leftWrite,int rightWrite,bool 
 #ifdef EDVR_HAVE_NGX
 // Link-time CPU substitutes. Bootstrap/resource allocation functions abort if
 // any fixture accidentally attempts real NGX setup. No NGX library is linked.
-NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_Init_with_ProjectID(const char*,NVSDK_NGX_EngineType,const char*,const wchar_t*,ID3D12Device*,const NVSDK_NGX_FeatureCommonInfo*,NVSDK_NGX_Version){std::abort();}
+NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_Init_with_ProjectID(const char*,NVSDK_NGX_EngineType,const char*,const wchar_t* data,ID3D12Device*,const NVSDK_NGX_FeatureCommonInfo*,NVSDK_NGX_Version){
+    if(!pathFixture)std::abort();++pathCalls;if(pathResult==NVSDK_NGX_Result_Success)retainedPath=data;return pathResult;
+}
 NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_GetCapabilityParameters(NVSDK_NGX_Parameter**){std::abort();}
 NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_AllocateParameters(NVSDK_NGX_Parameter** out){
     if(!initFixture)std::abort();*out=fixtureParameters;return NVSDK_NGX_Result_Success;
@@ -140,13 +192,20 @@ int main(){
     FrameGenerationNgx untouched;check(!untouched.status().initialized,"default backend creates no device");
     check(untouched.collect(),"cold OFF collection creates no backend");
 #ifdef EDVR_HAVE_NGX
-    coupledInputRing();
+    contextPathLifetime();lateObservation();coupledInputRing();
 #endif
     check(generatedCount(2)==1&&generatedCount(3)==2&&generatedCount(4)==3&&
         !generatedCount(0)&&!generatedCount(1)&&!generatedCount(5),"2x to 4x request one to three generated frames");
     check(supported(2,true,false,1)&&!supported(4,true,false,1)&&supported(4,true,false,3),"capability limits have no silent downgrade");
     check(!supported(3,true,false,1)&&supported(3,true,false,2)&&!supported(4,true,false,2),
         "3x requires capacity for two generated frames and never degrades to 2x");
+    check(capability(false,false,false,false,0).maximumMultiplier==0,"unqueried capability remains unknown");
+    check(capability(true,false,false,false,0).maximumMultiplier==1&&capability(true,true,true,true,3).maximumMultiplier==1,
+        "unsupported device or required driver update disables selectable multipliers");
+    check(capability(true,true,false,false,0).maximumGenerated==1&&capability(true,true,false,false,0).maximumMultiplier==2,
+        "missing legacy multi-frame capability permits precisely 2x");
+    check(capability(true,true,false,true,0).maximumMultiplier==1&&capability(true,true,false,true,2).maximumMultiplier==3&&
+        capability(true,true,false,true,99).maximumMultiplier==4,"known maximum clamps only to implemented multipliers");
     check(!supported(2,false,false,3)&&!supported(4,true,true,3),"unavailable and old driver refuse");
     check(!completed(UINT64_MAX,1)&&!completed(0,1)&&completed(7,7),"device-removed sentinel is not completion");
     check(!reusable(6,7,1)&&!reusable(7,7,2)&&reusable(7,7,1),"GPU and consumer leases both gate reuse");

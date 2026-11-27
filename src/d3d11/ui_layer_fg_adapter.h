@@ -86,7 +86,8 @@ public:
 namespace edvr::ui_layer_fg {
 // Exactly one producer eye owns each cache. Only the producer thread touches
 // its COM/SMAA fields. A foreign caller is rejected before reading those fields.
-// Snapshots never retain the mutable SMAA output: each publication copies it.
+// Retained snapshots copy the mutable SMAA output. Direct capture only borrows
+// it on this context while the sink queues its copy.
 class CaptureCache {
     std::atomic<DWORD> thread_{0};
     Ptr<ID3D11Device> device_;
@@ -237,19 +238,27 @@ inline bool copyPlane(ID3D11DeviceContext* context, ID3D11Device* device,
         retained.description = desc; retained.viewDescription = sd;
     } else ++cache.planeReuses;
     texture = retained.texture; view = retained.view;
-    // The cross-API fence is signalled by the caller AFTER capture returns.
     context->CopyResource(texture.Get(), source);
     return SUCCEEDED(device->GetDeviceRemovedReason());
 }
 
 using Smooth = ID3D11ShaderResourceView*(*)(UiLayerSmaa&, ID3D11DeviceContext*, ID3D11ShaderResourceView*);
-inline std::shared_ptr<const UiLayerFgSnapshot> capture(ID3D11DeviceContext* context,
+// Validate and prepare the final producer planes before handing them to a
+// synchronous consumer. All later producer writes on this immediate context
+// are ordered after the consumer's copy commands.
+template<class Consume>
+bool withPlanes(ID3D11DeviceContext* context,
     ID3D11Texture2D* frame, const Source& source, CaptureCache& cache, UiLayerFgInfo* info,
-    Smooth runSmooth = uiLayerSmaaRun) noexcept {
-    UiLayerFgInfo result = source.info;
+    Smooth runSmooth, Consume&& consume) noexcept {
+    UiLayerFgPlanes planes;
+    auto& result = planes.info;
+    result = source.info;
     result.fullSupported = result.empty = result.smoothingApplied = false;
-    const auto fail = [&](UiLayerFgRefusal refusal) -> std::shared_ptr<const UiLayerFgSnapshot> {
-        result.refusal = refusal; if (info) *info = result; return {};
+    const auto fail = [&](UiLayerFgRefusal refusal) {
+        result.fullSupported = result.empty = result.smoothingApplied = false;
+        result.refusal = refusal;
+        if (info) *info = result;
+        return false;
     };
     try {
         auto facts = source.facts;
@@ -277,45 +286,76 @@ inline std::shared_ptr<const UiLayerFgSnapshot> capture(ID3D11DeviceContext* con
                     return fail(UiLayerFgRefusal::SizeMismatch);
             }
         } else if (source.useMult) return fail(UiLayerFgRefusal::IncompletePublication);
-        auto snapshot = std::make_shared<UiLayerFgSnapshot>();
-        snapshot->device = device; snapshot->context = context; snapshot->useMult = source.useMult;
-        std::memcpy(snapshot->uv, source.uv, sizeof(snapshot->uv));
-        if (facts.hasUi) {
-            snapshot->storage = cache.acquire();
-            if (!snapshot->storage) return fail(UiLayerFgRefusal::CopyFailed);
-        }
-        if (facts.hasUi && source.useMult &&
-            !copyPlane(context, device.Get(), source.multiply, source.multiplyView, snapshot->storage->multiply,
-                snapshot->multiply, snapshot->multiplySrv, cache))
-            return fail(UiLayerFgRefusal::CopyFailed);
+        planes.layer = facts.hasUi ? source.layer : nullptr;
+        planes.useMult = source.useMult;
+        planes.multiply = source.useMult ? source.multiply : nullptr;
+        std::memcpy(planes.layerUv, source.uv, sizeof(planes.layerUv));
+        auto* layerView = facts.hasUi ? source.layerView : nullptr;
+        Ptr<ID3D11Texture2D> smoothedTexture;
         if (facts.hasUi && (source.smooth || source.fxaa)) {
             UiLayerSmaaFail failure;
             const bool ready = source.fxaa ? cache.ensureFxaa(fd.Width, fd.Height, &failure)
                                            : cache.ensure(fd.Width, fd.Height, &failure);
             if (!ready) return fail(UiLayerFgRefusal::CopyFailed);
-            // HUD antialiasing changes compute bindings. Its guard also covers failure
-            // and exception exits; raw and empty copies leave bindings alone.
+            // Restore compute state before giving the final texture to the sink.
             ComputeStateGuard restoreCompute(context);
-            // The live source is read before its next ordered clear/write on
-            // this same producer context. Only the FINAL smoothed plane needs
-            // a deep copy; no redundant raw-layer snapshot is allocated.
-            ID3D11ShaderResourceView* smoothed = source.fxaa ? uiLayerFxaaRun(cache.fxaa, context, source.layerView) :
+            layerView = source.fxaa ? uiLayerFxaaRun(cache.fxaa, context, source.layerView) :
                 runSmooth ? runSmooth(cache.smaa, context, source.layerView) : nullptr;
-            Ptr<ID3D11Resource> resource; Ptr<ID3D11Texture2D> texture;
-            if (smoothed) smoothed->GetResource(&resource);
-            if (!resource || FAILED(resource.As(&texture)) ||
-                !copyPlane(context, device.Get(), texture.Get(), smoothed, snapshot->storage->layer,
-                    snapshot->layer, snapshot->layerSrv, cache))
+            Ptr<ID3D11Resource> resource;
+            if (layerView) layerView->GetResource(&resource);
+            if (!resource || FAILED(resource.As(&smoothedTexture)) ||
+                !planeMatches(device.Get(), smoothedTexture.Get(), layerView, fd.Width, fd.Height))
                 return fail(UiLayerFgRefusal::CopyFailed);
+            planes.layer = smoothedTexture.Get();
             result.smoothingApplied = true;
-        } else if (facts.hasUi &&
-            !copyPlane(context, device.Get(), source.layer, source.layerView, snapshot->storage->layer,
-                snapshot->layer, snapshot->layerSrv, cache)) {
-            return fail(UiLayerFgRefusal::CopyFailed);
         }
         result.empty = !facts.hasUi; result.fullSupported = true; result.refusal = UiLayerFgRefusal::None;
-        snapshot->info = result; if (info) *info = result; return snapshot;
+        if (!consume(device.Get(), planes, layerView)) return fail(UiLayerFgRefusal::CopyFailed);
+        if (info) *info = result;
+        return true;
     } catch (...) { return fail(UiLayerFgRefusal::CopyFailed); }
+}
+
+inline bool captureTo(ID3D11DeviceContext* context, ID3D11Texture2D* frame,
+    const Source& source, CaptureCache& cache, UiLayerFgCaptureSink sink, void* cookie,
+    UiLayerFgInfo* info, Smooth runSmooth = uiLayerSmaaRun) noexcept {
+    if (!sink) {
+        if (info) {
+            *info = source.info;
+            info->fullSupported = info->empty = info->smoothingApplied = false;
+            info->refusal = UiLayerFgRefusal::InvalidArgument;
+        }
+        return false;
+    }
+    return withPlanes(context, frame, source, cache, info, runSmooth,
+        [&](ID3D11Device*, const UiLayerFgPlanes& planes, ID3D11ShaderResourceView*) {
+            return sink(cookie, planes);
+        });
+}
+
+inline std::shared_ptr<const UiLayerFgSnapshot> capture(ID3D11DeviceContext* context,
+    ID3D11Texture2D* frame, const Source& source, CaptureCache& cache, UiLayerFgInfo* info,
+    Smooth runSmooth = uiLayerSmaaRun) noexcept {
+    std::shared_ptr<UiLayerFgSnapshot> snapshot;
+    withPlanes(context, frame, source, cache, info, runSmooth,
+        [&](ID3D11Device* device, const UiLayerFgPlanes& planes, ID3D11ShaderResourceView* layerView) {
+            auto retained = std::make_shared<UiLayerFgSnapshot>();
+            retained->info = planes.info; retained->device = device; retained->context = context;
+            retained->useMult = planes.useMult;
+            std::memcpy(retained->uv, planes.layerUv, sizeof(retained->uv));
+            if (!planes.info.empty) {
+                retained->storage = cache.acquire();
+                if (!retained->storage || !copyPlane(context, device, planes.layer, layerView,
+                        retained->storage->layer, retained->layer, retained->layerSrv, cache))
+                    return false;
+                if (planes.useMult && !copyPlane(context, device, planes.multiply, source.multiplyView,
+                        retained->storage->multiply, retained->multiply, retained->multiplySrv, cache))
+                    return false;
+            }
+            snapshot = std::move(retained);
+            return true;
+        });
+    return snapshot;
 }
 
 } // namespace edvr::ui_layer_fg

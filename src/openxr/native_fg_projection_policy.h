@@ -1,6 +1,12 @@
 #pragma once
+#include <openxr/openxr.h>
 
 namespace edvr::openxr::fgprojection {
+// With no per-pixel geometry, only rays from the same optical center have
+// a depth-independent correspondence. Use each actual eye, including its IPD.
+inline bool sameOpticalCenter(const XrVector3f& a,const XrVector3f& b) noexcept {
+  return a.x==b.x&&a.y==b.y&&a.z==b.z;
+}
 struct Selection {
   bool separateUi=false;
   bool nativeWorld=false;

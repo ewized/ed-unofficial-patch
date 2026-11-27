@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <future>
+#include <thread>
 #include <vector>
 
 using namespace edvr::native_reflex;
@@ -373,6 +375,47 @@ void firstSleepModeRace() {
           "retired transport permits only an Off withdrawal of an owned enable");
 }
 
+void retryPendingEnrollment() {
+    detail::FrameSleepHistory oldFrames;
+    std::atomic<bool> vendorSleepPending{false};
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto wake = release.get_future();
+    std::thread oldSimulation([&] {
+        oldFrames.sleep(1, [&] {
+            vendorSleepPending.store(true, std::memory_order_release);
+            entered.set_value();
+            wake.wait();
+            vendorSleepPending.store(false, std::memory_order_release);
+            return true;
+        });
+    });
+    started.wait();
+    oldFrames.retire();
+
+    detail::FrameEnrollmentRetry replacement;
+    constexpr uint64_t acquiredMs = 1000;
+    constexpr auto interval = detail::FrameEnrollmentRetry::kRetryIntervalMs;
+    replacement.begin(vendorSleepPending.load(std::memory_order_acquire), acquiredMs);
+    check(replacement.pending() && !replacement.attempt(acquiredMs + interval - 1),
+          "replacement stays pending with the previous session's Sleep still held");
+    check(replacement.attempt(acquiredMs + interval) && vendorSleepPending.load(std::memory_order_acquire) &&
+          !replacement.attempt(acquiredMs + interval), "a still-pending enrollment retry is bounded");
+    release.set_value();
+    oldSimulation.join();
+    check(!oldFrames.firstFrame() && replacement.attempt(acquiredMs + 2 * interval) &&
+          !vendorSleepPending.load(std::memory_order_acquire),
+          "same replacement can retry after the retired session's Sleep returns");
+    replacement.settle();
+    check(!replacement.pending() && !replacement.attempt(acquiredMs + 3 * interval),
+          "settled enrollment stops retrying");
+
+    detail::FrameEnrollmentRetry permanentlyRefused;
+    permanentlyRefused.begin(false, acquiredMs);
+    check(!permanentlyRefused.attempt(acquiredMs + interval),
+          "a permanent enrollment refusal never opens a retry");
+}
+
 void acceptedAndRefusedRequests() {
     driver = {};
     ModeHistory history;
@@ -435,6 +478,60 @@ void delayedCleanup() {
           "a refused Off leaves cleanup armed without scheduling a readback");
     closeMode(history, nullptr, 7);
     check(driver.writes == std::vector<Mode>{Mode::On, Mode::Off, Mode::Off}, "close retries a refused Off");
+}
+
+void monitorEffectiveMode() {
+    constexpr uint64_t presentMs = 5000;
+    constexpr auto interval = ModeHistory::kEnabledReadbackIntervalMs;
+    for (bool unreadableFinalSample : {false, true}) {
+        driver = {};
+        ModeHistory history;
+        updateMode(history, nullptr, Mode::Boost, 7);
+        history.watchEnabledReadback(true, presentMs);
+        for (unsigned i = 1; i < ModeHistory::kLastObservation; ++i)
+            notePresent(history, nullptr, 7, presentMs);
+        driver.readCode = unreadableFinalSample ? -1 : 0;
+        notePresent(history, nullptr, 7, presentMs);
+        check(history.confirmedMode().has_value() != unreadableFinalSample,
+              "the final startup readback can temporarily lose confirmation");
+
+        driver.readCode = 0;
+        driver.status.lowLatencyMode = unreadableFinalSample;
+        const auto startupReads = driver.reads;
+        check(!notePresent(history, nullptr, 7, presentMs + interval - 1) && driver.reads == startupReads,
+              "stable Presents respect the readback interval");
+        check(notePresent(history, nullptr, 7, presentMs + interval) && driver.reads == startupReads + 1 &&
+              history.confirmedMode().has_value() == unreadableFinalSample,
+              "a periodic read after Present 64 revokes Off or recovers from an unreadable final sample");
+        driver.status.lowLatencyMode = 1;
+        check(notePresent(history, nullptr, 7, presentMs + 2 * interval) && history.confirmedMode() == Mode::Boost &&
+              driver.writes == std::vector<Mode>{Mode::Boost},
+              "a fresh On readback reconfirms the accepted request without a second write");
+        history.watchEnabledReadback(false, presentMs + 2 * interval);
+        check(!notePresent(history, nullptr, 7, presentMs + 3 * interval),
+              "turning off Frame Generation stops the periodic mode read");
+    }
+}
+
+void expireFrameSource() {
+    detail::FrameSourceQualification qualification;
+    constexpr uint64_t firstMs = 1000;
+    constexpr uint64_t timeout = detail::FrameSourceQualification::kMaxSourceAgeMs;
+    qualification.publish(firstMs, firstMs);
+    const auto first = qualification.currentEpoch(firstMs);
+    check(first && qualification.currentEpoch(firstMs + timeout) == first,
+          "a completed source remains qualified through its inclusive lease deadline");
+    check(!qualification.currentEpoch(firstMs + timeout + 1) && qualification.available(),
+          "the admission read expires without any producer publication");
+    qualification.publish(firstMs + timeout + 2, firstMs + timeout + 2);
+    const auto second = qualification.currentEpoch(firstMs + timeout + 2);
+    check(second && second != first, "a source after the gap cannot revive the old epoch");
+    qualification.publish(firstMs + timeout + 3, firstMs + timeout + 3);
+    check(qualification.currentEpoch(firstMs + timeout + 3) == second,
+          "ordinary continuous complete sources keep the same epoch");
+    qualification.publish(0, firstMs + timeout + 4);
+    check(!qualification.currentEpoch(firstMs + timeout + 4),
+          "closing the source owner revokes its evidence before the deadline");
 }
 
 void refusedWithdrawal() {
@@ -532,8 +629,11 @@ int main(int argc, char** argv) {
     unconfirmedEnrollmentOff();
     enableAfterEnrolledOff();
     firstSleepModeRace();
+    retryPendingEnrollment();
     acceptedAndRefusedRequests();
     delayedCleanup();
+    monitorEffectiveMode();
+    expireFrameSource();
     refusedWithdrawal();
     modulePaths();
     frameTransport();

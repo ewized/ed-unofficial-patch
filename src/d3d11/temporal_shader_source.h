@@ -335,6 +335,11 @@ cbuffer P : register(b0) {
     float4 split;       // x the ship's radius in metres (nearer: the head's delta; farther and the far plane: the camera's); yzw unused
     float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 64 t6 (the smoke's depth) not bound, 128 the scanner's screen is up (its interface takes the head's path), 256 t7 (the private UI depth) not bound (until 319c1c5a, 2026-09-23, 256 was the retired per-object motion's bit: an eye dump older than that means that by it), 512 the uncovered-ground rule (#146: set on foot in VR with engine-record motion bound), so backgroundHistoryHidden also hides a point that was covered on all four texels of last frame's depth, 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
+// FG_MOTION_PARAMS_BEGIN
+#if EDVR_FG_MOTION
+    float4 fgWorld[3]; // same current-to-previous target-eye transform as the FG camera
+#endif
+// FG_MOTION_PARAMS_END
 };
 float3 rgbToYcocg(float3 c) {
     return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -905,6 +910,39 @@ groupshared uint gCount[88];
 )HLSL"
 // (adjacent literals: MSVC caps one at 16 KB)
 R"HLSL(
+// FG_MOTION_CAMERA_BEGIN
+#if EDVR_FG_MOTION
+// Undilated motion uses the surface at this texel for both route selection
+// and translation. SR independently keeps its nearest-depth neighbourhood.
+bool fgCameraMotion(float2 p, float3 ray, float centerDepth, out float2 motion) {
+    motion = 0.0;
+    bool finiteSurface = knobs.y != 0.0 && centerDepth > 0.0 && centerDepth > knobs.x;
+    float z = finiteSurface ? knobs.z / (centerDepth - knobs.x) : 0.0;
+    bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
+    bool world = knobs.y != 0.0 && tvCam.w != 0.0 && split.x > 0.0 &&
+                 (!finiteSurface || z > split.x) && !scannerUi;
+    float3 before;
+    if (world) {
+        float4 viewPosition = finiteSurface ? float4(ray * z, 1) : float4(ray, 0);
+        before = float3(dot(fgWorld[0], viewPosition), dot(fgWorld[1], viewPosition), dot(fgWorld[2], viewPosition));
+#if EDVR_CELESTIAL
+        float3 celestial;
+        if (finiteSurface && celestialPixel(p, ray, z, celestial)) before = celestial;
+#endif
+    } else {
+        // Ship-relative surfaces and scanner UI follow this eye's head pose.
+        before = float3(dot(dR0.xyz, ray), dot(dR1.xyz, ray), dot(dR2.xyz, ray));
+        if (finiteSurface) before = before * z + tvUsed.xyz;
+    }
+    if (!(before.z < -1e-6)) return false;
+    float2 t = before.xy / -before.z;
+    float2 uv = float2((t.x - tanPrev.x) / (tanPrev.y - tanPrev.x),
+                       (tanPrev.w - t.y) / (tanPrev.w - tanPrev.z));
+    motion = uv * float2(size) - 0.5 - p;
+    return true;
+}
+#endif
+// FG_MOTION_CAMERA_END
 // The motion vectors for a trained pass (DLAA): the same reprojection
 // the history fetch does, written out instead of used -- the pixel's
 // position last frame minus its position now, in render pixels, which
@@ -1071,8 +1109,17 @@ R"HLSL(
 #if EDVR_FG_MOTION
         // SR reactivity rejects history, not physical correspondence. Only an
         // actually unavailable vector uses NGX's exactly representable sentinel.
-        bool fgValid = projectionValid && !engineMasked && all(isfinite(motion)) && all(abs(motion) < 65504.0);
-        FGPhysicalMotion[id.xy] = fgValid ? motion : float2(65504.0, 65504.0);
+        float2 fgMotion = motion;
+        bool fgValid = projectionValid;
+        if (!trackedForeground && !engineMasked) {
+            fgValid = fgCameraMotion(p, d, sceneZraw, fgMotion);
+            // SR may have rejected a dilated point behind the eye before
+            // testing the same texel's hologram. Its center may still project.
+            float2 holoP; float holoZ;
+            if (fgValid && !projectionValid && holoPixel(p, 0, holoP, holoZ)) fgMotion = holoP - p;
+        }
+        fgValid = fgValid && !engineMasked && all(isfinite(fgMotion)) && all(abs(fgMotion) < 65504.0);
+        FGPhysicalMotion[id.xy] = fgValid ? fgMotion : float2(65504.0, 65504.0);
 #endif
 // FG_MOTION_WRITE_END
         float2 written = hidden ? float2(size)*2 : motion;

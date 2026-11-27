@@ -2,6 +2,7 @@
 #include "eye_share.h"
 #include "projection_math.h"
 #include "native_fg_overlay_shader.h"
+#include "native_fg_projection_policy.h"
 #include <cmath>
 #include <limits>
 
@@ -29,6 +30,7 @@ inline Mapping makeMapping(const XrView& destination,const XrView& source) {
     if(std::fabs(norm-1.)>=.001)return out;
     RawFov checked{};if(!fovToRaw(view->fov,checked))return out;
   }
+  if(!fgprojection::sameOpticalCenter(destination.pose.position,source.pose.position))return out;
   const auto dst=shareview::tangentsOf(destination.fov),src=shareview::tangentsOf(source.fov);
   if(!shareview::tangentsUsable(dst)||!shareview::tangentsUsable(src))return out;
   double rotation[3][3]{};
@@ -40,8 +42,6 @@ inline Mapping makeMapping(const XrView& destination,const XrView& source) {
   }
   const double a[4]={dst.left,dst.right,dst.up,dst.down},b[4]={src.left,src.right,src.up,src.down};
   for(unsigned i=0;i<4;++i){out.destinationTan[i]=float(a[i]);out.sourceTan[i]=float(b[i]);}
-  // Position is validated above but deliberately does not enter this mapping.
-  // A source distance/depth would be required for positional compensation.
   out.valid=true;return out;
 }
 

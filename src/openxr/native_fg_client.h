@@ -14,7 +14,8 @@
 
 namespace edvr::openxr {
 // Every method is serialized by the existing XR owner. Imported provider
-// resources live only until ALL phases have been copied to private images.
+// resources use a bounded allocation cache; independent import pins cover
+// ALL queued reads into private images even after cache eviction.
 class NativeFgClient final {
  public:
   struct Images {
@@ -27,7 +28,7 @@ class NativeFgClient final {
   };
   struct PollCounts {
     uint64_t noExport=0,priorImportPending=0,futurePose=0,providerFencePending=0;
-    uint64_t imported=0,behindBeforeCopy=0,textureOpens=0,eyeCopies=0;
+    uint64_t imported=0,behindBeforeCopy=0,textureOpens=0,eyeCopies=0,textureCacheHits=0;
   };
   const PollCounts& pollCounts() const {return counts_;}
   ~NativeFgClient() {
@@ -101,13 +102,14 @@ class NativeFgClient final {
     if(collected!=S_OK)return collected;
     if(images_.ready)return S_FALSE;
     if(!pending_.token) {
-      pending_={sizeof(pending_),EDVR_FG_BATCH_VERSION_3};
+      pending_={sizeof(pending_),EDVR_FG_BATCH_VERSION_4};
       const HRESULT hr=table_.poll(table_.context,&pending_);
       if(hr!=S_OK){if(hr==S_FALSE)++counts_.noExport;pending_={};return hr;}
     }
     const auto& b=pending_;
     const unsigned full=(1u<<multiplier)-1u;
-    if(b.size!=sizeof(b)||b.version!=EDVR_FG_BATCH_VERSION_3||!b.token||
+    if(!edvrFgBatchProtocol(b.size,b.version)||!b.token||
+       (b.version==EDVR_FG_BATCH_VERSION_4&&!b.allocationId)||
        b.generation!=generation||b.referenceGeneration!=reference||b.configGeneration!=config||!history||b.historyGeneration!=history||
        !b.currentSequence||(b.generatedCount&&b.currentSequence<=b.previousSequence)||b.multiplier!=multiplier||
        (b.phaseMask!=1u&&b.phaseMask!=full)||b.generatedCount!=((b.phaseMask==1u)?0u:multiplier-1u)||
@@ -118,7 +120,7 @@ class NativeFgClient final {
        (b.generatedCount&&(b.previousPoseDisplayTime<=0||b.previousPoseDisplayTime>=b.currentPoseDisplayTime))||
        !validViews(b.currentViews)|| (b.generatedCount&&!validViews(b.previousViews))||
        (b.uiFlags!=0&&b.uiFlags!=EDVR_FG_UI_NATIVE_COVERAGE)||b.reserved||
-       (b.uiFlags&&(!b.generatedCount||!b.uiTextures[0]||!b.uiTextures[1]))||
+       (b.uiFlags&&(b.version==EDVR_FG_BATCH_VERSION_2||!b.generatedCount||!b.uiTextures[0]||!b.uiTextures[1]))||
        (b.uiFlags&&(!b.nativeWorldTextures[0]||!b.nativeWorldTextures[1]))||
        (!b.uiFlags&&(b.uiTextures[0]||b.uiTextures[1]||b.nativeWorldTextures[0]||b.nativeWorldTextures[1])))return discardPending(E_INVALIDARG);
     if(!validTextureHandles(b))return discardPending(E_INVALIDARG);
@@ -145,34 +147,14 @@ class NativeFgClient final {
     Microsoft::WRL::ComPtr<ID3D11Device1> device1;
     hr=device_.As(&device1);if(FAILED(hr))return discardPending(hr);
     for(unsigned phase=0;phase<=b.generatedCount;++phase)for(unsigned eye=0;eye<2;++eye) {
-      ++counts_.textureOpens;
-      hr=device1->OpenSharedResource1(b.textures[phase][eye],IID_PPV_ARGS(&inputs[phase][eye]));
+      hr=importTexture(device1.Get(),b,phase*2+eye,b.textures[phase][eye],inputs[phase][eye]);
       if(FAILED(hr))return discardPending(hr);
-      D3D11_TEXTURE2D_DESC desc{};inputs[phase][eye]->GetDesc(&desc);
-      if(desc.Width!=width||desc.Height!=height||uint32_t(desc.Format)!=b.format||desc.MipLevels!=1||
-         desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality||
-         desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return discardPending(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(inputs[phase][eye].Get())))return discardPending(E_OUTOFMEMORY);
     }
     if(b.uiFlags)for(unsigned eye=0;eye<2;++eye) {
-      ++counts_.textureOpens;
-      hr=device1->OpenSharedResource1(b.uiTextures[eye],IID_PPV_ARGS(&nativeUi[eye]));
+      hr=importTexture(device1.Get(),b,2*EDVR_FG_MAX_PHASES+eye,b.uiTextures[eye],nativeUi[eye]);
       if(FAILED(hr))return discardPending(hr);
-      D3D11_TEXTURE2D_DESC desc{};nativeUi[eye]->GetDesc(&desc);
-      if(desc.Width!=width||desc.Height!=height||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM||
-         desc.MipLevels!=1||desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality)
-        return discardPending(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeUi[eye].Get())))return discardPending(E_OUTOFMEMORY);
-    }
-    if(b.uiFlags)for(unsigned eye=0;eye<2;++eye) {
-      ++counts_.textureOpens;
-      hr=device1->OpenSharedResource1(b.nativeWorldTextures[eye],IID_PPV_ARGS(&nativeWorld[eye]));
+      hr=importTexture(device1.Get(),b,2*EDVR_FG_MAX_PHASES+2+eye,b.nativeWorldTextures[eye],nativeWorld[eye]);
       if(FAILED(hr))return discardPending(hr);
-      D3D11_TEXTURE2D_DESC desc{};nativeWorld[eye]->GetDesc(&desc);
-      if(desc.Width!=width||desc.Height!=height||desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM||
-         desc.MipLevels!=1||desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality)
-        return discardPending(E_INVALIDARG);
-      if(!importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(nativeWorld[eye].Get())))return discardPending(E_OUTOFMEMORY);
     }
     hr=context4_->Wait(ready.Get(),b.readyValue);if(FAILED(hr))return discardPending(hr);
     importPins_.readsMayStart();
@@ -231,6 +213,7 @@ class NativeFgClient final {
   HRESULT invalidate(uint32_t reason) {
     if(!onOwner())return E_UNEXPECTED;
     importPins_.invalidate();
+    importCache_.clear(); // Existing fence pins, never this cache, own queued GPU reads.
     images_.ready=false;
     if(pending_.token&&!quarantined_)discardPending(S_FALSE);
     return table_.context?table_.invalidate(table_.context,reason):S_FALSE;
@@ -242,6 +225,7 @@ class NativeFgClient final {
     if(pending_.token)return S_FALSE;
     const auto collected=collectImportPins();
     if(collected!=S_OK)return collected;
+    importCache_.clear();
     for(auto& image:images_.phases)image.reset();
     images_.nativeUi.reset();images_.nativeWorld.reset();
     images_.ready=false;images_.next=0;images_.metadata={};
@@ -276,10 +260,51 @@ class NativeFgClient final {
     for(auto& image:images_.phases)image.shutdown();
     images_.nativeUi.shutdown();
     images_.nativeWorld.shutdown();
+    importCache_.clear();
     table_={};device5_.Reset();context4_.Reset();retired_.Reset();context_.Reset();device_.Reset();
     if(retiredHandle_){CloseHandle(retiredHandle_);retiredHandle_=nullptr;}return S_OK;
   }
  private:
+  using ImportedTexture=Microsoft::WRL::ComPtr<ID3D11Texture2D>;
+  using TextureDescription=std::array<uint32_t,11>;
+  using ImportCache=NativeFgImportCache<ImportedTexture,TextureDescription>;
+  // All callers already validated epochs, the advertised descriptor and the
+  // provider fence. Revalidate actual descriptors on both hits and misses;
+  // every selected resource then gets its own consumer-fence lifetime pin.
+  HRESULT importTexture(ID3D11Device1* device,const EdvrFgBatch& batch,unsigned role,
+                        HANDLE handle,ImportedTexture& output) {
+    HRESULT opened=S_OK;
+    const auto open=[&] {
+      ImportedTexture texture;++counts_.textureOpens;
+      opened=device->OpenSharedResource1(handle,IID_PPV_ARGS(&texture));
+      if(FAILED(opened))texture.Reset();
+      return texture;
+    };
+    const auto describe=[&](const ImportedTexture& texture,TextureDescription& fingerprint) {
+      D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+      if(desc.Width!=batch.width||desc.Height!=batch.height||uint32_t(desc.Format)!=batch.format||
+         desc.MipLevels!=1||desc.ArraySize!=1||desc.SampleDesc.Count!=1||desc.SampleDesc.Quality||
+         desc.Format!=DXGI_FORMAT_R8G8B8A8_UNORM)return false;
+      fingerprint={desc.Width,desc.Height,desc.MipLevels,desc.ArraySize,uint32_t(desc.Format),
+        desc.SampleDesc.Count,desc.SampleDesc.Quality,uint32_t(desc.Usage),desc.BindFlags,desc.CPUAccessFlags,desc.MiscFlags};
+      return true;
+    };
+    if(batch.version==EDVR_FG_BATCH_VERSION_4) {
+      const ImportCache::Signature signature{batch.width,batch.height,batch.format,
+        batch.adapterLuidLow,uint32_t(batch.adapterLuidHigh)};
+      const auto result=importCache_.resolve(batch.allocationId,signature,role,reinterpret_cast<uintptr_t>(handle),
+        open,describe,output);
+      if(result==ImportCache::Result::OpenFailed)return FAILED(opened)?opened:E_FAIL;
+      if(result==ImportCache::Result::Invalid)return E_INVALIDARG;
+      if(result==ImportCache::Result::Reused)++counts_.textureCacheHits;
+    } else {
+      // An exact legacy prefix has no allocation-incarnation proof. Opening
+      // every image is the safe route; never derive an identity from handles.
+      output=open();if(FAILED(opened)||!output)return FAILED(opened)?opened:E_FAIL;
+      TextureDescription descriptor{};if(!describe(output,descriptor))return E_INVALIDARG;
+    }
+    return importPins_.add(Microsoft::WRL::ComPtr<IUnknown>(output.Get()))?S_OK:E_OUTOFMEMORY;
+  }
   static bool validTextureHandles(const EdvrFgBatch& batch) {
     HANDLE seen[2*EDVR_FG_MAX_PHASES+4]{};unsigned count=0;
     const auto distinct=[&](HANDLE handle) {
@@ -337,5 +362,6 @@ class NativeFgClient final {
   HANDLE retiredHandle_=nullptr;uint64_t retiredValue_=0;bool quarantined_=false,closing_=false;
   bool notedBatch_=false,notedGenerated_=false;
   NativeFgImportPins<Microsoft::WRL::ComPtr<IUnknown>> importPins_;
+  ImportCache importCache_;
 };
 } // namespace edvr::openxr

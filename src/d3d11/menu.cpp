@@ -581,6 +581,20 @@ bool frameGenerationRequiresReflex(const MenuRowDef& d) {
            nativeFgSelection(shownValue("fix", "frame_generation")).enabled();
 }
 
+bool isNativeFgRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "frame_generation") == 0;
+}
+
+std::string nativeFgCapabilityHint(unsigned maximum, const std::string& value) {
+    if (maximum == 0) return "The GPU's Frame Generation limit is not known yet.";
+    if (maximum == 1)
+        return "Frame Generation is unavailable on this GPU. Off is available.";
+    std::string text = "GPU Frame Generation limit: " + std::to_string(maximum) + "x.";
+    if (!nativeFgOptionEnabled(value, maximum))
+        text += " This selection is unsupported.";
+    return text;
+}
+
 const char* reflexChoiceWord(const MenuRowDef& d, const std::string& saved) {
     if (!frameGenerationRequiresReflex(d)) return saved.c_str();
     return native_reflex::modeWord(native_reflex::forFrameGeneration(native_reflex::parseMode(saved), true));
@@ -1280,6 +1294,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
     const bool unavailableNvidiaLowLatency = isNvidiaLowLatencyRow(d) && !native_reflex::availableForUser();
     const bool requiresReflex = frameGenerationRequiresReflex(d);
+    const unsigned fgMaximum = isNativeFgRow(d) ? nativeFgMaximumMultiplier() : 0;
     std::string packed(d.choices);
     size_t pos = 0;
     while (pos <= packed.size()) {
@@ -1311,6 +1326,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             // DLSS/DLAA on an NVIDIA adapter, FSR 4.1 on an AMD adapter. A disabled choice is skipped by stepping and left
             // out of the choice list. The stored value still displays, so an ini that already names one keeps its label.
             if (temporalAaRow(d) && !edvr::temporalAaChoiceOffered(c.value.c_str(), g_menuGpu)) c.disabled = true;
+            if (isNativeFgRow(d) && !nativeFgOptionEnabled(c.value, fgMaximum)) c.disabled = true;
             if (unavailableNvidiaLowLatency && c.value != "off") c.disabled = true;
             if (!requiresReflex || c.value != "off") out.push_back(c);
         }
@@ -2999,6 +3015,8 @@ void buildContent(MenuContent& c) {
                                                          : native_reflex::ModeStatus::Unavailable;
             const char* nvidiaHint = hi && nvidiaLowLatencyRow
                 ? native_reflex::modeStatusHint(nvidiaStatus, !unavailableNvidiaLowLatency) : nullptr;
+            const std::string fgHint = hi && isNativeFgRow(d)
+                ? nativeFgCapabilityHint(nativeFgMaximumMultiplier(), r.value) : std::string{};
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -3099,6 +3117,8 @@ void buildContent(MenuContent& c) {
                                   : kMenuRow;
             if (nvidiaHint)
                 snprintf(c.hint, sizeof(c.hint), "%s", nvidiaHint);
+            else if (!fgHint.empty())
+                snprintf(c.hint, sizeof(c.hint), "%s", fgHint.c_str());
             else if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && glassDirtRow)
@@ -3186,6 +3206,7 @@ void buildContent(MenuContent& c) {
                 }
                 if (openxrScaleRow) body += "\n" + openxrResolutionTooltip(res);
                 if (nvidiaHint) body += std::string("\n") + nvidiaHint;
+                if (!fgHint.empty()) body += std::string("\n") + fgHint;
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
                                       : "\nEnter writes it, Escape leaves it alone.";
@@ -3506,6 +3527,12 @@ void enqueueChange(WriteJob& job, bool held = false) {
 
 void applyChange(int defIndex, const std::string& fileValue, bool held = false) {
     const MenuRowDef& d = kMenuRows[defIndex];
+    const unsigned fgMaximum = isNativeFgRow(d) ? nativeFgMaximumMultiplier() : 0;
+    if (isNativeFgRow(d) && !nativeFgOptionEnabled(fileValue, fgMaximum)) {
+        g_s.lastWrite = nativeFgCapabilityHint(fgMaximum, fileValue);
+        g_s.contentDirty = true;
+        return;
+    }
     const bool unavailable = isNvidiaLowLatencyRow(d) && fileValue != "off" && !native_reflex::availableForUser();
     const bool required = fileValue == "off" && frameGenerationRequiresReflex(d);
     if (unavailable || required) {
@@ -5692,6 +5719,12 @@ void menuTick(ID3D11Device* dev) {
             if (nvidiaLowLatencyAvailable != lastNvidiaLowLatencyAvailable || nvidiaModeStatus != lastNvidiaModeStatus) {
                 lastNvidiaLowLatencyAvailable = nvidiaLowLatencyAvailable;
                 lastNvidiaModeStatus = nvidiaModeStatus;
+                s.contentDirty = true;
+            }
+            static unsigned lastFgMaximum = 0;
+            const unsigned fgMaximum = nativeFgMaximumMultiplier();
+            if (lastFgMaximum != fgMaximum) {
+                lastFgMaximum = fgMaximum;
                 s.contentDirty = true;
             }
             static uint64_t lastNativeRevision = 0;

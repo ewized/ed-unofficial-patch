@@ -8023,34 +8023,40 @@ bool uiLayerFgRetireStorage(ID3D11DeviceContext* context) noexcept {
     return ui_layer_fg::retireStorage(g_fgCaptureCache, context, device.Get());
 }
 
-std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
+static bool uiLayerFgSource(
     ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
     ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
-    UiLayerFgInfo* info) noexcept {
+    UiLayerFgFacts& facts, ui_layer_fg::Source* source, UiLayerFgInfo* info) noexcept {
     UiLayerFgInfo result;
     result.sequence = sequence; result.eye = eye;
-    const auto fail = [&](UiLayerFgRefusal why) -> std::shared_ptr<const UiLayerFgSnapshot> {
+    const auto fail = [&](UiLayerFgRefusal why) {
         result.refusal = why;
         if (info) *info = result;
-        return {};
+        return false;
     };
     try {
-        UiLayerFgFacts facts;
-        facts.arguments = context && frame && region && layerUv && sequence && eye < 2;
+        facts.arguments = (context || !source) && frame && region && layerUv && sequence && eye < 2;
         if (!facts.arguments) return fail(uiLayerFgAdmission(facts));
         Ptr<ID3D11Device> device;
         frame->GetDevice(&device);
+        Ptr<ID3D11DeviceContext> observationContext;
+        if (!context && device) {
+            device->GetImmediateContext(&observationContext);
+            context = observationContext.Get();
+        }
         facts.owner = fgOwner(context, device.Get());
         if (!facts.owner) return fail(uiLayerFgAdmission(facts));
-        Eye& e = g_eye[eye];
+        const Eye& e = g_eye[eye];
         D3D11_TEXTURE2D_DESC fd{}; frame->GetDesc(&fd);
-        result.width = fd.Width; result.height = fd.Height; result.frameFormat = fd.Format;
-        result.ownerThread = GetCurrentThreadId();
-        result.sourceDevice = reinterpret_cast<uintptr_t>(device.Get());
+        if (source || info) {
+            result.width = fd.Width; result.height = fd.Height; result.frameFormat = fd.Format;
+            result.ownerThread = GetCurrentThreadId();
+            result.sourceDevice = reinterpret_cast<uintptr_t>(device.Get());
+        }
         facts.available = !runtimeFlatProfile() && detail::g_uiQualityLive &&
             !g_stoodDown && !g_crispStoodDown && !g_weaponsStoodDown && !graphicsRuntimeDisabled();
         facts.sequence = e.submittedSeq == sequence && e.temporalOutSeq == sequence &&
-            e.doorFromPass && e.compositedSeq != sequence;
+            e.door.doorSeq == sequence && e.doorFromPass && e.compositedSeq != sequence;
         facts.hasUi = e.seq == sequence && e.draws != 0;
         const void* mine = e.submittedSeq == sequence ? e.submitted : nullptr;
         const void* other = g_eye[1 - eye].submitted;
@@ -8076,16 +8082,44 @@ std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
             (!multiply || (facts.hasUi && e.mTex && e.mSrv && e.mW == fd.Width && e.mH == fd.Height));
         const auto refusal = uiLayerFgAdmission(facts);
         if (refusal != UiLayerFgRefusal::None) return fail(refusal);
-        ui_layer_fg::Source source;
-        source.info = result; source.facts = facts; source.expectedFrame = e.temporalOut;
-        source.layer = e.tex.Get(); source.layerView = e.srv.Get();
-        source.multiply = e.mTex.Get(); source.multiplyView = e.mSrv.Get();
-        source.useMult = multiply;
-        source.smooth = g_hudAaVr == HudAaMode::kSmaa;
-        source.fxaa = g_hudAaVr == HudAaMode::kFxaa;
-        std::memcpy(source.uv, layerUv, sizeof(source.uv));
-        return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info);
+        if (source) {
+            source->info = result;
+            source->expectedFrame = e.temporalOut;
+            source->layer = e.tex.Get(); source->layerView = e.srv.Get();
+            source->multiply = e.mTex.Get(); source->multiplyView = e.mSrv.Get();
+            source->useMult = multiply;
+            source->smooth = g_hudAaVr == HudAaMode::kSmaa;
+            source->fxaa = g_hudAaVr == HudAaMode::kFxaa;
+            std::memcpy(source->uv, layerUv, sizeof(source->uv));
+        }
+        return true;
     } catch (...) { return fail(UiLayerFgRefusal::CopyFailed); }
+}
+
+bool uiLayerFgObserveCoverage(uint64_t sequence, unsigned eye, ID3D11Texture2D* frame,
+    const uint32_t region[4], const float layerUv[4], bool& hasUi) noexcept {
+    hasUi = false;
+    UiLayerFgFacts facts;
+    if (!uiLayerFgSource(nullptr, sequence, eye, frame, region, layerUv, facts, nullptr, nullptr)) return false;
+    hasUi = facts.hasUi;
+    return true;
+}
+
+std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(
+    ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgInfo* info) noexcept {
+    ui_layer_fg::Source source;
+    if (!uiLayerFgSource(context, sequence, eye, frame, region, layerUv, source.facts, &source, info)) return {};
+    return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info);
+}
+
+bool uiLayerFgCaptureTo(ID3D11DeviceContext* context, uint64_t sequence, uint32_t eye,
+    ID3D11Texture2D* frame, const uint32_t region[4], const float layerUv[4],
+    UiLayerFgCaptureSink sink, void* cookie, UiLayerFgInfo* info) noexcept {
+    ui_layer_fg::Source source;
+    if (!uiLayerFgSource(context, sequence, eye, frame, region, layerUv, source.facts, &source, info)) return false;
+    return ui_layer_fg::captureTo(context, frame, source, g_fgCaptureCache[eye], sink, cookie, info);
 }
 
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,

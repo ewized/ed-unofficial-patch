@@ -315,7 +315,12 @@ active can permit ED-UP to send an **On** or **On + Boost** request. ED-UP
 reads the driver mode again after the request to confirm the effective state.
 The graphics log records each request and immediate result (`native_reflex`)
 and samples accepted requests after 4, 16 and 64 successful game Presents
-(`native_reflex_readback`).
+(`native_reflex_readback`). While frame generation is selected, it continues
+checking the effective mode once per second. An unreadable or disabled mode
+withdraws frame-generation eligibility until a fresh confirmation arrives.
+Eligibility also expires after two seconds without a qualified rendered
+source, even if the VR application continues requesting poses or submitting
+eyes.
 
 While ED-UP owns the request, a refused **Off** request or a final readback
 that reports **On** or is unreadable schedules retries after 4, 16 and 64
@@ -367,6 +372,23 @@ the GPU cannot generate the selected number of frames. Generated frames also
 require the driver to confirm effective NVIDIA low latency. **Auto** starts at
 native cadence and switches between native and 2x using recent CPU and GPU
 application timing. These settings can be changed during a session.
+
+Once the GPU's supported multiplier is known, the menu disables choices above
+that limit. An unsupported saved value remains visible until you change it;
+ED-UP does not replace it with a lower multiplier. **Off** stays available.
+
+Generated images keep native HUD content only when it can be aligned with the
+world image. The HUD and its protected background do not carry reliable depth
+for translation. If either covered eye moves between an intermediate pose and
+the native endpoint, ED-UP presents the native pair. Even small head movements
+can therefore reduce or eliminate the generation benefit. Rotation about
+coincident eye positions and generated world images without HUD coverage
+remain supported.
+
+When coverage prevents generation, ED-UP returns to ordinary native rendering
+and keeps the selected mode. It checks fresh stereo pose and HUD information
+without repeatedly running the generation pipeline. Generation can resume
+after eligible pairs and fresh generation history are available.
 
 With frame generation selected, the Monitor page and FPS readout report the
 native and generated frames submitted to OpenXR. They measure application

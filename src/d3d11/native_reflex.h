@@ -54,6 +54,10 @@ struct LatencyBatch {
 };
 
 class FrameDriver;
+struct FrameDriverEnrollment {
+    std::shared_ptr<FrameDriver> driver;
+    bool pending = false;
+};
 
 enum class ModeStatus : uint8_t {
     Unavailable, Pending, ConfirmedOff, ConfirmedOn, ConfirmedOnWithBoostRequested,
@@ -113,6 +117,8 @@ public:
         frameDriver_ = frameDriver;
         noted_ = true;
         observing_ = false;
+        acceptedEnable_ = false;
+        nextEnabledReadbackMs_ = 0;
         retryNeeded_ = false;
         retryDelay_ = 0;
         status_ = ModeStatus::Unavailable;
@@ -135,6 +141,7 @@ public:
 
     bool requiresDriver() const noexcept { return requested_ != Mode::Off || needsReset_ || frameDriver_; }
     bool needsReset() const noexcept { return needsReset_; }
+    bool acceptedEnable() const noexcept { return acceptedEnable_; }
     bool observing() const noexcept { return observing_; }
     bool retryNeeded() const noexcept { return retryNeeded_; }
     void deferRequest() noexcept {
@@ -145,6 +152,7 @@ public:
     void acceptRequest(bool enabledBaseline = false) noexcept {
         if (requested_ != Mode::Off) {
             needsReset_ = true;
+            acceptedEnable_ = true;
             enabledBeforeOwnership_ |= enabledBaseline;
         } else if (enabledBeforeOwnership_) {
             // Off withdrew our request. The effective driver mode can still
@@ -170,6 +178,21 @@ public:
     }
 
     static constexpr unsigned kLastObservation = 64;
+    static constexpr uint64_t kEnabledReadbackIntervalMs = 1000;
+
+    // Keep observing an accepted enable while Frame Generation depends on
+    // effective driver mode. Confirmation never extends a setter's ownership.
+    void watchEnabledReadback(bool selected, uint64_t now) noexcept {
+        if (!selected || !acceptedEnable_) nextEnabledReadbackMs_ = 0;
+        else if (!nextEnabledReadbackMs_) delayEnabledReadback(now);
+    }
+    uint64_t nextEnabledReadbackMs() const noexcept { return nextEnabledReadbackMs_; }
+    bool enabledReadbackDue(uint64_t now) const noexcept {
+        return !observing_ && nextEnabledReadbackMs_ && now >= nextEnabledReadbackMs_;
+    }
+    void delayEnabledReadback(uint64_t now) noexcept {
+        nextEnabledReadbackMs_ = now + kEnabledReadbackIntervalMs;
+    }
 
     // Count only successful Presents from the acquired device and producer.
     // Advance any withdrawal backoff and return a readback number when due.
@@ -204,9 +227,11 @@ private:
     unsigned presents_ = 0;
     unsigned withdrawalRetries_ = 0;
     unsigned retryDelay_ = 0;
+    uint64_t nextEnabledReadbackMs_ = 0;
     bool noted_ = false;
     bool frameDriver_ = false;
     bool needsReset_ = false;
+    bool acceptedEnable_ = false;
     bool enabledBeforeOwnership_ = false;
     bool observing_ = false;
     bool retryNeeded_ = false;
@@ -364,6 +389,64 @@ private:
     std::atomic<uint64_t> attempted_{0};
     std::atomic<uint64_t> first_{0};
     std::atomic<bool> retired_{false};
+};
+
+// One serialized producer publishes complete-source timestamps. Readers
+// cannot extend their lifetime. If reporting resumes after a gap, keep old
+// work revoked even when no reader ran during the expired interval.
+class FrameSourceQualification {
+public:
+    static constexpr uint64_t kMaxSourceAgeMs = 2000;
+
+    static constexpr bool fresh(uint64_t completed, uint64_t now) noexcept {
+        return completed && now >= completed && now - completed <= kMaxSourceAgeMs;
+    }
+    void publish(uint64_t completed, uint64_t now) noexcept {
+        if (!fresh(completed, now)) completed = 0;
+        const auto previous = completeMs_.load(std::memory_order_relaxed);
+        if (previous == completed) return;
+        if (completed && fresh(previous, now)) {
+            completeMs_.store(completed, std::memory_order_release);
+            return;
+        }
+        epoch_.fetch_add(1, std::memory_order_acq_rel);
+        completeMs_.store(completed, std::memory_order_release);
+        epoch_.fetch_add(1, std::memory_order_release);
+    }
+    bool available() const noexcept { return completeMs_.load(std::memory_order_acquire) != 0; }
+    uint64_t currentEpoch(uint64_t now) const noexcept {
+        const auto epoch = epoch_.load(std::memory_order_acquire);
+        if ((epoch & 1) || !fresh(completeMs_.load(std::memory_order_acquire), now) ||
+            epoch != epoch_.load(std::memory_order_acquire)) return 0;
+        return epoch;
+    }
+
+private:
+    std::atomic<uint64_t> epoch_{0};
+    std::atomic<uint64_t> completeMs_{0};
+};
+
+// Only the producer may retry an explicitly deferred enrollment. Engine
+// callbacks wait for the transport (or permanent refusal) to be published.
+class FrameEnrollmentRetry {
+public:
+    static constexpr uint64_t kRetryIntervalMs = 250;
+
+    void begin(bool pending, uint64_t now) noexcept {
+        lastAttemptMs_ = now;
+        pending_.store(pending, std::memory_order_relaxed);
+    }
+    bool pending() const noexcept { return pending_.load(std::memory_order_acquire); }
+    bool attempt(uint64_t now) noexcept {
+        if (!pending() || now < lastAttemptMs_ || now - lastAttemptMs_ < kRetryIntervalMs) return false;
+        lastAttemptMs_ = now;
+        return true;
+    }
+    void settle() noexcept { pending_.store(false, std::memory_order_release); }
+
+private:
+    uint64_t lastAttemptMs_ = 0;
+    std::atomic<bool> pending_{false};
 };
 
 constexpr int kUnavailable = 1;
@@ -533,7 +616,7 @@ public:
 private:
     FrameDriver(ID3D11Device* device, bool ownGameSleep);
     void reportFailure(std::atomic<bool>& logged, const char* event, int code) noexcept;
-    friend std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device*);
+    friend FrameDriverEnrollment openFrameDriver(ID3D11Device*);
     friend detail::Result detail::applyFrameMode(FrameDriver&, ID3D11Device*, Mode, bool);
 
     ID3D11Device* const device_;
@@ -548,7 +631,8 @@ private:
 // Call at enrollment before the first ED-UP mode write. Validate API and
 // adapter once and refuse existing driver policy. A stale game-sleep bit can
 // be carried over only from an accepted ED-UP Sleep on this same device.
-std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device);
+// Pending means an earlier session's first Sleep still owns the device.
+FrameDriverEnrollment openFrameDriver(ID3D11Device* device);
 
 // Return true when a request first arrives, changes or retries. Accepted
 // requests begin a new observation window on the same device.
@@ -574,14 +658,23 @@ inline bool updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, ui
     return true;
 }
 
-inline void notePresent(ModeHistory& history, ID3D11Device* device, uint64_t session) {
-    const unsigned presents = history.notePresent();
-    if (!presents) return;
+inline void observeMode(ModeHistory& history, ID3D11Device* device, uint64_t session,
+                        uint64_t now, unsigned presents = 0) {
+    const auto prior = history.status();
     const auto result = detail::observe(device, history.requested());
     history.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
-    detail::logMode(history.requested(), "observe", session, result, presents);
+    if (presents || prior != history.status())
+        detail::logMode(history.requested(), "observe", session, result, presents);
+    if (history.nextEnabledReadbackMs()) history.delayEnabledReadback(now);
+}
+
+inline bool notePresent(ModeHistory& history, ID3D11Device* device, uint64_t session, uint64_t now = 0) {
+    const unsigned presents = history.notePresent();
+    if (!presents && !history.enabledReadbackDue(now)) return false;
+    observeMode(history, device, session, now, presents);
     if (presents == ModeHistory::kLastObservation)
         history.finishObservation();
+    return true;
 }
 
 // Try Off on normal close when a prior enable still belongs to this session.

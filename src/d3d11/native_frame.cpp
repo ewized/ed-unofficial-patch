@@ -45,6 +45,8 @@ struct State {
     edvr::native_reflex::ModeHistory lowLatency;
     edvr::native_reflex::FrameDriver* lowLatencyDriver = nullptr; // borrowed from explicit session owner
     DWORD lowLatencyProducerThread = 0;
+    bool lowLatencyEnrollmentPending = false;
+    bool frameGenerationSelected = false;
     uint64_t sequenceFloor = 0;
     bool active = false;
     bool invalidated = false;
@@ -78,27 +80,31 @@ constexpr uint64_t kLowLatencyTransportFault = uint64_t{1} << 61;
 constexpr uint64_t kLowLatencyAvailable = uint64_t{1} << 60;
 constexpr uint64_t kLowLatencyNoSession = UINT64_MAX;
 std::atomic<uint64_t> g_lowLatencyStamp{kLowLatencyNoSession};
+std::atomic<uint64_t> g_lowLatencyReadbackMs{0};
 std::atomic<edvr::native_reflex::ModeStatus> g_lowLatencyStatus{edvr::native_reflex::ModeStatus::Unavailable};
 std::atomic<const State*> g_lowLatencyProofOwner{nullptr};
 uint64_t g_lowLatencyProofSerial = 0; // native-frame owner under g_mutex
 
-void publishLowLatencyProof(State& state, bool changed) noexcept {
+void publishLowLatencyProof(State& state, bool changed, bool observed, uint64_t now) noexcept {
     using namespace edvr::native_reflex;
-    const auto qualification = fullFrameQualificationEpoch.load(std::memory_order_acquire);
-    if (!changed && availableForUser() && state.lowLatencyProof.load(std::memory_order_relaxed) &&
-        state.lowLatencyQualification.load(std::memory_order_relaxed) != qualification) {
+    const auto qualification = fullFrameQualification.currentEpoch(now);
+    if (!state.lowLatencyDriver || !qualification || frameSessionFaulted() ||
+        !state.lowLatency.acceptedEnable()) {
         state.lowLatencyProof.store(0, std::memory_order_release);
-        const auto result = detail::observe(state.device, state.lowLatency.requested());
-        state.lowLatency.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
+        state.lowLatencyQualification.store(qualification, std::memory_order_release);
+        return;
+    }
+    if (state.lowLatencyQualification.load(std::memory_order_relaxed) != qualification) {
+        state.lowLatencyProof.store(0, std::memory_order_release);
+        if (!changed && !observed)
+            observeMode(state.lowLatency, state.device, state.generation, now);
+        state.lowLatencyQualification.store(qualification, std::memory_order_release);
     }
     const auto mode = state.lowLatency.confirmedMode();
-    if (!state.lowLatencyDriver || !availableForUser() || !state.lowLatency.needsReset() ||
-        !mode || *mode == Mode::Off) {
+    if (!mode || *mode == Mode::Off) {
         state.lowLatencyProof.store(0, std::memory_order_release);
     } else if (!state.lowLatencyProof.load(std::memory_order_relaxed)) {
-        state.lowLatencyQualification.store(qualification, std::memory_order_release);
         state.lowLatencyProof.store(++g_lowLatencyProofSerial, std::memory_order_release);
-        g_lowLatencyProofOwner.store(&state, std::memory_order_release);
     }
 }
 
@@ -112,30 +118,42 @@ uint64_t lowLatencyConfigStamp() {
 // avoids issuing a mode request from a config change in flight.
 void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
     using namespace edvr::native_reflex;
+    const uint64_t now = frameSessionClockMs();
+    if (fromPresent && state.lowLatencyEnrollmentPending) {
+        const auto enrollment = retryFrameSession(state.device, state.generation, now);
+        state.lowLatencyDriver = enrollment.driver;
+        state.lowLatencyEnrollmentPending = enrollment.pending;
+    }
     const uint64_t stamp = lowLatencyConfigStamp();
     bool changed = false;
     if (stamp != (cached & ~kLowLatencyObservationPending)) {
         Mode mode = Mode::Off;
+        bool frameGenerationSelected = false;
         if ((stamp & 1) && (stamp & kLowLatencyAvailable) && !(stamp & kLowLatencyTransportFault) &&
             !edvr::graphicsRuntimeDisabled() && state.lowLatencyDriver) {
             const auto& cfg = edvr::Config::get();
             const auto requested = parseMode(cfg.getString("fix.nvidia_reflex", "off"));
             // Keep the request stable during generator warmup and native fallback.
             const auto selected = edvr::nativeFgSelection(cfg.getString("fix.frame_generation", "off"));
-            mode = forFrameGeneration(requested, selected.enabled());
+            frameGenerationSelected = selected.enabled();
+            mode = forFrameGeneration(requested, frameGenerationSelected);
         }
         if (stamp != lowLatencyConfigStamp()) return;
+        state.frameGenerationSelected = frameGenerationSelected;
         if (state.lowLatency.requested() != mode || state.lowLatency.retryNeeded())
             state.lowLatencyProof.store(0, std::memory_order_release);
         changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);
     }
     // The Present that changed the mode precedes the new request.
-    if (fromPresent && !changed) notePresent(state.lowLatency, state.device, state.generation);
+    state.lowLatency.watchEnabledReadback(state.frameGenerationSelected, now);
+    const bool observed = fromPresent && !changed && notePresent(state.lowLatency, state.device, state.generation, now);
     if (fromPresent) reportFrameSession(state.generation);
-    publishLowLatencyProof(state, changed);
+    publishLowLatencyProof(state, changed, observed, frameSessionClockMs());
     g_lowLatencyStatus.store(state.lowLatency.status(), std::memory_order_release);
+    g_lowLatencyReadbackMs.store(state.lowLatency.nextEnabledReadbackMs(), std::memory_order_release);
     g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0) |
-                               (state.lowLatency.retryNeeded() ? kLowLatencyNeedsRefresh : 0),
+                               (state.lowLatency.retryNeeded() || state.lowLatencyEnrollmentPending
+                                    ? kLowLatencyNeedsRefresh : 0),
                             std::memory_order_release);
 }
 
@@ -730,6 +748,7 @@ HRESULT WINAPI close(void* context) {
     state->lowLatencyDriver = nullptr;
     edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
     g_lowLatencyStamp.store(kLowLatencyNoSession, std::memory_order_release);
+    g_lowLatencyReadbackMs.store(0, std::memory_order_release);
     g_lowLatencyStatus.store(edvr::native_reflex::ModeStatus::Unavailable, std::memory_order_release);
     state->active = false;
     state->device = nullptr;
@@ -755,10 +774,11 @@ native_reflex::ModeStatus native_reflex::modeStatusForUser() noexcept {
 uint64_t native_reflex::confirmedFrameGenerationProof(ID3D11Device* device, uint64_t generation) noexcept {
     const auto* owner = g_lowLatencyProofOwner.load(std::memory_order_acquire);
     if (!owner || owner->lowLatencyIdentity != device || owner->generation != generation ||
-        !runtimeVrProfile() || graphicsRuntimeDisabled() || !availableForUser()) return 0;
+        !runtimeVrProfile() || graphicsRuntimeDisabled() || frameSessionFaulted()) return 0;
     const auto token = owner->lowLatencyProof.load(std::memory_order_acquire);
-    if (owner->lowLatencyQualification.load(std::memory_order_acquire) !=
-        fullFrameQualificationEpoch.load(std::memory_order_acquire)) return 0;
+    if (!token) return 0;
+    const auto qualification = fullFrameQualification.currentEpoch(frameSessionClockMs());
+    if (!qualification || owner->lowLatencyQualification.load(std::memory_order_acquire) != qualification) return 0;
     return token == owner->lowLatencyProof.load(std::memory_order_acquire) ? token : 0;
 }
 
@@ -766,13 +786,15 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     if (!device) return;
     const auto cached = g_lowLatencyStamp.load(std::memory_order_acquire);
     if (cached == kLowLatencyNoSession) return;
-    if (cached == lowLatencyConfigStamp()) {
+    const auto readbackMs = g_lowLatencyReadbackMs.load(std::memory_order_acquire);
+    if (cached == lowLatencyConfigStamp() && (!readbackMs || frameSessionClockMs() < readbackMs)) {
         // The active transport owns the cadence and checks the producer.
         // It can publish new frame-source availability even with stable settings.
         reportFrameSession(0);
         const auto* owner = g_lowLatencyProofOwner.load(std::memory_order_acquire);
-        if (!availableForUser() || !owner || owner->lowLatencyQualification.load(std::memory_order_acquire) ==
-            fullFrameQualificationEpoch.load(std::memory_order_acquire)) return;
+        const auto qualification = fullFrameQualification.currentEpoch(frameSessionClockMs());
+        if (!qualification || !owner || owner->lowLatencyQualification.load(std::memory_order_acquire) == qualification)
+            return;
     }
     // Foreign Presents cannot advance readbacks or change the saved mode.
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -904,7 +926,10 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     g_current = &state;
     // NativeRuntimeHost acquires through the game producer dispatcher.
     state.lowLatencyProducerThread = GetCurrentThreadId();
-    state.lowLatencyDriver = edvr::native_reflex::startFrameSession(state.device, state.generation);
+    const auto enrollment = edvr::native_reflex::startFrameSession(state.device, state.generation);
+    state.lowLatencyDriver = enrollment.driver;
+    state.lowLatencyEnrollmentPending = enrollment.pending;
+    g_lowLatencyProofOwner.store(&state, std::memory_order_release);
     g_lowLatencyStamp.store(kLowLatencyNeedsRefresh, std::memory_order_release);
     refreshLowLatency(state, kLowLatencyNeedsRefresh, false);
     table->context = &state;

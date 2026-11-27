@@ -41,7 +41,12 @@ struct FrameSession {
     DWORD producerThread = 0;
     bool pclReady = false;
     std::atomic<DWORD> simulationOwner{0};
-    std::shared_ptr<FrameDriver> driver;
+    // The session retains the driver until its last callback releases it.
+    // Delayed enrollment publishes once, after establishing this ownership.
+    std::shared_ptr<FrameDriver> driverOwner;
+    std::atomic<FrameDriver*> transport{nullptr};
+    detail::FrameEnrollmentRetry enrollmentRetry;
+    FrameDriver* driver() const noexcept { return transport.load(std::memory_order_acquire); }
     std::atomic<bool> active{true};
     std::atomic<bool> providerAcquired{false};
     std::atomic<bool> leftButtonDown{false}, pendingFlash{false};
@@ -75,7 +80,7 @@ void faultSession(const std::shared_ptr<FrameSession>& session) noexcept {
     std::lock_guard<std::mutex> lock(capabilityMutex);
     if (!session->active.load(std::memory_order_acquire) ||
         std::atomic_load_explicit(&published(), std::memory_order_acquire) != session) return;
-    publishFrameAvailability(false);
+    fullFrameQualification.publish(0, 0);
     fullFrameFaulted.store(true, std::memory_order_release);
 }
 struct TickState { uint64_t token = 0, generation = 0; };
@@ -109,14 +114,15 @@ void completeRecord(FrameSession& session, FrameRecord& frame) noexcept {
         // The SDK markers bracket the first attempt. Only that attempt can
         // prove a complete driver frame; a successful retry is CPU evidence.
         if (frame.presentAttempts == 1)
-            session.lastCompletedMs.store(GetTickCount64(), std::memory_order_release);
+            session.lastCompletedMs.store(frameSessionClockMs(), std::memory_order_release);
     }
 }
 // Marker calls are made after releasing record locks. Independent simulation,
 // render and Present owners may overlap without serializing a driver's wait.
 void emit(const std::shared_ptr<FrameSession>& session, uint64_t token, Marker marker) noexcept {
     if (!session || !session->active.load(std::memory_order_acquire)) return;
-    const bool accepted = !session->driver || session->driver->mark(token, marker);
+    const auto driver = session->driver();
+    const bool accepted = !driver || driver->mark(token, marker);
     if (session->pclReady) pcl::mark(uint32_t(marker), token);
     if (!accepted) session->markerFailures.fetch_add(1, std::memory_order_relaxed);
     if (!accepted) {
@@ -147,7 +153,9 @@ void beforeTick(void*, uint64_t token) noexcept {
         faultSession(session);
         return;
     }
-    if (session->driver && !session->driver->ready()) {
+    if (session->enrollmentRetry.pending()) return;
+    const auto driver = session->driver();
+    if (driver && !driver->ready()) {
         ++session->unconfiguredTicks;
         return;
     }
@@ -165,9 +173,9 @@ void beforeTick(void*, uint64_t token) noexcept {
     }
     tick = {token, session->generation};
     bool accepted = true;
-    if (session->driver) {
+    if (driver) {
         const uint64_t began = qpc();
-        const auto result = session->driver->sleepFrame(token);
+        const auto result = driver->sleepFrame(token);
         const uint64_t ended = qpc();
         if (result == FrameDriver::SleepResult::Skipped) {
             ++session->unconfiguredTicks;
@@ -380,11 +388,12 @@ HRESULT WINAPI closeProvider(void* context) {
         {
             std::lock_guard<std::mutex> capabilityLock(capabilityMutex);
             if (std::atomic_load_explicit(&published(), std::memory_order_acquire) == session)
-                publishFrameAvailability(false);
+                fullFrameQualification.publish(0, 0);
         }
         std::lock_guard<std::mutex> lock(session->recordsMutex);
         for (auto& frame : session->frames)
             if (frame.provider == entry->ordinal && !frame.completed) frame.invalid = true;
+        session->lastCompletedMs.store(0, std::memory_order_release);
     }
     return S_OK;
 }
@@ -486,11 +495,11 @@ bool endFramePresent(const PresentFrameReceipt& receipt, HRESULT result) noexcep
     return true;
 }
 
-FrameDriver* startFrameSession(ID3D11Device* device, uint64_t generation) {
-    if (!device || !generation || std::atomic_load_explicit(&published(), std::memory_order_acquire)) return nullptr;
+FrameSessionEnrollment startFrameSession(ID3D11Device* device, uint64_t generation) {
+    if (!device || !generation || std::atomic_load_explicit(&published(), std::memory_order_acquire)) return {};
     if (!installFrameBoundaryHooks()) {
         Log::get().note("native_reflex_frames,state=unavailable,reason=%s,full_boundary=0", frameBoundaryHookStatus());
-        return nullptr;
+        return {};
     }
     auto session = std::make_shared<FrameSession>();
     session->pclReady = inputGateInstallMessageObserver() && pcl::initialize();
@@ -498,54 +507,88 @@ FrameDriver* startFrameSession(ID3D11Device* device, uint64_t generation) {
     session->device = device;
     session->generation = generation;
     session->producerThread = GetCurrentThreadId();
-    session->driver = openFrameDriver(device);
-    auto* borrowed = session->driver.get();
+    auto enrollment = openFrameDriver(device);
+    session->driverOwner = std::move(enrollment.driver);
+    auto* borrowed = session->driverOwner.get();
+    session->transport.store(borrowed, std::memory_order_relaxed);
+    session->enrollmentRetry.begin(enrollment.pending, frameSessionClockMs());
     {
         std::lock_guard<std::mutex> lock(capabilityMutex);
-        publishFrameAvailability(false);
+        fullFrameQualification.publish(0, 0);
         fullFrameFaulted.store(false, std::memory_order_release);
         std::atomic_store_explicit(&published(), std::move(session), std::memory_order_release);
     }
     setFrameBoundaryCallbacks(&callbacks);
     Log::get().note("native_reflex_frames,state=enrolled,session=%llu,sleep_boundary=app_tick_before_input,"
-                   "full_boundary=0,reason=awaiting_complete_engine_source", generation);
-    return borrowed;
+                   "full_boundary=0,reason=%s", generation,
+                   enrollment.pending ? "first_sleep_pending" : "awaiting_complete_engine_source");
+    return {borrowed, enrollment.pending};
 }
+
+FrameSessionEnrollment retryFrameSession(ID3D11Device* device, uint64_t generation, uint64_t now) noexcept {
+    auto session = activeSession();
+    if (!session || session->device.Get() != device || session->generation != generation ||
+        session->producerThread != GetCurrentThreadId()) return {};
+    if (!session->enrollmentRetry.pending()) return {session->driver(), false};
+    if (!session->enrollmentRetry.attempt(now)) return {nullptr, true};
+    FrameDriverEnrollment enrollment;
+    try {
+        enrollment = openFrameDriver(device);
+    } catch (...) {
+        Log::get().note("native_reflex_frame,event=enroll,reason=allocation_failed");
+    }
+    if (enrollment.pending) return {nullptr, true};
+    auto* borrowed = enrollment.driver.get();
+    {
+        std::lock_guard<std::mutex> lock(capabilityMutex);
+        if (!session->active.load(std::memory_order_acquire)) return {};
+        session->driverOwner = std::move(enrollment.driver);
+        session->transport.store(borrowed, std::memory_order_release);
+        session->enrollmentRetry.settle();
+    }
+    Log::get().note("native_reflex_frame,event=enroll_retry,session=%llu,result=%s", generation,
+                   borrowed ? "driver_acquired" : "unavailable");
+    return {borrowed, false};
+}
+
 void stopFrameSession(uint64_t generation) noexcept {
     auto session = std::atomic_load_explicit(&published(), std::memory_order_acquire);
     if (!session || session->generation != generation) return;
     {
         std::lock_guard<std::mutex> lock(capabilityMutex);
-        publishFrameAvailability(false);
+        fullFrameQualification.publish(0, 0);
         fullFrameFaulted.store(false, std::memory_order_release);
         session->active.store(false, std::memory_order_release);
         std::atomic_store_explicit(&published(), std::shared_ptr<FrameSession>{}, std::memory_order_release);
     }
-    if (session->driver) session->driver->retire();
+    if (auto* driver = session->driver()) driver->retire();
     setFrameBoundaryCallbacks(nullptr);
 }
+
+uint64_t frameSessionClockMs() noexcept { return GetTickCount64(); }
 
 void reportFrameSession(uint64_t generation) noexcept {
     auto session = activeSession();
     if (!session || session->producerThread != GetCurrentThreadId() || (generation && session->generation != generation)) return;
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = frameSessionClockMs();
     if (session->lastPollMs && now - session->lastPollMs < 500) return;
     session->lastPollMs = now;
     const bool summaryDue = !session->lastSummaryMs || now - session->lastSummaryMs >= 5000;
     if (summaryDue) session->lastSummaryMs = now;
     const auto boundary = frameBoundaryStats();
-    const uint64_t lastComplete = session->lastCompletedMs.load(std::memory_order_acquire);
-    const uint64_t capabilityNow = GetTickCount64();
+    auto* driver = session->driver();
     const bool capable = session->providerAcquired.load(std::memory_order_acquire) &&
-        session->driver && session->driver->ready() && session->pclReady && pcl::available() && boundary.installed &&
-        lastComplete && capabilityNow >= lastComplete && capabilityNow - lastComplete <= 2000 &&
+        driver && driver->ready() && session->pclReady && pcl::available() && boundary.installed &&
         !session->foreignSimulationTicks.load(std::memory_order_relaxed) && !session->markerFailures.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(capabilityMutex);
         if (session->active.load(std::memory_order_acquire) &&
-            std::atomic_load_explicit(&published(), std::memory_order_acquire) == session)
-            publishFrameAvailability(!frameSessionFaulted() && capable &&
-                session->providerAcquired.load(std::memory_order_acquire));
+            std::atomic_load_explicit(&published(), std::memory_order_acquire) == session) {
+            const bool qualified = !frameSessionFaulted() && capable &&
+                session->providerAcquired.load(std::memory_order_acquire);
+            const auto lastComplete = qualified ? session->lastCompletedMs.load(std::memory_order_acquire) : 0;
+            fullFrameQualification.publish(lastComplete, frameSessionClockMs());
+        }
     }
     // Mode availability and SDK markers stay live independently of detailed
     // collection. Copy the ring only for an enabled capture or a health summary.
@@ -583,15 +626,15 @@ void reportFrameSession(uint64_t generation) noexcept {
             session->generation, frame.token, frame.poseSequence, frame.poseConsumedQpc, frame.firstCommandQpc,
             frame.lateEndQpc, frame.mirrorCompleteQpc, frame.presentBeginQpc, frame.presentEndQpc, boundary.qpcFrequency,
             frame.simulationThread, frame.poseThread, frame.commandThread, frame.presentThread,
-            milliseconds, unsigned(session->driver && !frame.driverFailed && frame.presentAttempts == 1));
+            milliseconds, unsigned(driver && !frame.driverFailed && frame.presentAttempts == 1));
     }
     unsigned driverRecords = 0;
-    if (detail && session->driver) {
+    if (detail && driver) {
         LatencyBatch batch;
         // Driver completion can precede the final CPU callback. Revisit its
         // finite history and deduplicate per source, so an overlapping frame
         // is not permanently discarded by a newer frame's watermark.
-        if (session->driver->getLatency(batch)) {
+        if (driver->getLatency(batch)) {
             for (size_t i = 0; i < batch.count; ++i) {
                 const auto& value = batch.frames[i];
                 const auto found = std::find_if(frames.begin(), frames.end(), [&](const FrameRecord& frame) {

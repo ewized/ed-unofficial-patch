@@ -391,8 +391,14 @@ python tools\fetch_ngx.py
 ```
 
 fetches one pinned commit of NVIDIA's public SDK repository into
-`%LOCALAPPDATA%\EDUP\ngx-sdk` and checks the runtime's hash against the pin in
-the script. `EDUP_NGX_SDK` points the build at a copy somewhere else.
+`%LOCALAPPDATA%\EDUP\ngx-sdk` and checks the SHA-256 pins for the headers
+used by DLSS and DLSS-G, the x64 static library, the SR runtime and the licence.
+`EDUP_NGX_SDK` points the build at a copy somewhere else.
+
+The full build records hashes of the selected SDK inputs, including files in
+shared SDK directories. DLL-only promotion requires those hashes to match.
+Updating an SDK pin or rebuilding a selected static library requires a new
+full build before promotion.
 
 Writing the release's settings files (`tools\gen_installer_rc.py
 --release-files`, a step of the full build) needs the native pair and the

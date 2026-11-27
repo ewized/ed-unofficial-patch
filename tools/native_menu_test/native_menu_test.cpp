@@ -1,5 +1,6 @@
 #include "../../src/common/native_menu.h"
 #include "../../src/common/frame_flag.h"
+#include "../../src/common/native_fg_multiplier.h"
 #include "../../src/common/native_fg_readout.h"
 #include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
@@ -308,6 +309,23 @@ int wmain(int argc, wchar_t** argv) {
                   "menu.cpp sets reserveHint inside the pad block, ahead of its pad loop");
             check(menu.find("c.reserveHint = true;", set + 1) == std::string::npos,
                   "menu.cpp sets reserveHint in exactly one place (the pad block; the Monitor and prompt pages reserve none)");
+
+            using edvr::nativeFgOptionEnabled;
+            check(nativeFgOptionEnabled("off", 1) && !nativeFgOptionEnabled("auto", 1) &&
+                  !nativeFgOptionEnabled("2x", 1), "F8 FG: an unsupported GPU still offers Off for recovery");
+            check(nativeFgOptionEnabled("auto", 2) && nativeFgOptionEnabled("2x", 2) &&
+                  !nativeFgOptionEnabled("3x", 2) && !nativeFgOptionEnabled("4x", 2),
+                  "F8 FG: a 2x GPU offers Auto and 2x while excluding higher choices");
+            check(nativeFgOptionEnabled("3x", 3) && !nativeFgOptionEnabled("4x", 3) &&
+                  nativeFgOptionEnabled("4x", 4), "F8 FG: exact GPU maxima are selectable");
+            check(nativeFgOptionEnabled("4x", 0) && nativeFgOptionEnabled("auto", 0) &&
+                  !nativeFgOptionEnabled("invalid", 0), "F8 FG: unknown capability allows initial requests only for valid modes");
+            check(edvr::nativeFgSelection("4X").multiplier == 4 && !nativeFgOptionEnabled("4X", 2),
+                  "F8 FG: a retained 4x setting stays 4x while the known 2x device prevents selecting it");
+            check(menu.find("isNativeFgRow(d) && !nativeFgOptionEnabled(c.value, fgMaximum)") != std::string::npos &&
+                  menu.find("isNativeFgRow(d) && !nativeFgOptionEnabled(fileValue, fgMaximum)") != std::string::npos &&
+                  menu.find("lastFgMaximum != fgMaximum") != std::string::npos,
+                  "F8 FG: wheel/step choices, final writes, and refresh follow live capability");
 
             const size_t fgRule = menu.find("bool frameGenerationRequiresReflex(");
             const auto rule = fgRule == std::string::npos ? std::string() : menu.substr(fgRule, menu.find('}', fgRule) - fgRule);

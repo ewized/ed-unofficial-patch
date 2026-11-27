@@ -247,9 +247,9 @@ FrameDriver::~FrameDriver() {
     device_->Release();
 }
 
-std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
+FrameDriverEnrollment openFrameDriver(ID3D11Device* device) {
     using namespace detail;
-    const auto refuse = [](const char* reason) -> std::shared_ptr<FrameDriver> {
+    const auto refuse = [](const char* reason) -> FrameDriverEnrollment {
         Log::get().note("native_reflex_frame,event=enroll,reason=%s", reason);
         return {};
     };
@@ -258,13 +258,13 @@ std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
     if (!driver.set) return refuse(driver.reason);
     if (!driver.sleep || !driver.setMarker || !driver.getLatency) return refuse("frame_api_unavailable");
     const auto proof = deviceSleepProof(device);
-    if (proof == DeviceSleepProof::Pending) return refuse("first_sleep_pending");
+    if (proof == DeviceSleepProof::Pending) return {nullptr, true};
     GetSleepStatus baseline{};
     baseline.version = version1(sizeof(baseline));
     if (readStatus(device, driver, baseline) != 0) return refuse("baseline_unknown");
     const bool ownGameSleep = baseline.useGameSleep && proof == DeviceSleepProof::Owned;
     if (hasExternalDriverPolicy(baseline, ownGameSleep)) return refuse("existing_driver_policy");
-    return std::shared_ptr<FrameDriver>(new FrameDriver(device, ownGameSleep));
+    return {std::shared_ptr<FrameDriver>(new FrameDriver(device, ownGameSleep))};
 }
 
 // A shell/driver fault or lost device invalidates transport for this device.

@@ -20,6 +20,16 @@ constexpr unsigned kSlots = 3, kUiImage = EDVR_FG_MAX_PHASES,
     kNativeWorldImage = EDVR_FG_MAX_PHASES + 1,
     kDescriptors = (EDVR_FG_MAX_PHASES + 2) * 2 * 4;
 enum Consumer : unsigned { Discarded, Unsubmitted, Attaching, Submitted };
+// Shared by every publisher/ring in this process. Exhaustion latches instead
+// of wrapping an allocation incarnation onto a still-cached old identity.
+uint64_t nextAllocationId() noexcept {
+    static std::atomic<uint64_t> serial{0};
+    auto value=serial.load(std::memory_order_relaxed);
+    while(value!=UINT64_MAX) {
+        if(serial.compare_exchange_weak(value,value+1,std::memory_order_relaxed))return value+1;
+    }
+    return 0;
+}
 bool complete(uint64_t actual, uint64_t target) noexcept {
     return target && actual != UINT64_MAX && actual >= target;
 }
@@ -118,7 +128,7 @@ struct FrameGenerationOutputLease {
     EdvrFgBatch batch{};
     std::atomic<unsigned> consumer{Discarded};
     std::atomic<bool> exported{false};
-    uint64_t value = 0, consumerValue = 0, submittedMs = 0;
+    uint64_t value = 0, consumerValue = 0, submittedMs = 0, allocationId = 0;
     uint32_t timeoutMs = 0;
     bool unsafe = false, counted = false;
     std::shared_ptr<FrameGenerationInteropLease> input;
@@ -178,10 +188,12 @@ HRESULT FrameGenerationOutputTicket::exportStatus() const noexcept {
     return S_OK;
 }
 HRESULT FrameGenerationOutputTicket::acquireBatch(EdvrFgBatch* output) const noexcept {
-    if (!output || output->size != sizeof(*output) || output->version != EDVR_FG_BATCH_VERSION_3)
+    if (!output || !edvrFgBatchProtocol(output->size,output->version))
         return E_INVALIDARG;
+    const auto wireSize=output->size,wireVersion=output->version;
     const auto status = exportStatus();
     if (status != S_OK) return status;
+    if(wireVersion==EDVR_FG_BATCH_VERSION_4&&!lease->batch.allocationId)return E_UNEXPECTED;
     try {
         auto* token = new Token(lease);
         bool expected = false;
@@ -189,8 +201,8 @@ HRESULT FrameGenerationOutputTicket::acquireBatch(EdvrFgBatch* output) const noe
             delete token; return S_FALSE;
         }
         lease->consumer.store(Unsubmitted, std::memory_order_release);
-        *output = lease->batch;
-        output->token = token;
+        auto wire=lease->batch;wire.size=wireSize;wire.version=wireVersion;wire.token=token;
+        std::memcpy(output,&wire,wireSize);
         return S_OK;
     } catch (...) { return E_OUTOFMEMORY; }
 }
@@ -270,6 +282,7 @@ struct FrameGenerationOutput::Impl {
     }
     bool prepare(FrameGenerationOutputLease& slot, unsigned phases,bool separateUi) noexcept {
         HRESULT hr = S_OK;
+        bool changed=false;
         if (!slot.allocator) {
             if (FAILED(hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&slot.allocator))) ||
                 FAILED(hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, slot.allocator.Get(), nullptr,
@@ -285,7 +298,14 @@ struct FrameGenerationOutput::Impl {
         for (unsigned p = 0; p <= kNativeWorldImage; ++p) for (unsigned e = 0; e < 2; ++e) {
             if(p>=phases&&!(separateUi&&(p==kUiImage||p==kNativeWorldImage)))continue;
             auto& image = slot.images[p][e];
-            if (image.resource) continue;
+            if (image.resource&&image.handle) continue;
+            // Adding generated/UI images changes the whole immutable set even
+            // when its already-allocated native endpoint stays the same.
+            if(!changed) {
+                const auto allocation=nextAllocationId();
+                if(!allocation)return fail(FrameGenerationOutputFailure::Allocation,E_UNEXPECTED);
+                slot.allocationId=allocation;changed=true;
+            }
             D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
             heap.CreationNodeMask = heap.VisibleNodeMask = 1;
             D3D12_RESOURCE_DESC desc{}; desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -297,16 +317,20 @@ struct FrameGenerationOutput::Impl {
             // https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html
             desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
                 D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+            ComPtr<ID3D12Resource> resource;HANDLE handle=nullptr;
             if (FAILED(hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
-                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&image.resource))) ||
-                FAILED(hr = device->CreateSharedHandle(image.resource.Get(), nullptr, GENERIC_ALL, nullptr, &image.handle)))
+                    D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource))) ||
+                FAILED(hr = device->CreateSharedHandle(resource.Get(), nullptr, GENERIC_ALL, nullptr, &handle)))
                 return fail(FrameGenerationOutputFailure::Allocation, hr);
+            if(image.handle)CloseHandle(image.handle);
+            image.resource=std::move(resource);image.handle=handle;
         }
-        return true;
+        return slot.allocationId!=0||fail(FrameGenerationOutputFailure::Allocation,E_UNEXPECTED);
     }
     void metadata(FrameGenerationOutputLease& slot, const FrameGenerationOutputSource& source, bool generated) noexcept {
         auto& batch = slot.batch; batch = {};
-        batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_3;
+        batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_4;
+        batch.allocationId=slot.allocationId;
         const auto& previous = source.previous; const auto& current = source.current;
         batch.generation = current.generation; batch.referenceGeneration = current.referenceGeneration;
         batch.configGeneration = current.configGeneration; batch.historyGeneration = source.historyGeneration;
@@ -405,7 +429,7 @@ bool FrameGenerationOutput::initialize(bool enabled, ID3D12Device* device, unsig
 }
 FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<FrameGenerationInteropLease>& input,
     const FrameGenerationNgxTicket& backend, const FrameGenerationOutputUi (&ui)[2],
-    const FrameGenerationOutputSource& source) noexcept {
+    const FrameGenerationOutputSource& source, bool nativeOnly) noexcept {
     FrameGenerationOutputTicket ticket;
     if (!impl_) return ticket;
     auto& data = *impl_; std::lock_guard<std::mutex> lock(data.mutex);
@@ -434,7 +458,11 @@ FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<
             const auto done = backend.completionFence->GetCompletedValue();
             if (done == UINT64_MAX) { data.fail(FrameGenerationOutputFailure::DeviceRemoved, DXGI_ERROR_DEVICE_REMOVED); return ticket; }
             if (!complete(done, backend.completionValue)) { data.fail(FrameGenerationOutputFailure::Pending, S_FALSE, false); return ticket; }
-            generated = backend.poll() == FrameGenerationNgxCompletion::Ready;
+            const auto completion=backend.poll();
+            if(completion==FrameGenerationNgxCompletion::Stale) {
+                data.fail(FrameGenerationOutputFailure::Stale,HRESULT_FROM_WIN32(ERROR_TIMEOUT),false);return ticket;
+            }
+            generated = completion == FrameGenerationNgxCompletion::Ready && !nativeOnly;
             if (generated && (backend.generatedCount != source.multiplier - 1 ||
                 !pairValid(source, data.width, data.height, true))) {
                 data.fail(FrameGenerationOutputFailure::InvalidMetadata, E_INVALIDARG, false); return ticket;
@@ -517,6 +545,7 @@ FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<
         data.lastFence = slot.value; slot.batch.readyValue = slot.value;
         data.lastSequence = source.current.sequence; data.lastHistory = source.historyGeneration;
         ticket.finalFence = data.fence.Get(); ticket.finalValue = slot.value;
+        ticket.generatedCount = slot.batch.generatedCount;
         ++data.status.submitted; if (!generated) ++data.status.nativeOnly;
         data.status.failure = FrameGenerationOutputFailure::None; data.status.lastHresult = S_OK;
         return ticket;
@@ -570,12 +599,15 @@ bool FrameGenerationOutput::testSeedRetirement(ID3D12Fence* completion,
             slot->submittedMs = GetTickCount64();
             slot->timeoutMs = data->timeoutMs;
             slot->batch = batches[i];
+            slot->allocationId=slot->batch.allocationId?slot->batch.allocationId:nextAllocationId();
+            slot->batch.allocationId=slot->allocationId;
             slot->batch.readyValue = slot->value;
         }
         data->lastFence = data->serial;
         data->status.submitted = kSlots;
         for (unsigned i = 0; i < kSlots; ++i) {
             tickets[i] = {true, false, completion, data->slots[i]->value, data->slots[i]};
+            tickets[i].generatedCount=data->slots[i]->batch.generatedCount;
         }
         impl_ = data.release();
         return true;
@@ -588,6 +620,11 @@ unsigned frameGenerationOutputTestProtocol() noexcept {
     unsigned failures = 0;
     const auto check = [&](bool value) { if (!value) ++failures; };
     try {
+        const auto firstAllocation=nextAllocationId(),secondAllocation=nextAllocationId();
+        check(firstAllocation&&secondAllocation>firstAllocation);
+        check(edvrFgBatchSize(EDVR_FG_BATCH_VERSION_2)==392&&edvrFgBatchSize(EDVR_FG_BATCH_VERSION_3)==408&&
+            edvrFgBatchSize(EDVR_FG_BATCH_VERSION_4)==416);
+        check(!edvrFgBatchProtocol(416,EDVR_FG_BATCH_VERSION_3)&&!edvrFgBatchProtocol(0,0));
         auto lease = std::make_shared<FrameGenerationOutputLease>();
         lease->consumer.store(Unsubmitted);
         auto* token = new Token(lease);

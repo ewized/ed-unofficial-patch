@@ -43,18 +43,27 @@
     if(fgPresentationGeneration!=runtimeGeneration)return;
     const auto now=GetTickCount64();if(now-fgPresentationLastMs<1000)return;
     fgPresentationLastMs=now;
-    nativeTracePrintf("native_xr_presentation,owner_ms=%llu,generation=%llu,sequence=%llu,fg_enabled=%u,multiplier=%u,native=%llu,generated=%llu,repeated=%llu,empty=%llu,background=%llu,failed=%llu\n",
+    const auto& poll=frameGeneration.pollCounts();
+    nativeTracePrintf("native_xr_presentation,owner_ms=%llu,generation=%llu,sequence=%llu,fg_enabled=%u,multiplier=%u,native=%llu,generated=%llu,repeated=%llu,empty=%llu,background=%llu,failed=%llu,poll_imported=%llu,poll_texture_opens=%llu,poll_eye_copies=%llu\n",
       (unsigned long long)now,(unsigned long long)p.generation,(unsigned long long)p.sequence,p.fgEnabled,p.activeMultiplier,
       (unsigned long long)p.nativeFrames,(unsigned long long)p.generatedFrames,(unsigned long long)p.repeatedFrames,
-      (unsigned long long)p.emptyFrames,(unsigned long long)p.backgroundFrames,(unsigned long long)p.failedFrames);
+      (unsigned long long)p.emptyFrames,(unsigned long long)p.backgroundFrames,(unsigned long long)p.failedFrames,
+      (unsigned long long)poll.imported,(unsigned long long)poll.textureOpens,(unsigned long long)poll.eyeCopies);
   }
-  XrResult fgEndPrepared(const XrCompositionLayerProjection* layer,edvr::NativePresentationKind kind) {
+  XrResult fgEndPrepared(const XrCompositionLayerProjection* layer,edvr::NativePresentationKind kind,
+      const EdvrFgBatch* generatedReceipt=nullptr) {
     const bool pixels=layer&&boundary.frame().shouldRender&&state.frameShouldRender()&&
         !state.terminal()&&state.lifecycle()!=Lifecycle::Stopping;
     const auto* fps=pixels?fpsOverlay():nullptr;
     const XrResult result=boundary.prepared(layer,nullptr,fps);
+    const bool submitted=result==XR_SUCCESS&&boundary.frame().status==FrameStatus::Ended;
     notePresentation(result!=XR_SUCCESS?edvr::NativePresentationKind::Failed:
-        pixels?kind:edvr::NativePresentationKind::Empty);
+        submitted?kind:edvr::NativePresentationKind::Empty);
+    if(submitted&&kind==edvr::NativePresentationKind::Generated&&generatedReceipt) {
+      fgSubmittedNative={};
+      fgBootstrap.displayGenerated(*generatedReceipt);
+      fgCommittedSpace=seated.frame().space;
+    }
     return result;
   }
   void fgRunCredit(const std::shared_ptr<FgCreditRequest>& request,const RuntimeGate::Lease& operation) {
@@ -91,7 +100,7 @@
       clearReflexFinalEyes(activeFrameSequence);invalidateEyeTreatments();timingInvalidate();temporalFrameEyes=0;
     }
     fgLastDisableReason=reason;
-    fgBootstrap.clear();
+    fgBootstrap.clear();fgCommittedSpace=XR_NULL_HANDLE;
     fgPendingNativePose={};
     fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
     fgNativeOutstanding=false;fgAcceptedEyes=0;fgFallbackValid=false;fgDisplayedSequence=0;fgHistory=0;
@@ -118,6 +127,7 @@
     return frameGeneration.begin(source);
   }
   void fgAnnounceSource(const Frame& frame,const GeometryInput& located) {
+    fgAnnouncedNative={};
     if(!fgAvailable.load(std::memory_order_acquire))return;
     EdvrFgStatus status{};
     if(frameGeneration.status(status)!=S_OK||!edvr::nativeFgFixedMultiplier(status.requestedMultiplier)||
@@ -125,25 +135,41 @@
     // An unavailable source returns to ordinary native pacing, but keeps
     // authentic metadata flowing. A later supported pair can recover without
     // a settings toggle. No source packets or GPU work are started while Off.
+    if(status.generation==runtimeGeneration)fgPresentationGeneration=runtimeGeneration;
     if(!fgEnabled.load(std::memory_order_acquire))fgConfig=status.configGeneration;
-    if(FAILED(fgBeginSource(frame,located))) {frameGeneration.invalidate(2);++fgRefused;}
+    const HRESULT announced=fgBeginSource(frame,located);
+    if(announced==S_OK)fgAnnouncedNative={fgBootstrapEpoch(status),frame.sequence,frame.predictedDisplayTime,frameSpace};
+    else if(FAILED(announced)){frameGeneration.invalidate(2);++fgRefused;}
   }
-  void fgSeedNativeFallback() {
-    fgSplitFallbackValid=false;
-    fgDisplayedSequence=lastPublishedFrameSequence;
-    if(!activeFrameSequence||frameWithheld||temporalFrameEyes!=3||!frameGeometryAvailable)return;
-    const EyeCapture& source=previousPairValid&&previousPairSequence==activeFrameSequence&&previousReference==poses.read().originGeneration?previousPair:captured;
-    const XrView* sourceViews=&source==&previousPair?previousViews:frameViews;
-    const XrPosef& sourceOrigin=&source==&previousPair?previousOrigin:frameOrigin;
-    fgFallbackValid=true;
+  bool fgHasSubmittedSeed(const fgbootstrap::Epoch& epoch) const {
+    return epoch.valid()&&fgSubmittedNative.epoch==epoch&&fgSubmittedNative.sequence&&fgSubmittedNative.time>0&&
+      fgSubmittedNative.space&&fgSubmittedNative.space==seated.frame().space&&frameGeometryAvailable&&
+      frameGeometry.displayTime>=fgSubmittedNative.time&&frameGeometry.displayTime-fgSubmittedNative.time<=500000000&&
+      !changes.crosses(fgSubmittedNative.time,frameGeometry.displayTime);
+  }
+  void fgSeedNativeFallback(const fgbootstrap::Epoch& epoch) {
+    fgFallbackValid=false;fgSplitFallbackValid=false;fgDisplayedSequence=0;
+    const auto& receipt=fgSubmittedNative;
+    if(!epoch.valid()||!(receipt.epoch==epoch)||!receipt.sequence)return;
+    fgDisplayedSequence=receipt.sequence;
+    const bool kept=previousPairValid&&previousPairSequence==receipt.sequence&&previousPairTime==receipt.time&&
+      previousSpace==receipt.space&&previousReference==epoch.reference;
+    // With resubmit enabled, sceneFinished exchanges the buffers. Only the
+    // matching kept pair can then supply these pixels. Otherwise the current
+    // capture must still contain both eyes of this same submitted source.
+    if(!kept&&(featureFrame.resubmitEnabled||activeFrameSequence!=receipt.sequence||frameWithheld||
+       temporalFrameEyes!=3||!frameGeometryAvailable||frameGeometry.displayTime!=receipt.time||frameSpace!=receipt.space))return;
+    const EyeCapture& source=kept?previousPair:captured;
+    const XrView* sourceViews=kept?previousViews:frameViews;
+    const XrPosef& sourceOrigin=kept?previousOrigin:frameOrigin;
     for(unsigned eye=0;eye<2;++eye) {
       const vr::Texture_t texture{source.texture(vr::EVREye(eye)),vr::API_DirectX,source.colorSpace(vr::EVREye(eye))};
       const auto region=source.bounds(vr::EVREye(eye));
-      if(fgFallback.capture(vr::EVREye(eye),&texture,&region)!=vr::VRCompositorError_None)fgFallbackValid=false;
+      if(fgFallback.capture(vr::EVREye(eye),&texture,&region)!=vr::VRCompositorError_None)return;
       fgFallbackViews[eye]=sourceViews[eye];fgFallbackViews[eye].pose=seatxf::toNatural(sourceOrigin,sourceViews[eye].pose);
     }
-    fgFallbackSequence=activeFrameSequence;fgFallbackSpace=frameSpace;fgFallbackTime=&source==&previousPair?previousPairTime:frameGeometry.displayTime;
-    fgFallbackReference=poses.read().originGeneration;
+    fgFallbackValid=true;fgFallbackSequence=receipt.sequence;fgFallbackSpace=receipt.space;
+    fgFallbackTime=receipt.time;fgFallbackReference=epoch.reference;
   }
   fgbootstrap::Epoch fgBootstrapEpoch(const EdvrFgStatus& status) const {
     if(status.generation!=runtimeGeneration||status.configGeneration!=fgConfig)return {};
@@ -188,6 +214,8 @@
     if(!fgPendingNativeUsable(displayTime)||fgFallbackSequence!=fgDisplayedSequence)
       return fghandoff::recordHandoff(observation,Handoff::SourceIdentity);
     if(!fgFallbackUsable(displayTime))return fghandoff::recordHandoff(observation,Handoff::FallbackCoverage);
+    if(!fgBootstrap.interpolatedPhaseFits(displayTime,fgFallbackTime,fgPendingNativePose.time,period,fgMultiplier,1,nextPeriod))
+      return fghandoff::recordHandoff(observation,Handoff::Time);
     return fgBootstrap.deferNative(fgDisplayedSequence,status.latestSourceSequence,status.latestReadySequence,
       fgPendingNativePose.time,displayTime,nextPeriod,period,fgMultiplier,observation);
   }
@@ -202,7 +230,7 @@
     fgFallbackSpace=source.space;fgFallbackTime=source.time;fgFallbackSequence=source.sequence;
     fgFallbackReference=source.epoch.reference;fgFallbackValid=true;
   }
-  uint64_t fgPhaseSalvaged=0,fgPhasesExhausted=0;
+  uint64_t fgPhaseSalvaged=0,fgPhasesExhausted=0,fgTranslatedBehind=0;
   fghandoff::Images fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,XrDuration period,bool imported,
       std::optional<EdvrFgBatch>* behindReceipt=nullptr) {
     const auto behind=behindReceipt?std::exchange(*behindReceipt,std::nullopt):std::nullopt;
@@ -219,8 +247,11 @@
       images.ready=false;++fgRefused;return Outcome::OutsideWindow;
     }
     if(b.currentSequence<=fgDisplayedSequence) {
-      if(imported||behind)fgBootstrap.observeBehind(b,
-        fgBootstrap.phaseFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,1),fgTick,displayTime,period);
+      if(imported||behind) {
+        if(b.generatedCount&&b.uiFlags&&!edvr::fg_coverage::anyFits(b.previousViews,b.currentViews,b.multiplier))++fgTranslatedBehind;
+        else fgBootstrap.observeBehind(b,fgBootstrap.interpolatedPhaseFits(displayTime,b.previousPoseDisplayTime,
+          b.currentPoseDisplayTime,period,b.multiplier,1),fgTick,displayTime,period);
+      }
       images.ready=false;
       return Outcome::BehindWatermark;
     }
@@ -233,11 +264,16 @@
         // A later SDK index has its own pose and deadline. Keep its original
         // place in the pair even when the runtime missed an earlier opportunity.
         const unsigned first=images.next;
-        while(!fgBootstrap.phaseFits(displayTime,b.currentPoseDisplayTime,period,b.multiplier,images.next)) {
-          images.next=fgschedule::nextPhase(images.next,b.generatedCount);
-          if(!images.next) {
-            fgBootstrap.abandonNativeAttempt();++fgPhasesExhausted;return Outcome::Late;
-          }
+        bool translated=false;
+        for(;images.next;images.next=fgschedule::nextPhase(images.next,b.generatedCount)) {
+          if(!fgBootstrap.interpolatedPhaseFits(displayTime,b.previousPoseDisplayTime,b.currentPoseDisplayTime,
+                                                period,b.multiplier,images.next))continue;
+          if(fgschedule::coverageFits(b,images.next))break;
+          translated=true;
+        }
+        if(!images.next) {
+          if(translated){fgBootstrap.miss();return Outcome::TranslatedCoverage;}
+          fgBootstrap.abandonNativeAttempt();++fgPhasesExhausted;return Outcome::Late;
         }
         if(images.next!=first)++fgPhaseSalvaged;
         return Outcome::Generated;
@@ -288,8 +324,8 @@
       for(unsigned eye=0;eye<2;++eye)overlay.views[eye]=fgschedule::view(batch.currentViews[eye],batch.currentViews[eye],1.f);
     }
     // Keep full-resolution native UI outside NGX, but publish one XR layer.
-    // The renderer rotates B's coverage into this phase's projection before
-    // composition. It does not invent a HUD depth or positional correction.
+    // Phase admission guarantees coincident optical centers for native
+    // coverage. The renderer then maps each ray through the two projections.
     const XrResult drawn=fgRenderCaptured(views,fgschedule::phaseTime(batch,phase),pixels,world,fade,selected.separateUi?&overlay:nullptr);
     hasUi=drawn==XR_SUCCESS&&selected.separateUi;return drawn;
   }
@@ -300,8 +336,9 @@
       (unsigned long long)fgRepeated,(unsigned long long)fgEmpty,(unsigned long long)fgRefused,(unsigned long long)fgTick,
       (unsigned long long)activeFrameSequence,(unsigned long long)fgDisplayedSequence,fgLastPhase,
       (long long)fgLastSourceTime,double(fgLastAge)/1000000.);
-    nativeTracePrintf("native_fg_ui,native_pose_composites=%llu,composition=single_projection_after_fg,ui_rotation_reprojected=1,positional_reprojection=0,content_cadence=native,projection_cadence=runtime,protected_coverage_includes_native_background=1\n",
-      (unsigned long long)fgUiPresented);
+    nativeTracePrintf("native_fg_ui,native_pose_composites=%llu,composition=single_projection_after_fg,ui_rotation_reprojected=1,positional_reprojection=0,content_cadence=native,projection_cadence=runtime,protected_coverage_includes_native_background=1,translated_coverage_native_fallback=%llu,translated_coverage_behind=%llu\n",
+      (unsigned long long)fgUiPresented,(unsigned long long)fgImages[unsigned(fghandoff::Images::TranslatedCoverage)],
+      (unsigned long long)fgTranslatedBehind);
     using I=fghandoff::Images;using H=fghandoff::Handoff;
     const auto image=[&](I i){return (unsigned long long)fgImages[unsigned(i)];};
     const auto handoff=[&](H h){return (unsigned long long)fgHandoffs[unsigned(h)];};
@@ -319,9 +356,11 @@
       (unsigned long long)fgNoRequester,(unsigned long long)fgNoRequestOutstanding,(unsigned long long)fgCreditOutstanding,(unsigned long long)fgCreditSpaced,
       (unsigned long long)fgCreditOnMiss,(unsigned long long)fgCreditOnPhase,(unsigned long long)fgCreditRefused);
   }
-  bool fgCanSubmitBatch(const EdvrFgBatch& batch) {
+  bool fgCanSubmitBatch(const EdvrFgBatch& batch,EdvrFgStatus* observed=nullptr) {
     EdvrFgStatus latest{};
-    return frameGeneration.status(latest)==S_OK&&fgadmission::providerReady(latest,runtimeGeneration)&&
+    const bool known=frameGeneration.status(latest)==S_OK;
+    if(observed)*observed=known?latest:EdvrFgStatus{};
+    return known&&fgadmission::providerReady(latest,runtimeGeneration)&&
       latest.generation==batch.generation&&latest.configGeneration==batch.configGeneration&&
       latest.historyGeneration==batch.historyGeneration&&latest.activeMultiplier==batch.multiplier&&
       batch.referenceGeneration==poses.read().originGeneration;
@@ -376,6 +415,65 @@
     fgFallback.reset();fgPendingNative.reset();fgWorldFallback.reset();fgUiFallback.reset();
     fgConsumerAllocated=false;
   }
+  // The provider publishes this reason only for the immediate coverage-only
+  // history cut under the very same settings, timing support and Reflex proof.
+  bool fgCoverageWithdrawal(const EdvrFgStatus& status) const {
+    return fgHistory&&status.generation==runtimeGeneration&&status.configGeneration==fgConfig&&
+      status.historyGeneration>fgHistory&&status.historyGeneration-fgHistory==1&&
+      status.requestedMultiplier==fgMultiplier&&!status.activeMultiplier&&status.state==EDVR_FG_UNAVAILABLE&&
+      status.lastFailure==EDVR_FG_NATIVE_COVERAGE;
+  }
+
+  // Coverage can be withdrawn while an intermediate is drawn. Close that
+  // real slot empty. On the next owner tick the normal coverage handoff can
+  // settle B from an earlier successful intermediate and resume any credit.
+  bool fgYieldCoverageSlot(const EdvrFgStatus& observed) {
+    if(!fgCoverageWithdrawal(observed))return false;
+    const XrResult ended=fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
+    if(ended!=XR_SUCCESS)publishFatalFailure(ended,"native_fg_coverage_yield");
+    return true;
+  }
+
+  // A submitted intermediate commits its imported native B. On a coverage-only
+  // withdrawal, spend at most one real XR slot on that intact native image.
+  // No new provider texture, generated phase or game credit is acquired here.
+  template<class Confirm,class Render>
+  XrResult fgSettleCoverageEndpoint(Confirm confirm,Render render) {
+    auto& images=frameGeneration.images();const auto& b=images.metadata;
+    const fgbootstrap::Epoch source{b.generation,b.configGeneration,b.referenceGeneration,b.historyGeneration};
+    if(!images.ready||!frameGeneration.healthy()||!fgBootstrap.needsEndpoint(b.currentSequence)||
+       b.currentSequence<=fgDisplayedSequence||!(fgBootstrap.epoch()==source)||b.generation!=runtimeGeneration||
+       b.configGeneration!=fgConfig||b.historyGeneration!=fgHistory||b.referenceGeneration!=poses.read().originGeneration||
+       !fgCommittedSpace||fgCommittedSpace!=seated.frame().space||!b.width||!b.height||
+       !images.phases[0].texture(vr::Eye_Left)||!images.phases[0].texture(vr::Eye_Right))return XR_SUCCESS;
+    for(const auto& size:sizes)if(b.width!=size.recommendedImageRectWidth||b.height!=size.recommendedImageRectHeight)return XR_SUCCESS;
+    if(!state.frameOpen()) {
+      const auto waited=boundary.waitAndBegin(FramePacing::Runtime);
+      if(waited!=XR_SUCCESS&&waited!=XR_FRAME_DISCARDED&&waited!=XR_SESSION_LOSS_PENDING)return waited;
+      ++fgTick;
+    }
+    const auto slot=boundary.frame();
+    if(!slot.shouldRender||state.terminal()||state.lifecycle()==Lifecycle::Stopping||b.currentPoseDisplayTime<=0||
+       slot.predictedDisplayTime<b.currentPoseDisplayTime||slot.predictedDisplayTime-b.currentPoseDisplayTime>500000000||
+       changes.crosses(b.currentPoseDisplayTime,slot.predictedDisplayTime)||!confirm())return XR_SUCCESS;
+    XrView views[2]{};
+    for(unsigned eye=0;eye<2;++eye)views[eye]=fgschedule::view(b.currentViews[eye],b.currentViews[eye],1.f);
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    const XrResult drawn=render(views,b.currentPoseDisplayTime,images.phases[0],layer);
+    if(drawn!=XR_SUCCESS)return drawn;
+    // The queue or proof can change while the stereo draw is running. Close
+    // this slot empty if its authorization was lost before xrEndFrame.
+    if(!confirm()||fgCommittedSpace!=seated.frame().space||b.referenceGeneration!=poses.read().originGeneration||
+       changes.crosses(b.currentPoseDisplayTime,slot.predictedDisplayTime))return fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
+    const XrResult ended=fgEndPrepared(&layer,edvr::NativePresentationKind::Native);
+    if(ended==XR_SUCCESS&&boundary.frame().status==FrameStatus::Ended) {
+      fgDisplayedSequence=b.currentSequence;
+      fgSubmittedNative={source,b.currentSequence,b.currentPoseDisplayTime,fgCommittedSpace};
+      fgBootstrap.displayNative(b.currentSequence,fgTick);
+      ++fgNativePresented;
+    }
+    return ended;
+  }
   bool fgTickOwner(const RuntimeGate::Lease& operation) {
     if(!fgAvailable.load(std::memory_order_acquire)||!state.running()||state.terminal()||serviceStopped)return false;
     const uint64_t now=GetTickCount64();
@@ -384,12 +482,14 @@
     const HRESULT statusResult=frameGeneration.status(status);
     if(statusResult==S_OK)fgReleaseOffImages(status);
     const bool providerReady=statusResult==S_OK&&fgadmission::providerReady(status,runtimeGeneration);
-    const bool requested=providerReady&&separateGraphics()&&edvr::vrProfileActive()&&
+    const bool coverageWithdrawal=statusResult==S_OK&&fgEnabled.load(std::memory_order_acquire)&&fgCoverageWithdrawal(status);
+    const bool compatible=(providerReady||coverageWithdrawal)&&separateGraphics()&&edvr::vrProfileActive()&&
       !loading.visible()&&featureFrameKnown&&featureFrame.sceneReady&&!fgMenuVisible&&!frameWithheld&&
       !fovTrim.trimmed()&&!fovTrim.pending()&&!zoomAppliedNow&&zoomStripNow<=0.f&&!circleNow.on&&
       !(featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10&&eyeshare::fromBits(featureFrame.leftEyeShare)>0.f)&&
       callerFresh&&
       !(featureFrameKnown&&featureFrame.deferredPacing);
+    const bool requested=providerReady&&compatible;
     fgLifecycleReport(now,statusResult,status,requested,callerFresh);
     if(!requested) {
       if(!fgEnabled.load(std::memory_order_acquire))return false;
@@ -398,17 +498,34 @@
       if(!fgNativeOutstanding||!providerReady||!callerFresh) {
         const bool recoverable=callerFresh&&statusResult==S_OK&&status.generation==runtimeGeneration&&
           status.state!=EDVR_FG_CLOSING&&status.state!=EDVR_FG_FAILED;
-        fgDisable(callerFresh?3u:10u,operation,recoverable);return true;
+        uint32_t reason=callerFresh?3u:10u;
+        if(coverageWithdrawal&&callerFresh) {
+          const auto confirm=[&]{
+            EdvrFgStatus live{};
+            return frameGeneration.status(live)==S_OK&&fgCoverageWithdrawal(live);
+          };
+          if(compatible) {
+            const XrResult settled=fgSettleCoverageEndpoint(confirm,[&](const XrView (&views)[2],XrTime time,
+                const EyeCapture& native,XrCompositionLayerProjection& layer) {
+              return fgRenderCaptured(views,time,native,layer,comfortFade(),nullptr);
+            });
+            if(settled!=XR_SUCCESS){publishFatalFailure(settled,"native_fg_coverage_endpoint");return true;}
+          }
+          if(confirm())reason=EDVR_FG_NATIVE_COVERAGE; // producer already cut this epoch; retire local imports once
+        }
+        fgDisable(reason,operation,recoverable);return true;
       }
     }
     if(!fgEnabled.load(std::memory_order_acquire)) {
-      if(state.frameOpen()||pendingFrameEndFinish)return false;
+      const fgbootstrap::Epoch epoch{runtimeGeneration,status.configGeneration,poses.read().originGeneration,status.historyGeneration};
+      if(state.frameOpen()||pendingFrameEndFinish||!fgHasSubmittedSeed(epoch))return false;
       if(frameGeneration.initializeConsumer(graphics.device(),graphics.context())!=S_OK||fgFallback.initialize(graphics.device())!=S_OK||
          fgPendingNative.initialize(graphics.device())!=S_OK||
          fgWorldFallback.initialize(graphics.device())!=S_OK||fgUiFallback.initialize(graphics.device())!=S_OK){++fgRefused;return false;}
       fgConsumerAllocated=true;fgResumedNative=false;
       fgMultiplier=status.requestedMultiplier;fgConfig=status.configGeneration;fgHistory=status.historyGeneration;fgNextCredit=fgTick;
-      fgSeedNativeFallback();
+      fgBootstrap.sync(epoch);fgSeedNativeFallback(epoch);
+      if(fgDisplayedSequence)fgBootstrap.displayNative(fgDisplayedSequence);
       fgEnabled.store(true,std::memory_order_release);service.setContinuousIdle(true);
       nativeTracePrintf("native_fg_xr,enabled=1,multiplier=%u,single_owner=1,turbo=0,consumed_batches_copy_all_phases=1\n",fgMultiplier);
     }
@@ -524,7 +641,7 @@
           for(unsigned eye=0;eye<2;++eye)fgFallbackViews[eye]=fgschedule::view(b.currentViews[eye],b.currentViews[eye],1.f);
           fgFallbackSpace=seated.frame().space;
           fgFallbackTime=b.currentPoseDisplayTime;fgFallbackReference=b.referenceGeneration;
-          fgFallbackSequence=b.currentSequence;fgDisplayedSequence=b.currentSequence;images.ready=false;
+          fgFallbackSequence=b.currentSequence;images.ready=false;
         }
       } else {images.ready=false;++fgRefused;publishFatalFailure(drawn,"native_fg_stereo");return true;}
     }
@@ -538,19 +655,26 @@
       pixels=true;
       fgLastPhase=0;fgLastSourceTime=fgFallbackTime;fgLastAge=tick.predictedDisplayTime-fgFallbackTime;
       generated=false;newNative=fgDisplayedSequence!=fgFallbackSequence;
-      fgDisplayedSequence=fgFallbackSequence;
     }
     const auto kind=!pixels?edvr::NativePresentationKind::Empty:
       generated?edvr::NativePresentationKind::Generated:
       newNative?edvr::NativePresentationKind::Native:edvr::NativePresentationKind::Repeated;
     // Native credit callbacks and the draw can span a producer proof change.
     // Sample the current generation again at the generated xrEndFrame edge.
-    if(generated&&!fgCanSubmitBatch(images.metadata)){++fgRefused;fgDisable(3,operation,callerFresh,true);return true;}
-    const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind);
+    if(generated&&!fgCanSubmitBatch(images.metadata,&status)) {
+      ++fgRefused;
+      if(!fgYieldCoverageSlot(status))fgDisable(3,operation,callerFresh,true);
+      return true;
+    }
+    const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind,generated?&images.metadata:nullptr);
     if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_end");fgCancelCredit();return true;}
-    if(generated)fgBootstrap.displayGenerated(images.metadata);
-    else if(newNative)fgBootstrap.displayNative(fgDisplayedSequence,fgTick);
-    if(hasUi)++fgUiPresented;
+    pixels=pixels&&boundary.frame().status==FrameStatus::Ended;
+    if(pixels&&newNative) {
+      fgDisplayedSequence=fgFallbackSequence;
+      fgSubmittedNative={fgBootstrap.epoch(),fgDisplayedSequence,fgFallbackTime,fgFallbackSpace};
+      fgBootstrap.displayNative(fgDisplayedSequence,fgTick);
+    }
+    if(pixels&&hasUi)++fgUiPresented;
     if(!pixels)++fgEmpty;else if(generated)++fgGeneratedPresented;else if(newNative)++fgNativePresented;else ++fgRepeated;
     fgReport();return true;
   }

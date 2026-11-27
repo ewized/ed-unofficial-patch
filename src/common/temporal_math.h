@@ -405,6 +405,59 @@ inline bool temporalCantedWorldFromSelected(const float prev[12], const float no
     return true;
 }
 
+// Transform a point in the current anatomical eye into the previous eye.
+// Solve prevBasis * relative = [nowBasis | nowPosition - prevPosition]
+// before projecting. Subtracting the world origins first preserves small
+// motion at kilometre-scale positions. Captured float bases are approximate
+// rotations, so invert the measured basis (including its round-off).
+inline bool temporalRelativeEyeView(const float prev[12], const float now[12],
+                                    double relative[3][4]) noexcept {
+    double inverseNumerator[3][3];
+    for (int r = 0; r < 3; ++r) {
+        const int i = (r + 1) % 3, j = (r + 2) % 3;
+        for (int c = 0; c < 3; ++c) {
+            const int u = (c + 1) % 3, v = (c + 2) % 3;
+            inverseNumerator[r][c] = double(prev[u * 4 + i]) * prev[v * 4 + j]
+                                   - double(prev[v * 4 + i]) * prev[u * 4 + j];
+        }
+    }
+    const double det = prev[0] * inverseNumerator[0][0] + prev[1] * inverseNumerator[1][0] +
+                       prev[2] * inverseNumerator[2][0];
+    if (!std::isfinite(det) || std::fabs(det) < 1e-12) return false;
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c) {
+        double sum = 0;
+        for (int k = 0; k < 3; ++k) {
+            const double value = double(now[k * 4 + c]) - (c == 3 ? prev[k * 4 + c] : 0.0);
+            sum += inverseNumerator[r][k] * value;
+        }
+        // F * relative * F takes the measured +Z basis into -Z eye space.
+        relative[r][c] = ((r == 2) != (c == 2) ? -sum : sum) / det;
+        if (!std::isfinite(relative[r][c])) return false;
+    }
+    return true;
+}
+
+// Convert each selected camera write with its own frame's source-eye label
+// and raw eye geometry. The same endpoints feed the FG shader and NGX. A
+// canted source switch accepted as continuous by the unmodified-row gate
+// has ambiguous provenance (see temporalCantedWorldFromSelected).
+inline bool temporalFgEyePair(const float prev[12], const float now[12],
+                              int prevSource, int nowSource, int target,
+                              const float prevEyes[2][12], const float nowEyes[2][12],
+                              float eyePrev[12], float eyeNow[12]) noexcept {
+    if (prevSource < 0 || prevSource > 1 || nowSource < 0 || nowSource > 1 ||
+        target < 0 || target > 1 ||
+        (prevSource != nowSource && temporalEyesCanted(prevEyes, nowEyes))) return false;
+    for (int i = 0; i < 2; ++i) {
+        if (!temporalRowsAreRotation(prevEyes[i]) || !temporalRowsAreRotation(nowEyes[i])) return false;
+        for (int k = 3; k < 12; k += 4)
+            if (!std::isfinite(prevEyes[i][k]) || !std::isfinite(nowEyes[i][k])) return false;
+    }
+    temporalRowsForEye(prev, prevSource, target, prevEyes, eyePrev);
+    temporalRowsForEye(now, nowSource, target, nowEyes, eyeNow);
+    return true;
+}
+
 // A camera translation of at least this many metres in one frame is the
 // floating origin moving, not the camera: Elite re-anchors its world about
 // every 5 km of travel. The VR gate below and the flat resolver share it.

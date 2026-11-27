@@ -208,11 +208,14 @@ void run() {
     const auto syntheticStart = GetTickCount64();
     while (syntheticReady->GetCompletedValue() < 1 && GetTickCount64() - syntheticStart < 3000) Sleep(1);
     check(syntheticReady->GetCompletedValue() == 1, "synthetic inputs ready before admission stub");
-    for (unsigned route = 0; route < 6; ++route) {
+    uint64_t previousAllocation=0;
+    for (unsigned route = 0; route < 10; ++route) {
         const uint64_t sequence = route + 2;
         admission = route == 1 ? FrameGenerationNgxCompletion::Suppressed :
-            route == 2 ? FrameGenerationNgxCompletion::FailedEvaluation : FrameGenerationNgxCompletion::Ready;
-        const unsigned multiplier = route == 5 ? 3 : route >= 3 ? 2 : 4;
+            route == 2 ? FrameGenerationNgxCompletion::FailedEvaluation :
+            route == 9 ? FrameGenerationNgxCompletion::Stale : FrameGenerationNgxCompletion::Ready;
+        const unsigned multiplier = route == 5 ? 3 : route >= 6 ? 4 : route >= 3 ? 2 : 4;
+        const bool nativeOnly=route==0||route==8;
         check(interop.begin(runtime.producerContext.Get(), sequence, 1), "begin immutable stereo source");
         std::array<std::array<ComPtr<ID3D11Texture2D>, 5>, 2> sources;
         for (unsigned e = 0; e < 2; ++e) {
@@ -250,10 +253,22 @@ void run() {
         source.historyGeneration = 1; source.multiplier = multiplier;
         FrameGenerationOutputUi ui[2]; ui[0].useMult = true;
         ui[1].empty=route==4;
-        auto ticket = output->submit(captured, synthetic, ui, source);
+        if(route==0)source.previous={}; // First native seed has no publishable generated history.
+        auto ticket = output->submit(captured, synthetic, ui, source,nativeOnly);
+        if(route==9) {
+            check(!ticket.accepted&&!ticket.unsafe&&output->status().failure==FrameGenerationOutputFailure::Stale&&
+                !output->status().failed,"late fenced stale observation does not publish old pixels or terminally fault the publisher");
+            check(captured->retire(synthetic.completionFence,synthetic.completionValue),
+                "caller retires rejected stale input through its real completed backend fence");
+            captured.reset();continue;
+        }
         check(ticket.accepted && !ticket.unsafe && ticket.finalFence && ticket.finalValue, "actual output command submission and final fence");
         check(captured->retire(ticket.finalFence, ticket.finalValue), "source retires ONCE after final HUD fence, never NGX-only");
-        EdvrFgBatch batch{}; batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_3;
+        EdvrFgBatch batch{};batch.version=route==7?EDVR_FG_BATCH_VERSION_3:route==8?EDVR_FG_BATCH_VERSION_2:EDVR_FG_BATCH_VERSION_4;
+        batch.size=edvrFgBatchSize(batch.version);
+        constexpr uint64_t suffixSentinel=0x5a5a5a5a5a5a5a5aull;
+        if(batch.version!=EDVR_FG_BATCH_VERSION_4)batch.allocationId=suffixSentinel;
+        if(batch.version==EDVR_FG_BATCH_VERSION_2){batch.nativeWorldTextures[0]=HANDLE(uintptr_t(13));batch.nativeWorldTextures[1]=HANDLE(uintptr_t(14));}
         auto pending = ticket;
         ++pending.finalValue; // The next output submission has not been queued.
         check(pending.exportStatus() == S_FALSE && pending.acquireBatch(&batch) == S_FALSE && !batch.token,
@@ -265,7 +280,23 @@ void run() {
         const HRESULT acquired = ticket.acquireBatch(&batch);
         hr(acquired, "acquire actually fenced output"); check(acquired == S_OK && batch.token, "one retained ABI batch transferred");
         check(ticket.exportStatus() == S_FALSE && ticket.acquireBatch(&batch) == S_FALSE, "transferred batch cannot advertise readiness or a second initial token");
-        const bool hasGenerated = route == 0 || route >= 3;
+        const bool hasGenerated = !nativeOnly&&(route == 0 || route >= 3);
+        check(ticket.generatedCount==(hasGenerated?multiplier-1:0),"internal ticket counts exactly the phases actually submitted");
+        if(batch.version==EDVR_FG_BATCH_VERSION_4) {
+            check(batch.allocationId!=0,"v4 exports a nonzero allocation-set incarnation");
+            if(route==0||route==3||route==5||route==6)
+                check(batch.allocationId>previousAllocation,"later generated/UI texture allocation refreshes the whole set identity");
+            else check(batch.allocationId==previousAllocation,"plain output slot reuse preserves allocation identity");
+            previousAllocation=batch.allocationId;
+        } else {
+            check(batch.allocationId==suffixSentinel,"legacy export does not write the appended v4 field");
+            if(batch.version==EDVR_FG_BATCH_VERSION_2) {
+                check(batch.nativeWorldTextures[0]==HANDLE(uintptr_t(13))&&batch.nativeWorldTextures[1]==HANDLE(uintptr_t(14)),
+                    "v2 export does not write the v3 suffix");
+                batch.nativeWorldTextures[0]=batch.nativeWorldTextures[1]=nullptr;
+            }
+            batch.allocationId=0;
+        }
         check(batch.uiFlags==(hasGenerated?EDVR_FG_UI_NATIVE_COVERAGE:0u),"only generated batches carry independent native-pose UI");
         check(batch.phaseMask == (hasGenerated ? (1u << multiplier) - 1 : 1u), "suppression/error never invents generated readiness");
         check(batch.generatedCount == (hasGenerated ? multiplier - 1 : 0u), "native-only batches advertise zero available generated frames");

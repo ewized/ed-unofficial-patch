@@ -559,6 +559,38 @@ void uiProducerReplacementCases(Gpu& gpu) {
     std::puts("ui_producer_replacement generations=3 old_slots=3 steady_slots=3 old_pixels=exact blocked_gpu_preserved=1");
 }
 
+// Stop after one eye while the D3D11 producer still waits on a real fence.
+void checkpointReplacementCases(Gpu& gpu) {
+    auto* context=gpu.runtime.context.Get();
+    auto producer=std::make_shared<FrameGenerationInterop>();
+    check(producer->initialize(gpu.config()),"checkpoint: create actual producer ring");
+    gpu.blockProducer();
+    const auto sequence=gpu.nextSequence++;
+    auto source=texture(gpu.runtime.device.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,13,9,
+        pattern(13,9,DXGI_FORMAT_R8G8B8A8_UNORM,3));
+    auto owner=std::make_shared<int>(1);std::weak_ptr<int> retained=owner;
+    check(producer->begin(context,sequence,1)&&producer->capture(context,sequence,1,0,FrameGenerationPlane::Color,
+        source.Get(),1,owner),"checkpoint: one eye queued before stop");
+    owner.reset();
+    check(!producer->cancelQuiesced()&&!retained.expired(),"checkpoint: unsealed partial copy cannot be released");
+    check(producer->checkpoint(context)&&producer->checkpoint(context)&&producer->status().partialCheckpoints==1,
+        "checkpoint: producer handoff seals pending work exactly once");
+    bool canceled=false;std::thread afterProducerClose([&]{canceled=producer->cancelQuiesced();});afterProducerClose.join();
+    check(canceled&&!producer->retired(),"checkpoint: quiesced close needs no game-context calls and preserves pending GPU reads");
+    fg_interop::Retirement<FrameGenerationInterop> retirement;
+    std::weak_ptr<FrameGenerationInterop> old=producer;
+    auto next=std::make_shared<FrameGenerationInterop>();check(next->initialize(gpu.config()),"checkpoint: replacement producer initializes");
+    check(retirement.replace(producer,next)&&!old.expired()&&!retained.expired()&&!retirement.collect(),
+        "checkpoint: application drops its displaced owner while the old source is GPU-owned");
+    check(!retirement.replace(producer,{})&&producer==next,"checkpoint: a pending displaced ring bounds replacement backlog");
+    hr(gpu.producerGate->Signal(1),"checkpoint: release partial producer GPU work");
+    const auto deadline=GetTickCount64()+2000;
+    while(!retirement.collect()&&GetTickCount64()<deadline)Sleep(1);
+    check(old.expired()&&retained.expired(),"checkpoint: proven producer fence releases displaced ring and its source");
+    check(producer->begin(context,sequence+1,2)&&producer->abort(context,sequence+1,2),
+        "checkpoint: a new producer accepts a source after an orderly one-eye stop");
+}
+
 void rejectionCases(Gpu& gpu) {
     auto* context = gpu.runtime.context.Get();
     bool wrongOwner = true;
@@ -695,6 +727,116 @@ void typelessTransitionCases(Gpu& gpu) {
     auto& job = gpu.copy(mixed);
     check(mixed.lease->retire(gpu.completion.Get(), job.completion), "compatible mixed-source stereo retirement");
     gpu.verify(job);
+}
+
+void hudDirectPartialCases(Gpu& gpu) {
+    struct SourceTag final : IUnknown {
+        explicit SourceTag(std::shared_ptr<unsigned> owner) : owner_(std::move(owner)) {}
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
+            if (!result) return E_POINTER;
+            *result = nullptr;
+            if (!IsEqualIID(iid, __uuidof(IUnknown))) return E_NOINTERFACE;
+            *result = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs_)); }
+        ULONG STDMETHODCALLTYPE Release() override {
+            const auto remaining = InterlockedDecrement(&refs_);
+            if (!remaining) delete this;
+            return static_cast<ULONG>(remaining);
+        }
+    private:
+        volatile LONG refs_ = 1;
+        std::shared_ptr<unsigned> owner_;
+    };
+    struct Submit {
+        FrameGenerationInterop& interop;
+        ID3D11DeviceContext* context;
+        ID3D11Texture2D* expectedLayer;
+        bool copiedLayer = false;
+    };
+    const auto sink = +[](void* data, const UiLayerFgPlanes& planes) noexcept {
+        auto& submit = *static_cast<Submit*>(data);
+        if (planes.layer != submit.expectedLayer || !planes.useMult) return false;
+        const auto sequence = planes.info.sequence;
+        const auto eye = planes.info.eye;
+        submit.copiedLayer = submit.interop.capture(submit.context, sequence, 1, eye,
+            FrameGenerationPlane::UiColorTransmittance, planes.layer, sequence);
+        return submit.copiedLayer && submit.interop.capture(submit.context, sequence, 1, eye,
+            FrameGenerationPlane::UiMultiply, planes.multiply, sequence + 1);
+    };
+
+    FrameGenerationInterop interop;
+    check(interop.initialize(gpu.config()), "direct HUD fixture owns an independent producer ring");
+    auto* context = gpu.runtime.context.Get();
+    auto* device = gpu.runtime.device.Get();
+    gpu.blockProducer();
+    std::array<std::weak_ptr<unsigned>, fg_interop::slots> pins;
+    ui_layer_fg::CaptureCache cache;
+    static constexpr GUID tagKey{0x75bb7fcb, 0xbbcf, 0x4a3d, {0x80, 0xe0, 0x6b, 0xa4, 0x32, 0x4c, 0x12, 0x60}};
+    for (auto& pin : pins) {
+        const auto sequence = gpu.nextSequence++;
+        check(interop.begin(context, sequence, 1), "begin blocked direct HUD transaction");
+        const auto hud = pattern(13, 9, DXGI_FORMAT_R8G8B8A8_UNORM, sequence);
+        const auto incompatible = pattern(13, 9, DXGI_FORMAT_R32_FLOAT, sequence + 1);
+        auto layer = texture(device, DXGI_FORMAT_R8G8B8A8_UNORM, 13, 9, hud, D3D11_BIND_SHADER_RESOURCE);
+        auto multiply = texture(device, DXGI_FORMAT_R32_FLOAT, 13, 9, incompatible, D3D11_BIND_SHADER_RESOURCE);
+        auto scene = texture(device, DXGI_FORMAT_R8G8B8A8_UNORM, 13, 9, hud);
+        ComPtr<ID3D11ShaderResourceView> layerView, multiplyView;
+        hr(device->CreateShaderResourceView(layer.Get(), nullptr, &layerView), "direct layer SRV");
+        hr(device->CreateShaderResourceView(multiply.Get(), nullptr, &multiplyView), "direct incompatible multiply SRV");
+        auto lifetime = std::make_shared<unsigned>(1);
+        pin = lifetime;
+        ComPtr<IUnknown> marker;
+        marker.Attach(new SourceTag(std::move(lifetime)));
+        hr(layer->SetPrivateDataInterface(tagKey, marker.Get()), "tie probe to actual source texture lifetime");
+        marker.Reset();
+
+        ui_layer_fg::Source source;
+        source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
+        source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
+        source.info.eye = 0; source.info.sequence = sequence; source.expectedFrame = scene.Get();
+        source.layer = layer.Get(); source.layerView = layerView.Get();
+        source.multiply = multiply.Get(); source.multiplyView = multiplyView.Get(); source.useMult = true;
+        Submit submit{interop, context, layer.Get()};
+        UiLayerFgInfo info;
+        {
+            CaptureCopySpy count(context);
+            check(!ui_layer_fg::captureTo(context, scene.Get(), source, cache, sink, &submit, &info) &&
+                submit.copiedLayer && count.copies == 1 && !info.fullSupported &&
+                info.refusal == UiLayerFgRefusal::CopyFailed &&
+                interop.status().failure == FrameGenerationInteropFailure::InvalidFormat,
+                "direct layer is copied once before real interop refuses multiply");
+        }
+        constexpr unsigned hudPlanes = frameGenerationPlaneBit(FrameGenerationPlane::UiColorTransmittance) |
+            frameGenerationPlaneBit(FrameGenerationPlane::UiMultiply);
+        check(!interop.publish(context, sequence, 1, hudPlanes) &&
+            interop.status().failure == FrameGenerationInteropFailure::Incomplete,
+            "partial HUD copies cannot publish");
+        bool foreignAborted = true;
+        std::thread foreign([&] { foreignAborted = interop.abort(context, sequence, 1); });
+        foreign.join();
+        check(!foreignAborted && interop.status().failure == FrameGenerationInteropFailure::WrongThreadOrContext,
+            "foreign thread cannot seal partial copies on the producer context");
+        check(interop.abort(context, sequence, 1), "owner seals the real partial HUD copy");
+        layerView.Reset();
+        layer.Reset();
+        check(!pin.expired(), "sealed slot retains the actual source after all caller COM references drop");
+    }
+    const auto reuse = gpu.nextSequence++;
+    check(!interop.retired() && !interop.begin(context, reuse, 1) &&
+        interop.status().failure == FrameGenerationInteropFailure::Busy,
+        "three canceled partial copies prevent reuse while the producer fence is blocked");
+    for (const auto& pin : pins) check(!pin.expired(), "blocked producer keeps each copied source alive");
+    hr(gpu.producerGate->Signal(1), "release direct HUD producer gate");
+    ComPtr<ID3D11DeviceContext4> context4;
+    hr(context->QueryInterface(IID_PPV_ARGS(&context4)), "direct HUD producer context supports a fence marker");
+    hr(context4->Signal(gpu.producerGate11.Get(), 2), "queue marker after all partial HUD producer fences");
+    context->Flush();
+    check(waitFence(gpu.producerGate.Get(), 2, gpu.event), "bounded direct HUD producer completion");
+    check(interop.retired() && interop.begin(context, reuse, 1) && interop.abort(context, reuse, 1),
+        "producer completion permits reuse after partial HUD cancellation");
 }
 
 void ringCases(Gpu& gpu) {
@@ -835,12 +977,14 @@ void lifetimeCase(Gpu& gpu) {
 }
 void runGpu(Gpu& gpu) {
     gpu.initialize();
+    checkpointReplacementCases(gpu);
     rejectionCases(gpu);
     pixelCases(gpu);
     normalizedPixelCases(gpu);
     uiProducerReplacementCases(gpu);
     typelessTransitionCases(gpu);
     typelessAdmissionCases(gpu);
+    hudDirectPartialCases(gpu);
     ringCases(gpu);
     sourceOwnerCases(gpu);
     blockedQueueCase(gpu);

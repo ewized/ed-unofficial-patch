@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
         edvr::FrameGenerationOutputUi ui[2];
         const auto ticket = output.submit({}, {}, ui, {});
         if (ticket.accepted || ticket.unsafe || ticket.finalFence || ticket.finalValue || ticket.lease) ++failures;
-        EdvrFgBatch batch{}; batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_3;
+        EdvrFgBatch batch{}; batch.size = sizeof(batch); batch.version = EDVR_FG_BATCH_VERSION_4;
         if (ticket.exportStatus() != E_FAIL || ticket.acquireBatch(&batch) != E_FAIL || batch.token || batch.phaseMask) ++failures;
         if (ticket.acquireBatch(nullptr) != E_INVALIDARG) ++failures;
         if (output.collect()) ++failures;

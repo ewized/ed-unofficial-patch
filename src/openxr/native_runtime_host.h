@@ -312,6 +312,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   fgbootstrap::Bootstrap fgBootstrap;
   uint32_t fgLastDisableReason=0;
   XrTime fgLastSourceTime=0;XrDuration fgLastAge=0;unsigned fgLastPhase=0;
+  // Announcing a pose to the producer gives it a source ID. Only a successful
+  // native stereo layer end promotes that source to a displayed endpoint.
+  struct FgNativeEndpoint {
+    fgbootstrap::Epoch epoch{};
+    uint64_t sequence=0;
+    XrTime time=0;
+    XrSpace space=XR_NULL_HANDLE;
+  } fgAnnouncedNative,fgSubmittedNative;
   EyeCapture fgFallback;
   EyeCapture fgPendingNative;
   struct FgPendingNativePose {
@@ -324,7 +332,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EyeCapture fgWorldFallback,fgUiFallback;
   bool fgSplitFallbackValid=false;
   XrView fgFallbackViews[2]{};
-  XrSpace fgFallbackSpace=XR_NULL_HANDLE;
+  XrSpace fgFallbackSpace=XR_NULL_HANDLE,fgCommittedSpace=XR_NULL_HANDLE;
   XrTime fgFallbackTime=0;
   uint64_t fgFallbackSequence=0,fgFallbackReference=0;
   bool previousPairValid=false,frameWithheld=false,frameDecisionReady=false;
@@ -2753,6 +2761,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       (!info.layers||state.lifecycle()==Lifecycle::Stopping)?edvr::NativePresentationKind::Empty:
       info.background?edvr::NativePresentationKind::Background:
       frameWithheld?edvr::NativePresentationKind::Repeated:edvr::NativePresentationKind::Native;
+    if(kind==edvr::NativePresentationKind::Native) {
+      fgSubmittedNative=fgAnnouncedNative.sequence==activeFrameSequence&&frameGeometryAvailable&&
+        fgAnnouncedNative.time==frameGeometry.displayTime&&fgAnnouncedNative.space==frameSpace?
+        fgAnnouncedNative:FgNativeEndpoint{};
+    }
     notePresentation(kind);
     const uint64_t nowMs=GetTickCount64();
     const double periodMs=double(info.periodNs)/1000000.0;

@@ -157,6 +157,11 @@ bool g_frameTransportAvailable = true;
 bool g_refuseOff = false;
 bool g_deferOn = false;
 bool g_readbackUnavailable = false;
+bool g_driverReportsOff = false;
+bool g_holdOldFirstSleep = false;
+unsigned g_enrollmentRetries = 0;
+uint64_t g_reflexClockMs = 10000;
+uint64_t g_transportGeneration = 0;
 std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
 }
 
@@ -178,7 +183,7 @@ Result observe(ID3D11Device*, Mode mode) {
     ++g_latencyObservations;
     if (g_readbackUnavailable) return {"fixture_readback_unavailable"};
     Result result{"fixture", true, kUnavailable, 0};
-    result.readback.lowLatencyMode = mode != Mode::Off;
+    result.readback.lowLatencyMode = mode != Mode::Off && !g_driverReportsOff;
     return result;
 }
 void logMode(Mode, const char*, uint64_t, const Result&, unsigned count) {
@@ -192,21 +197,33 @@ namespace edvr::native_reflex {
 FrameDriver::FrameDriver(ID3D11Device* device, bool ownGameSleep)
     : device_(device), firstSleep_(ownGameSleep) { device_->AddRef(); }
 FrameDriver::~FrameDriver() { device_->Release(); }
-std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
-    return std::shared_ptr<FrameDriver>(new FrameDriver(device, false));
+FrameDriverEnrollment openFrameDriver(ID3D11Device* device) {
+    if (g_holdOldFirstSleep) return {nullptr, true};
+    if (!g_frameTransportAvailable) return {};
+    return {std::shared_ptr<FrameDriver>(new FrameDriver(device, false))};
 }
-FrameDriver* startFrameSession(ID3D11Device* device, uint64_t) {
-    g_frameTransport = g_frameTransportAvailable ? openFrameDriver(device) : nullptr;
-    publishFrameAvailability(g_frameTransportAvailable && g_reportFrameAvailable);
-    return g_frameTransport.get();
+uint64_t frameSessionClockMs() noexcept { return g_reflexClockMs; }
+FrameSessionEnrollment startFrameSession(ID3D11Device* device, uint64_t generation) {
+    auto enrollment = openFrameDriver(device);
+    g_frameTransport = std::move(enrollment.driver);
+    g_transportGeneration = generation;
+    fullFrameQualification.publish(g_frameTransport && g_reportFrameAvailable ? g_reflexClockMs : 0, g_reflexClockMs);
+    return {g_frameTransport.get(), enrollment.pending};
+}
+FrameSessionEnrollment retryFrameSession(ID3D11Device* device, uint64_t generation, uint64_t) noexcept {
+    ++g_enrollmentRetries;
+    if (generation != g_transportGeneration) return {};
+    auto enrollment = openFrameDriver(device);
+    g_frameTransport = std::move(enrollment.driver);
+    return {g_frameTransport.get(), enrollment.pending};
 }
 void stopFrameSession(uint64_t) noexcept {
-    publishFrameAvailability(false);
+    fullFrameQualification.publish(0, g_reflexClockMs);
     g_frameTransport.reset();
 }
 void reportFrameSession(uint64_t generation) noexcept {
     g_frameReports.push_back(generation);
-    publishFrameAvailability(g_reportFrameAvailable);
+    fullFrameQualification.publish(g_frameTransport && g_reportFrameAvailable ? g_reflexClockMs : 0, g_reflexClockMs);
 }
 }
 
@@ -387,7 +404,7 @@ int wmain(int argc, wchar_t** argv) {
         // Restore the controlled callback result before the next Present so
         // this reporting check does not request a separate mode transition.
         g_reportFrameAvailable = true;
-        edvr::native_reflex::publishFrameAvailability(true);
+        edvr::native_reflex::fullFrameQualification.publish(g_reflexClockMs, g_reflexClockMs);
         check(!confirmedFrameGenerationProof(device.Get(), request.generation), "renewed qualification cannot reuse the old proof");
         reports = g_frameReports.size();
         cfg.set("fix.nvidia_reflex", "boost");
@@ -398,6 +415,19 @@ int wmain(int argc, wchar_t** argv) {
         check(renewedProof && renewedProof != boostProof && g_latencyCalls.size() == stableDriverCalls && g_latencyObservations == stableReadbacks + 1 &&
               g_latencySamples == std::vector<unsigned>{4, 16, 64},
               "new qualification rechecks the owned mode once without repeating its request");
+
+        const auto readsBeforeGap = g_latencyObservations;
+        g_reflexClockMs += edvr::native_reflex::detail::FrameSourceQualification::kMaxSourceAgeMs + 1;
+        uint64_t xrProof = renewedProof;
+        std::thread xrOwner([&] { xrProof = confirmedFrameGenerationProof(device.Get(), request.generation); });
+        xrOwner.join();
+        check(!xrProof && g_latencyObservations == readsBeforeGap && g_latencyCalls.size() == stableDriverCalls,
+              "the XR owner drops old source proof with no producer Present or driver calls at the deadline");
+        updateOnGamePresent(device.Get());
+        const auto proofAfterGap = confirmedFrameGenerationProof(device.Get(), request.generation);
+        check(proofAfterGap && proofAfterGap != renewedProof && g_latencyObservations == readsBeforeGap + 1 &&
+              g_latencyCalls.size() == stableDriverCalls,
+              "a fresh source after the gap requires fresh mode evidence and a new proof");
 
         edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
         updateOnGamePresent(device.Get());
@@ -413,6 +443,38 @@ int wmain(int argc, wchar_t** argv) {
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == 5 && g_latencyCalls.back().mode == Mode::On,
               "selecting frame generation requests low latency before the first generated frame");
+        const auto acceptedOn = confirmedFrameGenerationProof(device.Get(), request.generation);
+        for (unsigned i = 0; i < edvr::native_reflex::ModeHistory::kLastObservation - 1; ++i)
+            updateOnGamePresent(device.Get());
+        g_readbackUnavailable = true;
+        updateOnGamePresent(device.Get());
+        check(!confirmedFrameGenerationProof(device.Get(), request.generation),
+              "an unreadable Present 64 revokes active Frame Generation proof");
+        g_readbackUnavailable = false;
+        constexpr auto readbackInterval = edvr::native_reflex::ModeHistory::kEnabledReadbackIntervalMs;
+        g_reflexClockMs += readbackInterval;
+        updateOnGamePresent(device.Get());
+        const auto recoveredOn = confirmedFrameGenerationProof(device.Get(), request.generation);
+        check(recoveredOn && recoveredOn != acceptedOn && g_latencyCalls.size() == 5,
+              "owned periodic observation recovers a confirmed mode without a setter");
+        g_driverReportsOff = true;
+        g_reflexClockMs += readbackInterval;
+        const auto readsBeforeForeignPresents = g_latencyObservations;
+        updateOnGamePresent(otherDevice.Get());
+        std::thread otherObserver([&] { updateOnGamePresent(device.Get()); });
+        otherObserver.join();
+        check(g_latencyObservations == readsBeforeForeignPresents &&
+              confirmedFrameGenerationProof(device.Get(), request.generation) == recoveredOn,
+              "foreign device and thread Presents cannot advance effective-mode readback");
+        updateOnGamePresent(device.Get());
+        check(!confirmedFrameGenerationProof(device.Get(), request.generation) && g_latencyCalls.size() == 5,
+              "periodic observation of an effective Off revokes proof without a setter");
+        g_driverReportsOff = false;
+        g_reflexClockMs += readbackInterval;
+        updateOnGamePresent(device.Get());
+        const auto renewedOn = confirmedFrameGenerationProof(device.Get(), request.generation);
+        check(renewedOn && renewedOn != recoveredOn && g_latencyCalls.size() == 5,
+              "effective On recovery publishes another proof within the same device and generation");
         cfg.set("fix.frame_generation", "auto");
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == 5 && cfg.getString("fix.nvidia_reflex", "") == "off",
@@ -6637,6 +6699,9 @@ int wmain(int argc, wchar_t** argv) {
         check(edvrAcquireNativeFrame(&unavailableRequest, &unavailable) == S_OK &&
                   g_latencyCalls.size() == calls,
               "unavailable frame transport never enables a driver-only fallback");
+        const auto retries = g_enrollmentRetries;
+        edvr::native_reflex::updateOnGamePresent(device.Get());
+        check(g_enrollmentRetries == retries, "permanent enrollment refusal is never retried");
         check(unavailable.close(unavailable.context) == S_OK && g_latencyCalls.size() == calls,
               "unavailable frame transport owns no mode cleanup");
         g_frameTransportAvailable = true;
@@ -6732,6 +6797,37 @@ int wmain(int argc, wchar_t** argv) {
               "a verified live withdrawal publishes confirmed Off for F8");
         check(retryTable.close(retryTable.context) == S_OK && modeStatusForUser() == ModeStatus::Unavailable,
               "closing clears the driver readback published to F8");
+    }
+    {
+        using namespace edvr::native_reflex;
+        auto& cfg = edvr::Config::get();
+        cfg.set("fix.frame_generation", "2x");
+        const auto writes = g_latencyCalls.size(), retries = size_t(g_enrollmentRetries);
+        auto replacement = request;
+        replacement.generation = 46;
+        EdvrNativeFrameTable replacementTable{sizeof(replacementTable), EDVR_NATIVE_FRAME_VERSION_1};
+        g_holdOldFirstSleep = true;
+        check(edvrAcquireNativeFrame(&replacement, &replacementTable) == S_OK &&
+              !confirmedFrameGenerationProof(device.Get(), replacement.generation),
+              "same-device replacement continues natively while an old first Sleep is pending");
+        std::thread foreign([&] { updateOnGamePresent(device.Get()); });
+        foreign.join();
+        check(g_enrollmentRetries == retries, "foreign thread cannot claim pending transport enrollment");
+        updateOnGamePresent(device.Get());
+        check(g_enrollmentRetries == retries + 1 && g_latencyCalls.size() == writes,
+              "a pending retry leaves driver calls and proof untouched");
+        g_holdOldFirstSleep = false;
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == writes + 1 && g_latencyCalls.back().mode == Mode::Off,
+              "settled pending enrollment configures this replacement Off once");
+        updateOnGamePresent(device.Get());
+        check(g_enrollmentRetries == retries + 2 && g_latencyCalls.size() == writes + 2 &&
+              g_latencyCalls.back().mode == Mode::On &&
+              confirmedFrameGenerationProof(device.Get(), replacement.generation) &&
+              !confirmedFrameGenerationProof(device.Get(), replacement.generation - 1),
+              "first qualified source reconfirms the same replacement without another restart");
+        check(replacementTable.close(replacementTable.context) == S_OK, "the replacement owns normal Off cleanup");
+        cfg.set("fix.frame_generation", "off");
     }
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");

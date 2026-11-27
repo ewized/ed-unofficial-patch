@@ -36,4 +36,12 @@ constexpr NativeFgSelection nativeFgSelection(std::string_view value) noexcept {
         value[0] >= '2' && value[0] <= '4') return {false, unsigned(value[0] - '0')};
     return {};
 }
+// A zero maximum means the session has not reported its capability yet.
+// Auto may request 2x, and Off must remain available even without support.
+constexpr bool nativeFgOptionEnabled(std::string_view value, unsigned maximum) noexcept {
+    if (native_fg_detail::equalSetting(value, "off")) return true;
+    const auto selection = nativeFgSelection(value);
+    if (!selection.enabled()) return false;
+    return maximum == 0 || (selection.automatic ? 2u : selection.multiplier) <= maximum;
+}
 } // namespace edvr

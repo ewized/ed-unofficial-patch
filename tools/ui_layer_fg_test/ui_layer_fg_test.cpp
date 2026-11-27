@@ -65,7 +65,8 @@ static void contracts() {
         "context->CopyResource(texture.Get(), source);",
         "renderBoundaryValidateOwner(device, context, true)",
         "e.submittedSeq == sequence && e.temporalOutSeq == sequence",
-        "e.compositedSeq != sequence",
+        "e.door.doorSeq == sequence && e.doorFromPass && e.compositedSeq != sequence",
+        "facts.hasUi = e.seq == sequence && e.draws != 0",
         "e.hdrToneSeq == sequence", "e.wPubSeq == sequence",
         "frame == source.expectedFrame",
         "runSmooth(cache.smaa, context, source.layerView)",
@@ -73,6 +74,7 @@ static void contracts() {
         "facts.complete = !e.coveragePending",
         "facts.world = g_screenHeld == 1",
         "return ui_layer_fg::capture(context, frame, source, g_fgCaptureCache[eye], info)",
+        "return ui_layer_fg::captureTo(context, frame, source, g_fgCaptureCache[eye], sink, cookie, info)",
         "return ui_layer_fg::retireStorage(g_fgCaptureCache, context, device.Get())",
     };
     for (const char* pin : pins) {
@@ -82,6 +84,23 @@ static void contracts() {
         if (at != std::string::npos) deleted.erase(at, std::strlen(pin));
         check(deleted.find(pin) == std::string::npos, "wiring deletion control detects removal");
     }
+    const auto observeStart = text.find("bool uiLayerFgObserveCoverage(");
+    const auto observeEnd = text.find("\n}", observeStart);
+    check(observeStart != std::string::npos && observeEnd != std::string::npos,
+        "production HUD door exposes current coverage without a producer");
+    const auto observe = text.substr(observeStart, observeEnd - observeStart);
+    const auto admission = observe.find("uiLayerFgSource(nullptr, sequence, eye, frame, region, layerUv, facts, nullptr, nullptr)");
+    check(observe.find("hasUi = false;") < admission && admission < observe.find("hasUi = facts.hasUi;") &&
+        observe.find("hasUi = facts.hasUi;") != std::string::npos && observe.find("g_fgCaptureCache") == std::string::npos,
+        "coverage reads current admitted draw facts without obtaining capture planes or storage");
+    std::ifstream sharpen("src/d3d11/native_sharpen.cpp", std::ios::binary);
+    check(bool(sharpen), "ordinary sharpen source available for door wiring");
+    const std::string sharpenText((std::istreambuf_iterator<char>(sharpen)), {});
+    const auto seen = sharpenText.find("uiLayerDoorSeen(seq,eye,source)");
+    const auto submitted = sharpenText.find("if(fgBoundsSupported)edvr::nativeFgCaptureDoor(seq,eye,source,region,layerUv)", seen);
+    const auto composited = sharpenText.find("uiLayerComposite(seq,eye,", submitted);
+    check(seen < submitted && submitted < composited && composited != std::string::npos,
+        "ordinary supported door reaches the coordinator before UI composition without an FG transaction check");
     std::ifstream coordinator("src/d3d11/frame_generation_coordinator.cpp", std::ios::binary);
     check(bool(coordinator), "coordinator source available for producer handoff wiring");
     const std::string body((std::istreambuf_iterator<char>(coordinator)), {});
@@ -91,12 +110,21 @@ static void contracts() {
         check(start != std::string::npos && end != std::string::npos, "coordinator function available for wiring check");
         return body.substr(start, end - start);
     };
+    const auto captureDoor = function("void nativeFgCaptureDoor(");
+    const auto observeCoverage = captureDoor.find("uiLayerFgObserveCoverage(");
+    const auto requireTransaction = captureDoor.find("!c->transaction");
+    const auto copyToInterop = captureDoor.find("uiLayerFgCaptureTo(");
+    check(observeCoverage < requireTransaction && requireTransaction < copyToInterop && copyToInterop != std::string::npos,
+        "coordinator observes coverage before demanding an expensive capture transaction");
+    check(copyToInterop != std::string::npos &&
+        captureDoor.find("uiLayerFgCapture(") == std::string::npos,
+        "production HUD door delivers directly to its interop sink without a retained snapshot copy");
     const char* retireCall = "uiLayerFgRetireStorage(context)";
     auto creation = function("void nativeFgCaptureGuides(");
     const auto handoff = [&](const std::string& code) {
         const auto init = code.find("if (!made->interop.initialize(init)");
         const auto retire = code.find(retireCall);
-        const auto assign = code.find("c->producer = std::move(made)");
+        const auto assign = code.find("c->retiringProducer.replace(");
         const auto begin = code.find("c->producer->interop.begin(context");
         return init < retire && retire < assign && assign < begin && begin != std::string::npos &&
             code.find(retireCall, retire + 1) == std::string::npos;
@@ -373,6 +401,112 @@ static void poolCases(ID3D11Device* device, ID3D11DeviceContext* context) {
             "new-device held snapshot survives its own cache retirement");
     }
 }
+static void directCaptureCases(ID3D11Device* device, ID3D11DeviceContext* context) {
+    namespace adapter = edvr::ui_layer_fg;
+    const Pixel hud{32, 48, 64, 128}, tint{64, 128, 192, 255}, changed{96, 80, 72, 200};
+    const auto paint = [&](ID3D11Texture2D* texture, Pixel pixel) {
+        std::array<Pixel, 64> pixels;
+        pixels.fill(pixel);
+        context->UpdateSubresource(texture, 0, nullptr, pixels.data(), 8 * sizeof(Pixel), 0);
+    };
+    for (const auto mode : {edvr::HudAaMode::kOff, edvr::HudAaMode::kSmaa, edvr::HudAaMode::kFxaa}) {
+        auto live = image(device, hud), multiply = image(device, tint), scene = image(device, {});
+        auto otherEye = image(device, {});
+        auto firstLayer = image(device, {}), firstMult = image(device, {});
+        auto nextLayer = image(device, {}), nextMult = image(device, {});
+        auto partialLayer = image(device, {}), unusedMult = image(device, {});
+        adapter::Source source;
+        source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
+        source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
+        source.info.eye = 1; source.info.sequence = 61; source.expectedFrame = scene.tex.Get();
+        source.layer = live.tex.Get(); source.layerView = live.srv.Get();
+        source.multiply = multiply.tex.Get(); source.multiplyView = multiply.srv.Get(); source.useMult = true;
+        source.smooth = mode == edvr::HudAaMode::kSmaa;
+        source.fxaa = mode == edvr::HudAaMode::kFxaa;
+
+        adapter::CaptureCache cache;
+        std::array<std::shared_ptr<const edvr::UiLayerFgSnapshot>, 3> references;
+        for (auto& reference : references) {
+            reference = adapter::capture(context, scene.tex.Get(), source, cache, nullptr);
+            check(bool(reference), "retained slots have independent reference pixels");
+        }
+        const uint64_t allocations = cache.textureAllocations;
+        const uint64_t reuses = cache.planeReuses, misses = cache.poolMisses;
+        auto* preparedLayer = source.smooth ? cache.smaa.out.Get() :
+            source.fxaa ? cache.fxaa.out.Get() : live.tex.Get();
+
+        // This sink records the actual source identities and issues one
+        // destination copy per accepted plane on the producer context.
+        struct Sink {
+            ID3D11DeviceContext* context;
+            ID3D11Texture2D* layer;
+            ID3D11Texture2D* multiply;
+            ID3D11Texture2D* expectedLayer;
+            ID3D11Texture2D* expectedMultiply;
+            unsigned calls = 0, copies = 0;
+            bool acceptMultiply = true;
+            bool sourceMatches = false;
+        };
+        const auto submit = +[](void* cookie, const edvr::UiLayerFgPlanes& planes) noexcept {
+            auto& sink = *static_cast<Sink*>(cookie);
+            ++sink.calls;
+            if (!planes.layer || !planes.multiply || !planes.useMult) return false;
+            sink.sourceMatches = planes.layer == sink.expectedLayer && planes.multiply == sink.expectedMultiply;
+            sink.context->CopyResource(sink.layer, planes.layer);
+            ++sink.copies;
+            if (!sink.acceptMultiply) return false;
+            sink.context->CopyResource(sink.multiply, planes.multiply);
+            ++sink.copies;
+            return true;
+        };
+        Sink first{context, firstLayer.tex.Get(), firstMult.tex.Get(), preparedLayer, multiply.tex.Get()};
+        edvr::UiLayerFgInfo info;
+        check(!adapter::captureTo(context, otherEye.tex.Get(), source, cache, submit, &first, &info) &&
+            info.refusal == edvr::UiLayerFgRefusal::EyeUnproven && !first.calls,
+            "wrong-eye source never reaches an interop sink");
+        auto wrongView = source;
+        wrongView.multiplyView = live.srv.Get();
+        check(!adapter::captureTo(context, scene.tex.Get(), wrongView, cache, submit, &first, &info) &&
+            info.refusal == edvr::UiLayerFgRefusal::SizeMismatch && !first.calls,
+            "wrong multiply view never reaches an interop sink");
+
+        Sink partial{context, partialLayer.tex.Get(), unusedMult.tex.Get(), preparedLayer, multiply.tex.Get()};
+        partial.acceptMultiply = false;
+        check(!adapter::captureTo(context, scene.tex.Get(), source, cache, submit, &partial, &info) &&
+            partial.calls == 1 && partial.copies == 1 && !info.fullSupported &&
+            info.refusal == edvr::UiLayerFgRefusal::CopyFailed,
+            "refusal after one plane copy reports an incomplete publication to the caller");
+        check(adapter::captureTo(context, scene.tex.Get(), source, cache, submit, &first, &info) &&
+            first.calls == 1 && first.copies == 2 && info.fullSupported && !info.empty &&
+            info.smoothingApplied == (source.smooth || source.fxaa) &&
+            info.sequence == 61 && info.eye == 1 && info.width == 8 && info.height == 8 &&
+            info.ownerThread == GetCurrentThreadId() && info.sourceDevice == reinterpret_cast<uintptr_t>(device) &&
+            first.sourceMatches,
+            "valid publication queues just one copy per actual final HUD or multiply source");
+
+        // Reuse both live objects and the AA cache before reading back either
+        // capture. Both destinations must retain the pixels at their door.
+        paint(live.tex.Get(), changed);
+        paint(multiply.tex.Get(), changed);
+        ++source.info.sequence;
+        Sink next{context, nextLayer.tex.Get(), nextMult.tex.Get(), preparedLayer, multiply.tex.Get()};
+        check(adapter::captureTo(context, scene.tex.Get(), source, cache, submit, &next, &info) &&
+            next.copies == 2 && info.sequence == 62 && next.sourceMatches,
+            "next frame can reuse the exact producer texture after the copy is enqueued");
+        check(cache.textureAllocations == allocations && cache.planeReuses == reuses && cache.poolMisses == misses,
+            "direct capture never allocates, rewrites or acquires occupied retained slots");
+        const auto referencePixels = readAll(device, context, references[0]->layer.Get());
+        check(readAll(device, context, firstLayer.tex.Get()) == referencePixels &&
+            readAll(device, context, firstMult.tex.Get()) == readAll(device, context, references[0]->multiply.Get()) &&
+            readAll(device, context, partialLayer.tex.Get()) == referencePixels &&
+            read(device, context, unusedMult.tex.Get()) == Pixel{},
+            "accepted copies precede producer reuse and a declined second copy leaves its destination untouched");
+        check(readAll(device, context, nextLayer.tex.Get()) == readAll(device, context, preparedLayer) &&
+            read(device, context, nextMult.tex.Get()) == changed,
+            "next frame contains the replacement source pixels");
+    }
+}
+
 static void gpu() {
     namespace adapter = edvr::ui_layer_fg;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
@@ -380,6 +514,7 @@ static void gpu() {
         D3D11_SDK_VERSION, &device, nullptr, &context), "WARP device");
     poolCases(device.Get(), context.Get());
     retirementCases(device.Get(), context.Get());
+    directCaptureCases(device.Get(), context.Get());
     ComPtr<ID3D11ComputeShader> sentinelShader;
     hr(device->CreateComputeShader(edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode),
         nullptr, &sentinelShader), "distinct sentinel CS");

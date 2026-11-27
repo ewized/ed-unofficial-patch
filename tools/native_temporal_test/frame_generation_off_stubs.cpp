@@ -11,6 +11,7 @@ void nativeFgBeginTemporal(const EdvrNativeTemporalFrame&, bool, bool) noexcept 
 void nativeFgTemporalUnavailable(uint64_t) noexcept {}
 void nativeFgServiceProducer(uint64_t) noexcept {}
 void nativeFgBeforeTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
+void nativeFgCheckpointPartial(uint64_t,unsigned) noexcept {}
 void nativeFgAfterTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
 bool nativeFgGuideEye(ID3D11Texture2D*, unsigned&) noexcept { return false; }
 void nativeFgCaptureGuides(ID3D11DeviceContext*, const NativeFgGuides&) noexcept {}

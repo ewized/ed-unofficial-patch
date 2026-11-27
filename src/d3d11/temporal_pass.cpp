@@ -90,7 +90,7 @@ uint32_t g_cameraDrawCount = 0;
 
 namespace {
 
-// The cbuffer above, laid out to match: 448 bytes, twenty-eight 16-byte rows
+// The temporal cbuffer: twenty-eight common rows and three FG-only rows
 // (the estimated body, ship and stepped-part rows retired 2026-09-23; the
 // fovea, mover mask and own-resolve skip rows with the foveated feature).
 struct PassParams {
@@ -115,8 +115,9 @@ struct PassParams {
     float   split[4];    // x the ship's radius in metres
     float   probe[4];    // x the history's scale for the mv entry's probes (outW / w), y 1 = run them (NVIDIA's previous output bound at t1)
     float   holoJitter[4]; // xy raster delta, z consecutive frames, w valid DLSS depth history
+    float   fgWorld[3][4]; // current target-eye view to previous, rotation xyz and translation w
 };
-static_assert(sizeof(PassParams) == 448, "the cbuffer is 28 16-byte rows");
+static_assert(sizeof(PassParams) == 496, "the FG cbuffer is 31 16-byte rows");
 
 // The format allowlist -- typeless and UNORM families read and written
 // through the family's plain typed view, the source's own format kept on
@@ -2888,9 +2889,7 @@ bool     g_warmNoted = false;
 struct RowsWrite {
     const void* buf = nullptr;
     float       rows[12] = {};
-    float       proj[2] = {};   // the projection's z row: the depth written is proj[0] + proj[1] / z
-    float       legacyProj[2] = {};
-    SceneProjectionSource projectionSource = SceneProjectionSource::None;
+    SceneProjectionCapture projection;
     uint32_t    frame = 0;
     uint32_t    seq = 0;
     uint32_t    observedSeq = 0; // diagnostic clock, includes rejected non-rotation writes
@@ -2934,7 +2933,6 @@ struct RowsChoiceCapture {
     const void* selectedResource = nullptr;
     const void* boundResource = nullptr;
     float selectedRows[12] = {};
-    float selectedProj[2] = {};
     uint32_t frame = 0, flags = 0;
     uint32_t selectedSeq = 0, boundLatchSeq = 0, twinSeq = 0;
     uint32_t writesAtChoice = 0, observedWritesAtChoice = 0;
@@ -2949,7 +2947,7 @@ struct RowsChoiceCapture {
 struct RigidDrawRows {
     const void* resource = nullptr;
     float rows[12] = {};
-    float proj[2] = {};
+    SceneProjectionCapture projection;
     camtag::Target tag;                 // the render target bound at this tagged eye draw
     uint64_t vsHash = 0;
     uint32_t frame = 0, seq = 0, writesAtDraw = 0, observedWritesAtDraw = 0;
@@ -2959,7 +2957,7 @@ struct RigidDrawRows {
 struct ObservedRowsWrite {
     const void* resource = nullptr;
     float rows[12] = {};
-    float proj[2] = {};
+    SceneProjectionCapture projection;
     uint32_t frame = 0, seq = 0;
     bool rowsValid = false;
 };
@@ -2998,9 +2996,7 @@ TemporalCameraGate g_cameraGate;
 uint32_t    g_camCarried = 0;        // frames the ship's delta was carried over a drop
 uint32_t    g_camCarriedJump = 0;    // ...of which carried a translation over 50 m: zero by construction
 float    g_curRows[12] = {};
-float    g_curProj[2] = {};        // the picked write's projection z row (A, B); B > 0 once read
-float    g_curLegacyProj[2] = {};
-SceneProjectionSource g_curProjectionSource = SceneProjectionSource::None;
+SceneProjectionCapture g_curProjection; // both candidates from the chosen scene write
 SceneProjectionSource g_projectionSourceNoted = SceneProjectionSource::None;
 unsigned g_projectionSourceNotes = 0;
 bool     g_projNoted = false;      // the encoding line, once
@@ -3406,12 +3402,8 @@ void chooseCameraRows() {
         g_rowsChoice.selectedEye = g_rowsRing[applyIdx].eye;
         g_rowsChoice.selectedDraws = drawsAfterOf(applyIdx);
         memcpy(g_rowsChoice.selectedRows, g_rowsRing[applyIdx].rows, sizeof(g_rowsChoice.selectedRows));
-        memcpy(g_rowsChoice.selectedProj, g_rowsRing[applyIdx].proj, sizeof(g_rowsChoice.selectedProj));
         memcpy(g_curRows, g_rowsRing[applyIdx].rows, sizeof(g_curRows));
-        g_curProj[0] = g_rowsRing[applyIdx].proj[0];
-        g_curProj[1] = g_rowsRing[applyIdx].proj[1];
-        std::memcpy(g_curLegacyProj,g_rowsRing[applyIdx].legacyProj,sizeof(g_curLegacyProj));
-        g_curProjectionSource = g_rowsRing[applyIdx].projectionSource;
+        g_curProjection = g_rowsRing[applyIdx].projection;
         g_curValid = true;
         g_curRowsBound = g_boundSeen && g_rowsRing[applyIdx].buf == g_boundBuf;
         if (g_curRowsBound) g_rowsChoice.flags |= kChoiceSelectedBound;
@@ -3871,7 +3863,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 D3D11_TEXTURE2D_DESC dd{};
                 dtex->GetDesc(&dd);
                 float lensA = 0.0f, lensB = 0.0f;
-                temporalSceneProjection(g_curProj[0], g_curProj[1], g_lastNear, &lensA, &lensB);
+                resolveSceneProjection(g_curProjection, g_lastNear, &lensA, &lensB);
                 const bool lensCovers = region[0] == 0 && region[1] == 0 && region[2] == sd.Width && region[3] == sd.Height && dd.Width == sd.Width && dd.Height == sd.Height;
                 scopeZoomDepthSet(eye, depthSrv, dd.Width, dd.Height, lensB > 0.0f ? lensA + lensB / static_cast<float>(scopezoom::kLensNearM) : 0.0f, lensCovers);
             }
@@ -4281,11 +4273,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // decoded 10 km as 8.3 km, 3 km as 2.8 km, and the body's grid
         // missed the station beyond a few hundred metres (19:52).
         float projA = 0.0f, projB = 0.0f;
-        const bool measuredProjection = temporalSceneProjection(g_curProj[0], g_curProj[1], nearZ, &projA, &projB);
-        if (measuredProjection && nativeFgRequested() && g_projectionSourceNoted!=g_curProjectionSource && g_projectionSourceNotes<12) {
-            g_projectionSourceNoted=g_curProjectionSource;++g_projectionSourceNotes;
+        const auto projectionSource = resolveSceneProjection(g_curProjection, nearZ, &projA, &projB);
+        const bool measuredProjection = projectionSource != SceneProjectionSource::None;
+        if (measuredProjection && nativeFgRequested() && g_projectionSourceNoted!=projectionSource && g_projectionSourceNotes<12) {
+            g_projectionSourceNoted=projectionSource;++g_projectionSourceNotes;
             Log::get().note("temporal aa: measured scene projection source=%s A=%.9g B=%.9g legacy=(%.9g,%.9g) scene_frame=%u selected_eye=%d; shared by SR motion and FG.",
-                sceneProjectionSourceName(g_curProjectionSource),double(projA),double(projB),double(g_curLegacyProj[0]),double(g_curLegacyProj[1]),g_rowsFrame,g_rowsChoice.selectedEye);
+                sceneProjectionSourceName(projectionSource),double(projA),double(projB),double(g_curProjection.legacyA),double(g_curProjection.legacyB),g_rowsFrame,g_rowsChoice.selectedEye);
         }
         if (!measuredProjection && !g_projNoted && projB > 0.0f) {
             g_projNoted = true;
@@ -4293,7 +4286,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
         if (measuredProjection && !g_projNoted && nearZ > 0.0f && farZ > nearZ) {
             g_projNoted = true;
-            const float a = g_curProj[0], b = g_curProj[1];
+            const float a = projA, b = projB;
             const float nearRow = (1.0f - a) != 0.0f ? b / (1.0f - a) : b;
             char farTxt[64];
             if (a >= 0.0f) {
@@ -4475,7 +4468,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             trace.selectedResource = reinterpret_cast<uintptr_t>(g_rowsChoice.selectedResource);
             trace.boundResource = reinterpret_cast<uintptr_t>(g_rowsChoice.boundResource);
             memcpy(trace.selectedRows, g_rowsChoice.selectedRows, sizeof(trace.selectedRows));
-            memcpy(trace.selectedProj, g_rowsChoice.selectedProj, sizeof(trace.selectedProj));
+            if (g_rowsChoice.flags & kChoiceValid) {
+                trace.selectedProj[0] = measuredProjection ? projA : g_curProjection.legacyA;
+                trace.selectedProj[1] = measuredProjection ? projB : g_curProjection.legacyB;
+            }
             trace.selectedTarget = g_rowsChoice.selectedTarget;
             trace.selectedDraws = g_rowsChoice.selectedDraws;
             trace.rejectedWrites = g_rowsChoice.rejectedWrites;
@@ -4494,7 +4490,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             if (draw.valid) {
                 trace.cameraDrawFlags |= kDrawRowsValid;
                 memcpy(trace.drawRows, draw.rows, sizeof(trace.drawRows));
-                memcpy(trace.drawProj, draw.proj, sizeof(trace.drawProj));
+                if (resolveSceneProjection(draw.projection, nearZ, &trace.drawProj[0], &trace.drawProj[1]) == SceneProjectionSource::None) {
+                    trace.drawProj[0] = draw.projection.legacyA;
+                    trace.drawProj[1] = draw.projection.legacyB;
+                }
             }
             const RigidDrawRows& before = g_prevRigidDraw[eye];
             if (draw.valid && before.valid && before.frame + 1 == draw.frame) {
@@ -4956,6 +4955,18 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 unsigned fgAnatomicalEye = 2;
                 const bool fgEligible = !amdEngine && !intelEngine && !fsr4Engine && !dittoEngine &&
                     edvr::nativeFgGuideEye(static_cast<ID3D11Texture2D*>(srcTex), fgAnatomicalEye);
+                NativeFgGuides guide;
+                double fgRelative[3][4];
+                guide.cameraValid = fgEligible && worldOn && g_rowsDeltaOwn && g_curValid && g_prevValid &&
+                    !jumpedNow && e.eyesNotedFrame == g_rowsFrame && e.headNoted && e.headNotedFrame == g_rowsFrame &&
+                    temporalFgEyePair(g_prevRows, g_curRows, g_prevRowsEye, g_rowsChoice.selectedEye,
+                                      static_cast<int>(fgAnatomicalEye), e.eyesPrev, e.eyesNow,
+                                      guide.cameraPrevious, guide.cameraNow) &&
+                    temporalRelativeEyeView(guide.cameraPrevious, guide.cameraNow, fgRelative);
+                if (guide.cameraValid) {
+                    for (int r = 0; r < 3; ++r) for (int c = 0; c < 4; ++c)
+                        p.fgWorld[r][c] = static_cast<float>(fgRelative[r][c]);
+                }
                 bool fgMotionReady = false;
                 if (made && fgEligible) {
                     ID3D11ComputeShader* fgCs = motionFgShader(ctx, diagnostics, traceReady);
@@ -5228,7 +5239,6 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         usedDlaa = true;
                         e.dlHaveHistory = true;
                         if (fgEligible) {
-                            NativeFgGuides guide;
                             guide.eye = fgAnatomicalEye; guide.internalEye = static_cast<unsigned>(eye);
                             guide.source = static_cast<ID3D11Texture2D*>(srcTex);
                             guide.width = w; guide.height = h;
@@ -5244,12 +5254,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             guide.previousProjectionA = e.fgProjectionKnown ? e.fgProjection[0] : projA;
                             guide.previousProjectionB = e.fgProjectionKnown ? e.fgProjection[1] : projB;
                             guide.reset = resetHist || !e.fgProjectionKnown;
-                            guide.depthAvailable = haveDepth && measuredProjection;
+                            guide.depthAvailable = haveDepth && measuredProjection && std::isfinite(nearZ) && nearZ > 0;
                             guide.originJump = jumpedNow;
-                            guide.cameraValid = worldOn && g_rowsDeltaOwn && g_curValid && g_prevValid &&
-                                e.eyesNotedFrame == g_rowsFrame && e.headNoted && e.headNotedFrame == g_rowsFrame &&
-                                g_rowsChoice.selectedEye >= 0 && g_rowsChoice.selectedEye < 2 &&
-                                g_prevRowsEye >= 0 && g_prevRowsEye < 2;
                             guide.provenance = (depthMotion ? 1u : 0u) | (depthSrv ? 2u : 0u) |
                                 (headTrans ? 4u : 0u) | (haveDepth ? 8u : 0u) | (measuredProjection ? 16u : 0u) |
                                 (worldOn ? 32u : 0u) | (g_rowsDeltaOwn ? 64u : 0u) | (g_curValid ? 128u : 0u) |
@@ -5263,16 +5269,12 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             guide.sceneFrame = g_rowsFrame; guide.headFrame = e.headNotedFrame;
                             guide.eyesFrame = e.eyesNotedFrame; guide.sceneDraws = sceneDraws;
                             guide.selectedEye = g_rowsChoice.selectedEye; guide.previousSelectedEye = g_prevRowsEye;
-                            guide.rawProjection[0] = g_curLegacyProj[0]; guide.rawProjection[1] = g_curLegacyProj[1];
-                            if (guide.cameraValid) {
-                                temporalRowsForEye(g_curRows, g_rowsChoice.selectedEye, static_cast<int>(fgAnatomicalEye), e.eyesNow, guide.cameraNow);
-                                temporalRowsForEye(g_prevRows, g_prevRowsEye, static_cast<int>(fgAnatomicalEye), e.eyesPrev, guide.cameraPrevious);
-                            }
+                            guide.rawProjection[0] = g_curProjection.legacyA; guide.rawProjection[1] = g_curProjection.legacyB;
                             // Both guides are copied immediately at this exact
                             // successful SR evaluation, before any eye reuses them.
                             edvr::nativeFgCaptureGuides(ctx, guide);
                             e.fgProjection[0] = projA; e.fgProjection[1] = projB;
-                            e.fgProjectionKnown = true;
+                            e.fgProjectionKnown = guide.depthAvailable;
                         }
                         if (fsr4Engine) {
                             if (!g_fsr4Noted || (oW != w && !g_fsr4UpscaleNoted)) {
@@ -6369,9 +6371,8 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
             projection = captureSceneProjection(data, bytes);
         } else {
             const float* legacy = static_cast<const float*>(data) + 794;
-            projection.a = projection.legacyA = legacy[0];
-            projection.b = projection.legacyB = legacy[1];
-            projection.source = SceneProjectionSource::Legacy198;
+            projection.legacyA = legacy[0];
+            projection.legacyB = legacy[1];
         }
     }
     ++g_rowsObservedWrites;
@@ -6383,8 +6384,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
         observed->rowsValid = rowsValid;
         if (rowsValid) {
             memcpy(observed->rows, f, sizeof(observed->rows));
-            observed->proj[0] = projection.a;
-            observed->proj[1] = projection.b;
+            observed->projection = projection;
         }
     }
     // The production chooser keeps its existing contract: only rotations enter
@@ -6407,14 +6407,7 @@ void temporalPassNoteSceneWrite(const void* res, const void* data, uint32_t byte
     g_pendingTagIdx = static_cast<int>(slot);
     detail::g_cameraDrawWatch = true;
     memcpy(w.rows, f, sizeof(w.rows));
-    // Keep the measured coefficients and their source attached to this
-    // exact mapped write. A valid legacy row198 is preserved; otherwise
-    // captureSceneProjection validates actual shader clip rows270..273.
-    // Neither route treats OpenVR's finite planes as measured scene depth.
-    w.proj[0] = projection.a;
-    w.proj[1] = projection.b;
-    w.legacyProj[0] = projection.legacyA; w.legacyProj[1] = projection.legacyB;
-    w.projectionSource = projection.source;
+    w.projection = projection;
     w.frame = g_rowsFrame;
     w.seq = g_rowsSeq;
     w.observedSeq = observedSeq;
@@ -6490,7 +6483,7 @@ void temporalPassNoteRigidDraw(int eye, const void* resource, uint64_t vertexSha
         sample.seq = observed->seq;
         if (sample.valid) {
             memcpy(sample.rows, observed->rows, sizeof(sample.rows));
-            memcpy(sample.proj, observed->proj, sizeof(sample.proj));
+            sample.projection = observed->projection;
         }
     }
     g_rigidDraw[eye] = sample;
@@ -7373,7 +7366,7 @@ void temporalPassArmEyeDump() {
 float temporalPassDepthAt(float metres) {
     if (!(metres > 0.0f)) return 0.0f;
     float a=0.0f,b=0.0f;
-    temporalSceneProjection(g_curProj[0],g_curProj[1],g_lastNear,&a,&b);
+    resolveSceneProjection(g_curProjection,g_lastNear,&a,&b);
     return a+b/metres;
 }
 

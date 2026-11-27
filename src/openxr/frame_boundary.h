@@ -337,8 +337,9 @@ class FrameBoundary final {
     { SubmissionWallScope measured(&endFrameMs_);
       lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});
       sink_.holdEndFrame(); }
-    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});
-    if (!background) sink_.sceneFinished(pixels, lastResult_);
+    const bool submitted = frame_.status == FrameStatus::Ended;
+    sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, submitted, background, turbo_, lastResult_, submitted && withOverlay});
+    if (!background) sink_.sceneFinished(submitted, lastResult_);
     if (lastResult_ != XR_SUCCESS) failed_ = true;
     // Kick the next frame's wait now, as the toolkit does right after its
     // own real xrEndFrame, so it has the whole rest of this frame to finish.

@@ -621,6 +621,8 @@ struct Runtime {
   XrTime time = 1000;
   XrDuration period = 13888889;
   bool shouldRender = true;
+  XrResult endResult = XR_SUCCESS;
+  uint32_t endLayerCount = 0;
   bool ready = true;
   static XrResult poll(XrInstance, XrEventDataBuffer* out) {
     if (!cur->ready) {
@@ -653,9 +655,10 @@ struct Runtime {
     ++cur->begins;
     return XR_SUCCESS;
   }
-  static XrResult endFrame(XrSession, const XrFrameEndInfo*) {
+  static XrResult endFrame(XrSession, const XrFrameEndInfo* info) {
     ++cur->ends;
-    return XR_SUCCESS;
+    cur->endLayerCount = info->layerCount;
+    return cur->endResult;
   }
   Dispatch dispatch() {
     cur = this;
@@ -668,6 +671,11 @@ struct HookSink : FrameSink {
   unsigned holds = 0;
   DWORD holdMs = 0;
   std::vector<EndFrameInfo> reported;
+  const XrCompositionLayerQuad* overlay = nullptr;
+  bool scenePixels = true;
+  XrResult sceneResult = XR_SUCCESS;
+  const XrCompositionLayerQuad* fpsOverlay() override { return overlay; }
+  void sceneFinished(bool pixels, XrResult result) override { scenePixels = pixels; sceneResult = result; }
   vr::EVRCompositorError capture(vr::EVREye, const vr::Texture_t*, const vr::VRTextureBounds_t*, vr::EVRSubmitFlags, bool) override { return vr::VRCompositorError_None; }
   XrResult compose(XrCompositionLayerProjection& layer) override {
     layer.space = reinterpret_cast<XrSpace>(3);
@@ -733,6 +741,23 @@ void hookCases() {
   boundary.waitAndBegin();
   boundary.clear();
   check(sink.reported.size() == runtime.ends, "P7.every: every xrEndFrame the runtime saw was reported once (clear included)");
+
+  // The runtime receives both layers but rejects the end. Both callbacks must
+  // report the failed submission even though the boundary intended a draw.
+  XrCompositionLayerQuad overlay{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  overlay.space = reinterpret_cast<XrSpace>(3);
+  overlay.subImage.swapchain = reinterpret_cast<XrSwapchain>(4);
+  overlay.subImage.imageRect.extent = {1, 1};
+  overlay.size = {1.f, 1.f};
+  sink.overlay = &overlay;
+  runtime.endResult = XR_ERROR_RUNTIME_FAILURE;
+  const size_t beforeFailed = sink.reported.size();
+  boundary.waitAndBegin();
+  pair(boundary);
+  check(runtime.endLayerCount == 2 && sink.reported.size() == beforeFailed + 1 &&
+            sink.reported.back().result == XR_ERROR_RUNTIME_FAILURE && !sink.reported.back().layers && !sink.reported.back().fpsOverlay &&
+            sink.sceneResult == XR_ERROR_RUNTIME_FAILURE && !sink.scenePixels,
+        "P7.failed-end: a rejected stereo projection and overlay report no submitted layers or finished scene pixels");
 
   // The hold: inside the timed region, and only there.
   HookSink holdSink;
@@ -1248,9 +1273,11 @@ void sourcePins(const std::string& root) {
   // FrameBoundary: the hold is INSIDE the timed scope, the report follows it; the empty ends are reported too.
   const size_t scope = at(boundary, "{ SubmissionWallScope measured(&endFrameMs_);\n      lastResult_ = session_.end(frame_, end, {geometryReady_, pixels});\n      sink_.holdEndFrame(); }");
   const size_t layers = at(boundary, "end.layerCount = pixels ? (withOverlay ? 2u : 1u) : 0u; end.layers = pixels ? headers : nullptr;");
-  const size_t report = at(boundary, "sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, pixels, background, turbo_, lastResult_, withOverlay});");
-  const size_t scene = at(boundary, "if (!background) sink_.sceneFinished(pixels, lastResult_);");
-  check(layers != none && scope != none && report != none && scene != none && layers < scope && scope < report && report < scene,
+  const size_t receipt = at(boundary, "const bool submitted = frame_.status == FrameStatus::Ended;");
+  const size_t report = at(boundary, "sink_.endFrameReturned({sequence, endFrameMs_, lastPeriod_, shouldRender, submitted, background, turbo_, lastResult_, submitted && withOverlay});");
+  const size_t scene = at(boundary, "if (!background) sink_.sceneFinished(submitted, lastResult_);");
+  check(layers != none && scope != none && receipt != none && report != none && scene != none &&
+            layers < scope && scope < receipt && receipt < report && report < scene,
         "G1.boundary: finish() holds inside the timed xrEndFrame scope, reports the submitted overlay and call, then tells the scene it finished");
   check(at(boundary, "lastResult_ = endEmpty(frame_);") != none && at(boundary, "const auto ended = endEmpty(scratch);") != none &&
             at(boundary, "{ SubmissionWallScope measured(&ms); r = session_.end(frame, empty, {false, false}); }\n    sink_.endFrameReturned({sequence, ms, lastPeriod_, shouldRender, false, false, turbo_, r});") != none,

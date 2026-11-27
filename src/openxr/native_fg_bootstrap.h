@@ -5,7 +5,7 @@
 #include <limits>
 
 namespace edvr::openxr::fghandoff {
-enum class Images { None, Generated, Endpoint, WrongEpoch, BehindWatermark, PreviousMismatch, Late, NativeOnly, OutsideWindow };
+enum class Images { None, Generated, Endpoint, WrongEpoch, BehindWatermark, PreviousMismatch, Late, NativeOnly, TranslatedCoverage, OutsideWindow };
 enum class Handoff { None, SourceIdentity, FallbackCoverage, NoSynthesisProof, ColdTrialSpent, AttemptAlreadySpent, Time, Deferred, RecoveryDeferred };
 
 inline bool recordHandoff(Handoff* observation,Handoff decision) noexcept {
@@ -44,6 +44,15 @@ inline bool interpolationFits(int64_t now,int64_t sourceTime,int64_t period,
   return period<=(std::numeric_limits<int64_t>::max)()/periods&&now-sourceTime<=period*periods;
 }
 
+// Each SDK image retains its fractional instant between the two original pose
+// times. Divide the span first so long-running XrTime values stay representable.
+inline int64_t phaseTime(int64_t previous,int64_t current,unsigned multiplier,unsigned phase) {
+  if(!phase)return current;
+  if(previous<=0||current<=previous||!nativeFgFixedMultiplier(multiplier)||phase>=multiplier)return 0;
+  const auto span=current-previous;
+  return previous+(span/multiplier)*phase+((span%multiplier)*phase)/multiplier;
+}
+
 class Bootstrap {
   Epoch epoch_{};
   Timeline timeline_{};
@@ -76,6 +85,23 @@ public:
     // time limit for the same opportunity. Other sources keep the wall cap.
     if(const auto slots=timeline_.opportunities(sourceTime,displayTime,period,nextPeriod))return *slots<=multiplier+phase;
     return interpolationFits(displayTime+nextPeriod,sourceTime,period,multiplier,phase);
+  }
+  // On regular cadence the index-p image precedes B by (m-p) panel
+  // intervals. Its latest allowed presentation is (m+p) intervals after B,
+  // hence the image itself can be at most two native intervals old. A hitch
+  // between A and B spends that same budget, even when B is freshly imported.
+  bool interpolatedPhaseFits(int64_t display,int64_t previous,int64_t current,int64_t period,
+                             unsigned multiplier,unsigned phase,int64_t nextPeriod=0) const {
+    const auto instant=phaseTime(previous,current,multiplier,phase);
+    if(!instant||!phaseFits(display,current,period,multiplier,phase,nextPeriod))return false;
+    const auto age=display+nextPeriod-instant;
+    const auto intervals=age/period,remainder=age%period;
+    const int64_t limit=2*multiplier;
+    if(intervals<limit||(intervals==limit&&!remainder))return true;
+    // Dynamic predictions can straddle this same final panel opportunity.
+    // Only a proven B-to-display ledger permits unique nearest-slot rounding.
+    return intervals==limit&&remainder<period-remainder&&
+      timeline_.opportunities(current,display,period,nextPeriod).has_value();
   }
   uint64_t completedSequence() const {return completed_;}
   void completeNative(uint64_t sequence) {

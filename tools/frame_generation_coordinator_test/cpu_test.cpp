@@ -20,6 +20,13 @@ extern "C" HRESULT WINAPI D3DCompile(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_M
 namespace edvr {
 namespace {
 uint64_t fixtureReflexProof = 0;
+unsigned admittedDoors = 0, coveredDoors = 0;
+}
+void nativeFgTestDoors(unsigned admitted,unsigned covered) noexcept {admittedDoors=admitted;coveredDoors=covered;}
+bool uiLayerFgObserveCoverage(uint64_t,unsigned eye,ID3D11Texture2D*,
+    const uint32_t[4],const float[4],bool& hasUi) noexcept {
+    hasUi=eye<2 && (coveredDoors&(1u<<eye))!=0;
+    return eye<2 && (admittedDoors&(1u<<eye))!=0;
 }
 void nativeFgTestSetReflexProof(uint64_t proof) noexcept {fixtureReflexProof = proof;}
 uint64_t native_reflex::confirmedFrameGenerationProof(ID3D11Device* device, uint64_t generation) noexcept {
@@ -36,44 +43,61 @@ FrameGenerationNgxStatus FrameGenerationNgx::status() const noexcept {std::abort
 FrameGenerationNgxCompletion FrameGenerationNgxTicket::poll() const noexcept {std::abort();}
 std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(ID3D11DeviceContext*, uint64_t, uint32_t,
     ID3D11Texture2D*, const uint32_t[4], const float[4], UiLayerFgInfo*) noexcept {std::abort();}
+bool uiLayerFgCaptureTo(ID3D11DeviceContext*, uint64_t, uint32_t, ID3D11Texture2D*,
+    const uint32_t[4], const float[4], UiLayerFgCaptureSink, void*, UiLayerFgInfo*) noexcept {std::abort();}
 bool uiLayerFgGetPlanes(const std::shared_ptr<const UiLayerFgSnapshot>&, UiLayerFgPlanes*) noexcept {std::abort();}
 bool uiLayerFgRetireStorage(ID3D11DeviceContext*) noexcept {std::abort();}
 }
 unsigned testProjectionCapture(unsigned& checks) {
     unsigned failures=0;
     const auto check=[&](bool pass,const char* name){++checks;if(!pass){++failures;std::printf("FAIL projection: %s\n",name);}};
-    std::array<float,1104> cb{};
+    using SceneBuffer = std::array<float,1104>;
+    SceneBuffer cb{};
     auto* clip=cb.data()+270*4;
     // Actual forward-columns convention: x*r270+y*r271+z*r272+r273.
     // Rotated, asymmetric and translated perspective; clip z is measured
     // from data at .03125, deliberately different from the .025 fallback.
     clip[0]=1.04f;clip[3]=.6f;clip[5]=1.1f;clip[8]=-.78f;clip[11]=.8f;
     clip[12]=.2f;clip[13]=-.1f;clip[14]=.03125f;clip[15]=2;
-    const auto capture=[&](float nearZ=0){return edvr::captureSceneProjection(cb.data(),uint32_t(sizeof(cb)),nearZ);};
-    auto result=capture(.03125f);
-    check(result.source==edvr::SceneProjectionSource::Clip270,"zero legacy uses actual clip-row source");
-    check(result.a==0 && result.b==.03125f,"actual B is read, not a fallback constant");
+    using edvr::SceneProjectionSource;
+    float a = 0, b = 0;
+    const auto resolve = [&](const SceneBuffer& data, float nearZ, unsigned bytes = sizeof(SceneBuffer)) {
+        const auto write = edvr::captureSceneProjection(data.data(), bytes);
+        return edvr::resolveSceneProjection(write, nearZ, &a, &b);
+    };
+    check(resolve(cb,.03125f)==SceneProjectionSource::Clip270,"zero legacy uses actual clip-row source");
+    check(a==0 && b==.03125f,"actual B is read, not a fallback constant");
     auto changed=cb;changed[273*4+2]=.0625f;
-    result=edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed)),.0625f);
-    check(result.b==.0625f,"changing actual source changes measured B");
-    check(capture(.05f).source==edvr::SceneProjectionSource::None,"runtime near mismatch refused");
-    check(edvr::captureSceneProjection(cb.data(),274*16-1).source==edvr::SceneProjectionSource::None,"truncated clip rows refused");
+    check(resolve(changed,.0625f)==SceneProjectionSource::Clip270 && b==.0625f,"changing actual source changes measured B");
+    check(resolve(cb,.05f)==SceneProjectionSource::None,"runtime near mismatch refused");
+    check(resolve(cb,.03125f,274*16-1)==SceneProjectionSource::None,"truncated clip rows refused");
     changed=cb;changed[270*4+2]=.001f;
-    check(edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed))).source==edvr::SceneProjectionSource::None,"nonparallel clip-z/clip-w refused");
+    check(resolve(changed,.03125f)==SceneProjectionSource::None,"nonparallel clip-z/clip-w refused");
     changed=cb;changed[270*4+3]=.3f;changed[272*4+3]=.4f;
-    check(edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed))).source==edvr::SceneProjectionSource::None,"nonunit depth direction refused");
+    check(resolve(changed,.03125f)==SceneProjectionSource::None,"nonunit depth direction refused");
     changed=cb;changed[271*4]=changed[270*4];changed[271*4+1]=changed[270*4+1];changed[271*4+2]=changed[270*4+2];changed[271*4+3]=changed[270*4+3];
-    check(edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed))).source==edvr::SceneProjectionSource::None,"singular clip basis refused");
+    check(resolve(changed,.03125f)==SceneProjectionSource::None,"singular clip basis refused");
     changed=cb;changed[273*4+2]=-.03125f;
-    check(edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed))).source==edvr::SceneProjectionSource::None,"negative B refused");
+    check(resolve(changed,.03125f)==SceneProjectionSource::None,"negative B refused");
     changed=cb;changed[270*4]=(std::numeric_limits<float>::quiet_NaN)();
-    check(edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed))).source==edvr::SceneProjectionSource::None,"nonfinite actual rows refused");
+    check(resolve(changed,.03125f)==SceneProjectionSource::None,"nonfinite actual rows refused");
     changed=cb;changed[270*4+2]=-.00006f;changed[272*4+2]=-.00008f;changed[273*4+2]=.03105f;
-    result=edvr::captureSceneProjection(changed.data(),uint32_t(sizeof(changed)));
-    check(result.source==edvr::SceneProjectionSource::Clip270 && std::fabs(result.a+.0001f)<1e-9f && std::fabs(result.b-.03125f)<1e-8f,"finite reversed depth derives A and translation-corrected B");
-    cb[794]=-.0001f;cb[795]=.04f;result=capture();
-    check(result.source==edvr::SceneProjectionSource::Legacy198 && result.a==cb[794] && result.b==cb[795],"valid legacy projection preserved exactly");
-    cb.fill(0);check(capture().source==edvr::SceneProjectionSource::None,"missing both sources remains unmeasured");
+    check(resolve(changed,.03125f)==SceneProjectionSource::Clip270 && std::fabs(a+.0001f)<1e-9f && std::fabs(b-.03125f)<1e-8f,"finite reversed depth derives A and translation-corrected B");
+
+    // The mapping expires before either eye is treated. The same captured
+    // write must resolve independently against both runtime near planes.
+    cb[794]=-.0001f; cb[795]=.0675f; clip[14]=.025f;
+    const auto write=edvr::captureSceneProjection(cb.data(),sizeof(cb));
+    cb.fill(0);
+    check(edvr::resolveSceneProjection(write,.025f,&a,&b)==SceneProjectionSource::Clip270 && a==0 && b==.025f,
+          "wrong legacy near cannot discard the matching clip projection");
+    check(edvr::resolveSceneProjection(write,.0675f,&a,&b)==SceneProjectionSource::Legacy198 && a==-.0001f && b==.0675f,
+          "other eye can use the exact legacy row from the same write");
+    check(edvr::resolveSceneProjection(write,.1f,&a,&b)==SceneProjectionSource::None && a==0 && b==.1f,
+          "mismatching both candidates preserves SR fallback and refuses measured FG depth");
+    cb[795]=.025f; clip[0]=clip[5]=clip[11]=1; clip[14]=.0255f;
+    check(resolve(cb,.025f)==SceneProjectionSource::Legacy198 && b==.025f,"matching legacy keeps precedence over matching clip");
+    cb.fill(0);check(resolve(cb,.025f)==SceneProjectionSource::None,"missing both sources remains unmeasured");
     return failures;
 }
 int main(int argc, char** argv) {

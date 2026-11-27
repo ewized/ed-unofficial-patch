@@ -78,6 +78,12 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // native path and explicitly refuse this optional route before any copy.
   const bool fgBoundsSupported=!flipU&&!flipV;
   if(!fgBoundsSupported&&edvr::nativeFgRequested())edvr::nativeFgInvalidateProducer(edvr::NativeFgUnsupportedBounds);
+  struct ProducerHandoff {
+    uint64_t sequence;unsigned eye;
+    ~ProducerHandoff(){edvr::nativeFgCheckpointPartial(sequence,eye);}
+  } handoff{seq,eye};
+  // Keep the ordinary door visible to the coordinator even when its FG
+  // producer is suspended. The coordinator can still observe HUD coverage.
   if(fgBoundsSupported)edvr::nativeFgCaptureDoor(seq,eye,source,region,layerUv);
   // A layer-only eye (ui_layer.h uiLayerDoorLayerOnly: the VR world route's world, or a map's or a menu's 2D screen on foot):
   // the layer holds the WHOLE eye and the frame here is the black one the temporal door

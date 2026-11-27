@@ -44,17 +44,25 @@ template<class Check> void runFgUiOverlayCases(Check check) {
   const auto asymmetric=fgui::lookup(fgui::makeMapping(destination,source),.5,.5);
   check(asymmetric.visible&&equal(asymmetric.u,.25)&&equal(asymmetric.v,2./3.),
     "asymmetric source FOV is projected by tangents, not a symmetric-camera approximation");
-  source=destination;source.pose.position={12,-3,7};destination.pose.position={-4,5,-8};
-  const auto translated=fgui::lookup(fgui::makeMapping(destination,source),.25,.75);
-  check(translated.visible&&equal(translated.u,.25)&&equal(translated.v,.75),
-    "position is deliberately ignored: no invented HUD distance or positional compensation");
+  // At 90 degrees FOV a point one metre in front of each destination eye
+  // moves half the lateral displacement in source UV. This holds for both
+  // a cockpit panel edge and the world landmark at that same position.
+  for(float eyeX:{-.032f,.032f})for(float displacement:{0.f,.0002f,.025f}) {
+    destination.pose.position={eyeX,0,0};source=destination;
+    source.pose.position.x+=displacement;
+    const auto at=fgui::lookup(fgui::makeMapping(destination,source),.5,.5);
+    const double landmarkU=.5-.5*displacement;
+    if(!displacement)check(at.visible&&equal(at.u,landmarkU),"coincident eyes align the covered panel and world landmark");
+    else check(!at.visible&&landmarkU<.5,"Idle-sized and 25 mm eye translations refuse the misregistered finite-depth panel");
+  }
+  source=destination;
   source.pose.orientation={0,1,0,0};
   check(!fgui::lookup(fgui::makeMapping(destination,source),.5,.5).visible,"UI rays behind the source camera are transparent");
 
   source=destination;source.pose.orientation={0,0,0,0};
   check(!fgui::makeMapping(destination,source).valid,"zero source quaternion is refused");
   source=destination;source.pose.position.x=(std::numeric_limits<float>::quiet_NaN)();
-  check(!fgui::makeMapping(destination,source).valid,"nonfinite source position is refused even though translation is unused");
+  check(!fgui::makeMapping(destination,source).valid,"nonfinite source optical center is refused");
   source=destination;source.fov.angleLeft=(std::numeric_limits<float>::infinity)();
   check(!fgui::makeMapping(destination,source).valid,"nonfinite source FOV is refused");
   source=destination;source.fov.angleLeft=source.fov.angleRight;

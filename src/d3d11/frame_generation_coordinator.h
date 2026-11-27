@@ -14,6 +14,9 @@ bool nativeFgAutoRequested() noexcept;
 void nativeFgAutoObserve(const fg_auto::Sample&) noexcept;
 fg_auto::Status nativeFgAutoStatus() noexcept;
 bool nativeFgRequested() noexcept;
+// Passive per-device/session capability. 0 before a verified query, 1 when
+// unavailable, otherwise the maximum fixed multiplier verified by NGX.
+uint32_t nativeFgMaximumMultiplier() noexcept;
 // Explicit Off excludes Auto's native cadence while it measures or recovers.
 bool nativeFgManualOff() noexcept;
 // Passive CPU snapshot for menu/monitor consumers; no resource creation or worker startup.
@@ -30,6 +33,7 @@ void nativeFgTemporalUnavailable(uint64_t generation) noexcept;
 // even while the session is presenting untreated native frames.
 void nativeFgServiceProducer(uint64_t generation) noexcept;
 void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source) noexcept;
+void nativeFgCheckpointPartial(uint64_t sequence,unsigned eye) noexcept;
 void nativeFgAfterTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* output) noexcept;
 bool nativeFgGuideEye(ID3D11Texture2D* exactSource, unsigned& anatomicalEye) noexcept;
 

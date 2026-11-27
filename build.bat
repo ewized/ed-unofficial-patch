@@ -539,9 +539,8 @@ REM before the rename left in %LOCALAPPDATA%\EDVR\ngx-sdk. tools\sdk_paths.py
 REM holds all five SDK lookups here to that order. The d3d11 half is then
 REM built with the NGX calls in, the static library linked, and the runtime
 REM and NVIDIA's licence copied into the build for the release zips. The
-REM copy is VERIFIED first -- the files the build reads, and the
-REM runtime's SHA-256 against the pin in tools\fetch_ngx.py -- and a
-REM mismatch fails the build: the DLL the release ships must be the
+REM build verifies the SHA-256 pins for the headers, static library, runtime
+REM and licence. A mismatch fails the build: the DLL the release ships must be the
 REM one the flights verified, and updating it is a deliberate commit.
 REM Without any SDK the build still succeeds, since the code compiles
 REM either way, but says so loudly: that build has no DLAA and no
@@ -557,7 +556,7 @@ set NGXLIB=
 if defined NGX (
     python "tools\fetch_ngx.py" --verify "%NGX%" || (
         echo [edup] ERROR: the DLSS SDK at %NGX% is not the pinned one. tools\fetch_ngx.py
-        echo        names the commit and the runtime's hash; fetch it again, or update the
+        echo        names the commit and file hashes; fetch it again, or update the
         echo        pin on purpose.
         exit /b 1
     )
@@ -754,10 +753,30 @@ if defined FFX (
     )
 )
 
+REM The Linux wrapper stages the checkout-local Reflex SDK before taking its
+REM compile-only receipt fingerprint. Wine only verifies the selected copy.
+if /I not "%REFLEX%"=="none" (
+    if not defined EDUP_COMPILE_ONLY (
+        python tools\fetch_reflex.py --dest "%REFLEX%" || exit /b 1
+    )
+    python tools\fetch_reflex.py --verify "%REFLEX%" || exit /b 1
+)
+
+REM Snapshot even shared SDKs outside this checkout. Compare again after
+REM compilation on both the full-build and DLL-only promotion paths.
+set "EDUP_TESTED_SDK_INPUTS="
+if not defined EDUP_COMPILE_ONLY (
+    for /f "usebackq delims=" %%H in (`python tools\build_receipt.py --sdk-fingerprint --root "%ROOT%"`) do set "EDUP_TESTED_SDK_INPUTS=%%H"
+    if not defined EDUP_TESTED_SDK_INPUTS (
+        echo [edup] ERROR: could not fingerprint the selected SDK inputs.
+        exit /b 1
+    )
+)
+
 if defined EDUP_DLL_ONLY if not defined EDUP_COMPILE_ONLY (
     echo [edup] === DLL-only promotion ===
     python tools\build_receipt.py --verify "%BUILD%\full_build_receipt.json" ^
-        --root "%ROOT%" --require-clean ^
+        --root "%ROOT%" --require-clean --expected-sdk "%EDUP_TESTED_SDK_INPUTS%" ^
         --context "cl=%CL%" ^
         --context "profile_symbols=%EDUP_PROFILE_SYMBOLS%" ^
         --context "cpu_compile=%EDUP_CPU_COMPILE%" ^
@@ -777,15 +796,6 @@ if defined EDUP_DLL_ONLY if not defined EDUP_COMPILE_ONLY (
             echo        matching green full build receipt.
             exit /b 1
         )
-)
-
-REM The Linux wrapper stages the checkout-local Reflex SDK before taking its
-REM compile-only receipt fingerprint. Wine only verifies the selected copy.
-if /I not "%REFLEX%"=="none" (
-    if not defined EDUP_COMPILE_ONLY (
-        python tools\fetch_reflex.py --dest "%REFLEX%" || exit /b 1
-    )
-    python tools\fetch_reflex.py --verify "%REFLEX%" || exit /b 1
 )
 
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
@@ -1121,7 +1131,7 @@ if exist "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" (
 )
 echo.
 python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
-    --root "%ROOT%" ^
+    --root "%ROOT%" --expected-sdk "%EDUP_TESTED_SDK_INPUTS%" ^
     --context "cl=%CL%" ^
     --context "profile_symbols=%EDUP_PROFILE_SYMBOLS%" ^
     --context "cpu_compile=%EDUP_CPU_COMPILE%" ^
@@ -1160,6 +1170,7 @@ python tools\openxr_pe.py --graphics "%BUILD%\d3d11.dll" --forbid-import d3dcomp
 python tools\build_phases.py --mark "%PHASES%" "dll-only outputs"
 python tools\build_phases.py --report "%PHASES%"
 if defined EDUP_COMPILE_ONLY goto compile_only_finish
+python tools\build_receipt.py --sdk-fingerprint --root "%ROOT%" --expected-sdk "%EDUP_TESTED_SDK_INPUTS%" || exit /b 1
 echo [edup] DLL-only build passed: production DLLs and loader are ready to install.
 echo [edup] Test rigs and the launcher build were skipped; use a full build
 echo        before packaging a release or accepting new source changes.
