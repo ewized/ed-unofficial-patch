@@ -6,6 +6,7 @@
 #include "fg_cadence_cases.h"
 #include "hud_sampling_cases.h"
 #include "hud_projection_cases.h"
+#include "recomposition_activation_cases.h"
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -185,5 +186,6 @@ int main(int argc,char** argv) {
   test::runFgCadenceCases(check);
   edvr::openxr::fgtest::runFgHudSamplingCases(check);
   edvr::openxr::fgtest::runFgUiOverlayCases(check);
+  edvr::fg_recomposition::test::activationCases(check);
   std::printf("native_fg_test: %u checks, %u failures\n",checks,failed);return failed?1:0;
 }

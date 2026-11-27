@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d12.h>
+#include "frame_generation_camera.h"
 #include <cstdint>
 #include <memory>
 #if defined(EDVR_FRAME_GENERATION_NGX_TEST) && defined(EDVR_HAVE_NGX)
@@ -47,19 +48,6 @@ struct FrameGenerationNgxInit {
     // Opt in at feature creation. Every later eye must carry both UI inputs.
     bool uiRecomposition=false;
     uint32_t timeoutMs=2000;
-};
-// ED-UP's measured guide metadata, independent of SDK headers and ABI layout.
-// The backend maps this into private SDK options retained through GPU completion;
-// evaluation indices and resource subrectangles remain backend-owned.
-struct FrameGenerationCamera {
-    float cameraViewToClip[4][4]{},clipToCameraView[4][4]{},clipToLensClip[4][4]{};
-    float clipToPrevClip[4][4]{},prevClipToClip[4][4]{};
-    float jitterOffset[2]{},mvecScale[2]{},cameraPinholeOffset[2]{};
-    float cameraPos[3]{},cameraUp[3]{},cameraRight[3]{},cameraFwd[3]{};
-    float cameraNear=0,cameraFar=0,cameraFOV=0,cameraAspectRatio=0;
-    float motionVectorsInvalidValue=0,minRelativeLinearDepthObjectSeparation=40.f;
-    bool depthInverted=false,cameraMotionIncluded=false,reset=false,orthoProjection=false;
-    bool motionVectorsDilated=false,menuDetectionEnabled=false;
 };
 struct FrameGenerationNgxEye {
     ID3D12Resource* color=nullptr;
@@ -135,6 +123,19 @@ struct FrameGenerationNgxStatus {
     FrameGenerationNgxCreateCall creation[2];
     uint64_t submitted=0,evaluations=0,completed=0,busy=0,resets=0;
 };
+struct FrameGenerationNgxQualification;
+#if defined(EDVR_FRAME_GENERATION_NGX_TEST) && defined(EDVR_HAVE_NGX)
+struct FrameGenerationNgxQualificationFixture {
+    enum class Fault { None, WrongOwner, WrongEvaluation, WrongSequence, WrongGeneration,
+        ReusedSlot, Expired, PinnedLatest, PinnedEarlier, Unsafe, MissingReadback };
+    Fault fault = Fault::None;
+};
+struct FrameGenerationNgxQualificationObservation {
+    bool reset = false, repeatRefused = false, preservedSlots = false, retiredInputs = false;
+    uint64_t sequence = 0, history = 0, completed = 0;
+    uint32_t firstLiveResetReasons = 0;
+};
+#endif
 class FrameGenerationNgx {
  public:
     FrameGenerationNgx()noexcept=default;
@@ -150,6 +151,18 @@ class FrameGenerationNgx {
     // Generation thread only, nonblocking. Release completed input pins even
     // when the bounded producer ring cannot supply another submit.
     bool collect()noexcept;
+    // Generation owner only. The readback queue must wait on the selected
+    // ticket and signal after copying both generated images. Registration
+    // binds those fences without keeping the ticket's output slots alive.
+    std::shared_ptr<const FrameGenerationNgxQualification> recordQualificationReadback(
+        const FrameGenerationNgxTicket&, ID3D12Fence* readback, uint64_t readbackValue) noexcept;
+    // The caller must first verify the pixels from this exact readback with
+    // its live qualification guard and give up all external synthetic tickets.
+    // Refuses stale ownership or unsafe work. Keeps queues, fences and slots.
+    bool resetAfterQualification(const std::shared_ptr<const FrameGenerationNgxQualification>&) noexcept;
+    // Generation owner only. An unproved qualification consumer can still
+    // reference generated output after the NGX evaluation fence completes.
+    void quarantineQualification() noexcept;
     // Generation thread only, bounded 0..5000ms. Timeout retains all GPU-owned
     // resources/parameters. No global/shared NGX Shutdown is ever called.
     bool drain(uint32_t timeoutMs=0)noexcept;
@@ -167,6 +180,10 @@ class FrameGenerationNgx {
     // input pin visible after the backend releases its own slot reference.
     static bool testDrainInput(ID3D12Fence*, uint64_t required, bool unsafe, bool expired,
         std::shared_ptr<void>& input);
+    // CPU substitutes for the two real fence objects, with an actual slot
+    // ring, receipt identity and SDK history reset-reason calculation.
+    static FrameGenerationNgxQualificationObservation testQualificationReset(
+        ID3D12Fence* evaluation, ID3D12Fence* readback, FrameGenerationNgxQualificationFixture fixture);
 #endif
  private:
     struct Impl;

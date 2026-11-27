@@ -124,7 +124,7 @@ static void contracts() {
     const auto handoff = [&](const std::string& code) {
         const auto init = code.find("if (!made->interop.initialize(init)");
         const auto retire = code.find(retireCall);
-        const auto assign = code.find("c->retiringProducer.replace(");
+        const auto assign = code.find("installProducer(*c, std::move(made))");
         const auto begin = code.find("c->producer->interop.begin(context");
         return init < retire && retire < assign && assign < begin && begin != std::string::npos &&
             code.find(retireCall, retire + 1) == std::string::npos;
@@ -132,6 +132,13 @@ static void contracts() {
     check(handoff(creation), "storage retirement occurs once in new-producer creation before assignment and first begin");
     creation.erase(creation.find(retireCall), std::strlen(retireCall));
     check(!handoff(creation), "handoff wiring regression detects omitted generation retirement");
+
+    const auto installation = function("ProducerInstall installProducer(");
+    const auto queueLock = installation.find("lock(c.queueMutex)");
+    const auto replace = installation.find("c.retiringProducer.replace(c.producer, std::move(candidate))");
+    const auto publish = installation.find("c.liveProducerIdentity.store(");
+    check(queueLock < replace && replace < publish && publish != std::string::npos,
+        "producer installation replaces storage under the queue lock before publishing its identity");
 
     const auto entry = function("void nativeFgServiceProducer(");
     const auto serviceCall = entry.find("serviceProducer(*c)");

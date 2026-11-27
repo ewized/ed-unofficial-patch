@@ -153,6 +153,49 @@ void terminalInputRetirement() {
     check(!FrameGenerationNgx::testDrainInput(&completion, 2, false, false, input) && input == preparation,
         "the device-removal fence sentinel retains preparation inputs");
 }
+void qualificationRetirement() {
+    using namespace edvr;
+    using Fault = FrameGenerationNgxQualificationFixture::Fault;
+    ObservedFence evaluation, readback;
+    const auto observe = [&](Fault fault = Fault::None) {
+        return FrameGenerationNgx::testQualificationReset(&evaluation, &readback, {fault});
+    };
+    const auto refused = [](const FrameGenerationNgxQualificationObservation& result) {
+        return !result.reset && result.sequence == 12 && result.history == 8 &&
+            result.preservedSlots && !result.retiredInputs && result.completed == 0;
+    };
+    evaluation.Signal(6);
+    readback.Signal(4);
+    check(refused(observe()), "a complete readback cannot replace the terminal NGX evaluation fence");
+    evaluation.Signal(7);
+    readback.Signal(3);
+    check(refused(observe()), "terminal NGX completion still waits for the registered pixel readback");
+    readback.Signal(UINT64_MAX);
+    check(refused(observe()), "readback removal sentinel cannot reset native history");
+    readback.Signal(4);
+    evaluation.Signal(UINT64_MAX);
+    check(refused(observe()), "evaluation removal sentinel cannot reset native history");
+    evaluation.Signal(7);
+
+    check(refused(observe(Fault::WrongOwner)), "another thread cannot reset the owning NGX backend");
+    check(refused(observe(Fault::WrongEvaluation)), "another evaluation fence cannot authorize reset");
+    check(refused(observe(Fault::WrongSequence)) && refused(observe(Fault::WrongGeneration)),
+        "a receipt for an old synthetic source or history cannot reset a live backend");
+    check(refused(observe(Fault::ReusedSlot)), "a stale receipt cannot match a reused evaluation slot");
+    check(refused(observe(Fault::Expired)), "an expired slot cannot authorize live reuse");
+    check(refused(observe(Fault::PinnedLatest)) && refused(observe(Fault::PinnedEarlier)),
+        "every synthetic ticket and downstream owner must release its slot pin before reset");
+    check(refused(observe(Fault::Unsafe)), "accepted unfenced work blocks same-handle restart");
+    check(refused(observe(Fault::MissingReadback)), "an unbound proof readback cannot restart a backend");
+
+    const auto ready = observe();
+    check(ready.reset && ready.repeatRefused && ready.sequence == 0 && ready.history == 0 &&
+        ready.preservedSlots && ready.retiredInputs && ready.completed == 2,
+        "fenced sole-owner reset retires the original input pins once while preserving queue and slot counters");
+    const uint32_t expected = fg_ngx::kResetFirstSource | fg_ngx::kResetCaller | fg_ngx::kResetGenerationChanged;
+    check(ready.firstLiveResetReasons == expected,
+        "the next real sequence may start below the synthetic sequence and receives native reset flags");
+}
 struct FlagTrace {unsigned initializations[2]{};uintptr_t pointer[2][3]{};bool allAllowed=true;};
 FlagTrace recordFlags(bool shared,bool reused,int leftWrite,int rightWrite,bool laterTrue=false){
     using namespace edvr;using namespace edvr::fg_ngx;FlagTrace trace;
@@ -214,7 +257,7 @@ int main(){
     FrameGenerationNgx untouched;check(!untouched.status().initialized,"default backend creates no device");
     check(untouched.collect(),"cold OFF collection creates no backend");
 #ifdef EDVR_HAVE_NGX
-    contextPathLifetime();lateObservation();coupledInputRing();terminalInputRetirement();
+    contextPathLifetime();lateObservation();coupledInputRing();terminalInputRetirement();qualificationRetirement();
 #endif
     check(generatedCount(2)==1&&generatedCount(3)==2&&generatedCount(4)==3&&
         !generatedCount(0)&&!generatedCount(1)&&!generatedCount(5),"2x to 4x request one to three generated frames");
@@ -365,6 +408,8 @@ int main(){
         !refused.generatedCount&&refused.poll()==FrameGenerationNgxCompletion::Empty,
         "SDK-absent submit publishes no pixels or GPU ownership");
     check(input.inputLease.use_count()==1,"SDK-absent backend never retains producer input");
+    check(!untouched.recordQualificationReadback({}, reinterpret_cast<ID3D12Fence*>(1), 1) &&
+        !untouched.resetAfterQualification({}), "SDK-absent backend refuses all qualification receipts");
     check(untouched.collect()&&untouched.drain(5000),"unavailable backend has no resources to drain");
     std::printf("FG NGX CPU checks=%u failures=%u NGX_SDK=absent adapter_checks=unavailable NGX=0 GPU=0 driver=0 OpenXR=0\n",checks,failures);
 #endif

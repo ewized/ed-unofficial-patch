@@ -888,6 +888,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\frame_generation_ngx.cpp" ^
+    "src\d3d11\frame_generation_qualification_runner.cpp" ^
     "src\d3d11\frame_generation_interop.cpp" ^
     "src\d3d11\frame_generation_color.cpp" ^
     "src\d3d11\frame_generation_output.cpp" ^

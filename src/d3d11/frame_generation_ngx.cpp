@@ -166,6 +166,11 @@ struct FrameGenerationNgxLease {
         for(unsigned e=0;e<2;++e)for(unsigned i=0;i<3;++i)if(mapped[e][i])readback[e][i]->Unmap(0,&noWrites);
     }
 };
+struct FrameGenerationNgxQualification {
+    std::weak_ptr<FrameGenerationNgxLease> evaluation;
+    ComPtr<ID3D12Fence> evaluationFence, readbackFence;
+    uint64_t evaluationValue = 0, readbackValue = 0, sequence = 0, history = 0;
+};
 FrameGenerationNgxCompletion FrameGenerationNgxTicket::poll()const noexcept {
     if(!lease)return FrameGenerationNgxCompletion::Empty;
     if(!generatedCount||generatedCount>fg_ngx::kMaxGenerated||generatedCount!=lease->count)return FrameGenerationNgxCompletion::FailedEvaluation;
@@ -289,6 +294,20 @@ struct FrameGenerationNgx::Impl {
         return !status.failed;
     }
     bool collect(){return collectCompleted(fence->GetCompletedValue());}
+    bool qualificationHealthy() const noexcept {
+        return owner == GetCurrentThreadId() && status.initialized && !status.failed &&
+            !status.quarantined && status.failure == FrameGenerationNgxFailure::None &&
+            !cleaned && !unsafePending && config.uiRecomposition && config.multiplier == 2 &&
+            config.suppressionLayout == FrameGenerationNgxSuppressionLayout::SharedNativePair &&
+            fence && lastFence && lastSequence && lastGeneration;
+    }
+    bool ownsEvaluation(const std::weak_ptr<FrameGenerationNgxLease>& evaluation, uint64_t value) const noexcept {
+        if (value != lastFence) return false;
+        for (const auto& slot : slots)
+            if (slot.lease && slot.value == value && slot.lease->value == value &&
+                !evaluation.owner_before(slot.lease) && !slot.lease.owner_before(evaluation)) return true;
+        return false;
+    }
     bool resourceValid(ID3D12Resource* resource,unsigned w,unsigned h,DXGI_FORMAT format){
         if(!resource)return false;const auto d=resource->GetDesc();ComPtr<ID3D12Device> actual;
         return d.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE2D&&d.Width==w&&d.Height==h&&d.DepthOrArraySize==1&&d.MipLevels==1&&d.SampleDesc.Count==1&&d.Format==format&&
@@ -478,6 +497,60 @@ bool FrameGenerationNgx::collect()noexcept {
     if(!s.sameThread()||!s.status.initialized||s.unsafePending||!s.fence)return false;
     return s.collect();
 }
+std::shared_ptr<const FrameGenerationNgxQualification> FrameGenerationNgx::recordQualificationReadback(
+    const FrameGenerationNgxTicket& ticket, ID3D12Fence* readback, uint64_t readbackValue) noexcept {
+    if (!impl_ || !readback || !fg_ngx::completed(readbackValue, readbackValue)) return {};
+    auto& s = *impl_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.qualificationHealthy() || !s.device || readback == s.fence.Get() ||
+        ticket.sequence != s.lastSequence || ticket.completionFence != s.fence.Get() ||
+        !ticket.uiRecomposed || !s.ownsEvaluation(ticket.lease, ticket.completionValue) ||
+        ticket.poll() != FrameGenerationNgxCompletion::Ready) return {};
+    ComPtr<ID3D12Device> actual;
+    if (FAILED(readback->GetDevice(IID_PPV_ARGS(&actual))) || actual.Get() != s.device.Get() ||
+        readback->GetCompletedValue() == UINT64_MAX) return {};
+    try {
+        auto receipt = std::make_shared<FrameGenerationNgxQualification>();
+        receipt->evaluation = ticket.lease;
+        receipt->evaluationFence = s.fence;
+        receipt->readbackFence = readback;
+        receipt->evaluationValue = ticket.completionValue;
+        receipt->readbackValue = readbackValue;
+        receipt->sequence = s.lastSequence;
+        receipt->history = s.lastGeneration;
+        return receipt;
+    } catch (...) { return {}; }
+}
+bool FrameGenerationNgx::resetAfterQualification(
+    const std::shared_ptr<const FrameGenerationNgxQualification>& receipt) noexcept {
+    if (!impl_ || !receipt) return false;
+    auto& s = *impl_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.qualificationHealthy() || receipt->evaluationFence.Get() != s.fence.Get() ||
+        receipt->sequence != s.lastSequence || receipt->history != s.lastGeneration ||
+        !s.ownsEvaluation(receipt->evaluation, receipt->evaluationValue) ||
+        !receipt->readbackFence || receipt->readbackFence.Get() == s.fence.Get()) return false;
+
+    const uint64_t completed = s.fence->GetCompletedValue();
+    if (!fg_ngx::completed(completed, s.lastFence) ||
+        !fg_ngx::completed(receipt->readbackFence->GetCompletedValue(), receipt->readbackValue)) return false;
+    for (const auto& slot : s.slots)
+        if (slot.lease && (slot.lease.use_count() != 1 || slot.lease->expired.load(std::memory_order_acquire))) return false;
+
+    if (!s.collectCompleted(completed) || s.status.completed != s.status.submitted) return false;
+    // Output resource states and every fence value belong to the retained
+    // slots. Only software history identity starts over for the live seed.
+    s.lastSequence = 0;
+    s.lastGeneration = 0;
+    return true;
+}
+void FrameGenerationNgx::quarantineQualification() noexcept {
+    if (!impl_) return;
+    auto& s = *impl_;
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.unsafePending = true;
+    s.status.quarantined = true;
+}
 bool FrameGenerationNgx::drain(uint32_t timeoutMs)noexcept {
     if(!impl_)return true;auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
     if(s.cleaned)return true;if(!s.sameThread())return false;if(s.unsafePending)return false;
@@ -518,7 +591,6 @@ bool FrameGenerationNgx::testDrainInput(ID3D12Fence* completion, uint64_t requir
     local->owner = GetCurrentThreadId();
     local->fence = completion;
     local->lastFence = required;
-    local->unsafePending = unsafe;
     auto retained = std::make_shared<FrameGenerationNgxLease>();
     retained->inputLease = std::move(input);
     retained->expired.store(expired, std::memory_order_release);
@@ -527,10 +599,68 @@ bool FrameGenerationNgx::testDrainInput(ID3D12Fence* completion, uint64_t requir
 
     FrameGenerationNgx backend;
     backend.impl_ = local.get();
+    if (unsafe) backend.quarantineQualification();
     const bool drained = backend.drain(0);
     backend.impl_ = nullptr;
     input = std::move(retained->inputLease);
     return drained;
+}
+FrameGenerationNgxQualificationObservation FrameGenerationNgx::testQualificationReset(
+    ID3D12Fence* evaluation, ID3D12Fence* readback, FrameGenerationNgxQualificationFixture fixture) {
+    using Fault = FrameGenerationNgxQualificationFixture::Fault;
+    Impl local;
+    local.owner = fixture.fault == Fault::WrongOwner ? 0 : GetCurrentThreadId();
+    local.status.initialized = true;
+    local.status.failure = FrameGenerationNgxFailure::None;
+    local.status.submitted = 2;
+    local.config.uiRecomposition = true;
+    local.config.suppressionLayout = FrameGenerationNgxSuppressionLayout::SharedNativePair;
+    local.fence = evaluation;
+    local.lastFence = local.nextFence = 7;
+    local.lastSequence = 12;
+    local.lastGeneration = 8;
+    local.unsafePending = fixture.fault == Fault::Unsafe;
+    for (unsigned i = 0; i < 2; ++i) {
+        auto& slot = local.slots[i];
+        slot.value = 6u + i;
+        slot.lease = std::make_shared<FrameGenerationNgxLease>();
+        slot.lease->value = slot.value;
+        slot.lease->inputLease = std::make_shared<unsigned>(i);
+    }
+    auto receipt = std::make_shared<FrameGenerationNgxQualification>();
+    receipt->evaluation = local.slots[1].lease;
+    receipt->evaluationFence = fixture.fault == Fault::WrongEvaluation ? readback : evaluation;
+    receipt->readbackFence = fixture.fault == Fault::MissingReadback ? nullptr : readback;
+    receipt->evaluationValue = local.lastFence;
+    receipt->readbackValue = 4;
+    receipt->sequence = local.lastSequence - unsigned(fixture.fault == Fault::WrongSequence);
+    receipt->history = local.lastGeneration - unsigned(fixture.fault == Fault::WrongGeneration);
+    if (fixture.fault == Fault::ReusedSlot) {
+        auto& slot = local.slots[1];
+        slot.lease = std::make_shared<FrameGenerationNgxLease>();
+        slot.lease->value = slot.value;
+        slot.lease->inputLease = std::make_shared<unsigned>(1);
+    }
+    if (fixture.fault == Fault::Expired) local.slots[0].lease->expired = true;
+    std::shared_ptr<FrameGenerationNgxLease> retainedTicket;
+    if (fixture.fault == Fault::PinnedLatest) retainedTicket = local.slots[1].lease;
+    if (fixture.fault == Fault::PinnedEarlier) retainedTicket = local.slots[0].lease;
+
+    FrameGenerationNgx backend;
+    backend.impl_ = &local;
+    FrameGenerationNgxQualificationObservation result;
+    result.reset = backend.resetAfterQualification(receipt);
+    result.repeatRefused = !backend.resetAfterQualification(receipt);
+    backend.impl_ = nullptr;
+    result.sequence = local.lastSequence;
+    result.history = local.lastGeneration;
+    result.completed = local.status.completed;
+    result.preservedSlots = local.lastFence == 7 && local.nextFence == 7 && local.status.submitted == 2 &&
+        local.slots[0].value == 6 && local.slots[1].value == 7 && local.slots[0].lease->value == 6 &&
+        local.slots[1].lease->value == 7;
+    result.retiredInputs = !local.slots[0].lease->inputLease && !local.slots[1].lease->inputLease;
+    result.firstLiveResetReasons = fg_ngx::resetHistoryReasons(local.lastSequence, 1, local.lastGeneration, 9, true);
+    return result;
 }
 FrameGenerationNgxStatus FrameGenerationNgx::testFeaturePreparation(unsigned eye,FrameGenerationNgxCreationMode creationMode,bool uiRecomposition){
     Impl local;local.config.width=local.config.guideWidth=1280;local.config.height=local.config.guideHeight=720;local.config.multiplier=2;
@@ -572,6 +702,11 @@ FrameGenerationNgx::~FrameGenerationNgx()=default;
 bool FrameGenerationNgx::initialize(const FrameGenerationNgxInit&){return false;}
 FrameGenerationNgxTicket FrameGenerationNgx::submit(const FrameGenerationNgxInput&){return {};}
 bool FrameGenerationNgx::collect()noexcept{return true;}
+std::shared_ptr<const FrameGenerationNgxQualification> FrameGenerationNgx::recordQualificationReadback(
+    const FrameGenerationNgxTicket&, ID3D12Fence*, uint64_t) noexcept { return {}; }
+bool FrameGenerationNgx::resetAfterQualification(
+    const std::shared_ptr<const FrameGenerationNgxQualification>&) noexcept { return false; }
+void FrameGenerationNgx::quarantineQualification() noexcept {}
 bool FrameGenerationNgx::drain(uint32_t)noexcept{return true;}
 FrameGenerationNgxStatus FrameGenerationNgx::status()const noexcept {
     FrameGenerationNgxStatus out;out.failed=true;out.failure=FrameGenerationNgxFailure::SdkUnavailable;

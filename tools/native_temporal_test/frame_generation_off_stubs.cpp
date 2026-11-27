@@ -10,7 +10,7 @@ HRESULT nativeFgAcquire(const EdvrFgRequest*, EdvrFgTable*) noexcept { return E_
 void nativeFgBeginTemporal(const EdvrNativeTemporalFrame&, bool, bool) noexcept {}
 void nativeFgTemporalUnavailable(uint64_t) noexcept {}
 void nativeFgServiceProducer(uint64_t) noexcept {}
-void nativeFgBeforeTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
+void nativeFgBeforeTemporalEye(uint64_t, unsigned, ID3D11Texture2D*, unsigned, unsigned) noexcept {}
 void nativeFgCheckpointPartial(uint64_t,unsigned) noexcept {}
 void nativeFgAfterTemporalEye(uint64_t, unsigned, ID3D11Texture2D*) noexcept {}
 bool nativeFgGuideEye(ID3D11Texture2D*, unsigned&) noexcept { return false; }

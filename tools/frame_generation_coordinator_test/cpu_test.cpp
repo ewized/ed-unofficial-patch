@@ -1,5 +1,6 @@
 #include "../../src/d3d11/frame_generation_coordinator.h"
 #include "../../src/d3d11/frame_generation_ngx.h"
+#include "../../src/d3d11/frame_generation_qualification_runner.h"
 #include "../../src/d3d11/native_reflex.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/scene_projection_capture.h"
@@ -39,8 +40,13 @@ bool FrameGenerationNgx::initialize(const FrameGenerationNgxInit&) {std::abort()
 FrameGenerationNgxTicket FrameGenerationNgx::submit(const FrameGenerationNgxInput&) {std::abort();}
 bool FrameGenerationNgx::collect() noexcept {std::abort();}
 bool FrameGenerationNgx::drain(uint32_t) noexcept {std::abort();}
+bool FrameGenerationNgx::resetAfterQualification(
+    const std::shared_ptr<const FrameGenerationNgxQualification>&) noexcept {std::abort();}
+void FrameGenerationNgx::quarantineQualification() noexcept {std::abort();}
 FrameGenerationNgxStatus FrameGenerationNgx::status() const noexcept {std::abort();}
 FrameGenerationNgxCompletion FrameGenerationNgxTicket::poll() const noexcept {std::abort();}
+FrameGenerationQualificationResult qualifyFrameGeneration(FrameGenerationNgx&, const FrameGenerationNgxInit&,
+    const FrameGenerationQualificationLimits&) noexcept {std::abort();}
 std::shared_ptr<const UiLayerFgSnapshot> uiLayerFgCapture(ID3D11DeviceContext*, uint64_t, uint32_t,
     ID3D11Texture2D*, const uint32_t[4], const float[4], UiLayerFgInfo*) noexcept {std::abort();}
 bool uiLayerFgCaptureTo(ID3D11DeviceContext*, uint64_t, uint32_t, ID3D11Texture2D*,

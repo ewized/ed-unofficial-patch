@@ -45,7 +45,7 @@ inline bool supported(unsigned multiplier,bool available,bool needsDriver,unsign
     const auto count=generatedCount(multiplier);return count&&available&&!needsDriver&&maximum>=count;
 }
 inline bool completed(uint64_t actual,uint64_t expected) noexcept {
-    return expected&&actual!=std::numeric_limits<uint64_t>::max()&&actual>=expected;
+    return expected&&actual!=(std::numeric_limits<uint64_t>::max)()&&actual>=expected;
 }
 inline bool reusable(uint64_t actual,uint64_t expected,unsigned owners) noexcept {
     return (!expected||completed(actual,expected))&&owners<=1;

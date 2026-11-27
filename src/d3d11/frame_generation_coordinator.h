@@ -32,7 +32,8 @@ void nativeFgTemporalUnavailable(uint64_t generation) noexcept;
 // The active temporal render owner services fence-backed producer retirement
 // even while the session is presenting untreated native frames.
 void nativeFgServiceProducer(uint64_t generation) noexcept;
-void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source) noexcept;
+void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source,
+    unsigned guideWidth = 0, unsigned guideHeight = 0) noexcept;
 void nativeFgCheckpointPartial(uint64_t sequence,unsigned eye) noexcept;
 void nativeFgAfterTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* output) noexcept;
 bool nativeFgGuideEye(ID3D11Texture2D* exactSource, unsigned& anatomicalEye) noexcept;

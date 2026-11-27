@@ -6,6 +6,7 @@
 #include "frame_generation_ngx_policy.h"
 #endif
 #include "frame_generation_output.h"
+#include "frame_generation_qualification_runner.h"
 #include "native_reflex.h"
 #include "ui_layer.h"
 #include "../common/log.h"
@@ -43,6 +44,9 @@ enum Failure : uint32_t {None, SourceMismatch, TemporalMismatch, Unsupported, Mi
 std::atomic<uint32_t> requested{0};
 std::atomic<uint64_t> configuration{1};
 std::atomic<bool> automatic{false};
+// Unfenced qualification commands may outlive the selected configuration or
+// coordinator. This process cannot prove safe reuse of that GPU path.
+std::atomic<bool> qualificationQuarantined{false};
 std::mutex autoMutex;
 fg_auto::Policy autoPolicy;
 std::mutex ngxContextMutex;
@@ -174,6 +178,7 @@ struct Producer {
     ComPtr<ID3D11DeviceContext> context;
     unsigned width = 0, height = 0, guideWidth = 0, guideHeight = 0;
     uint64_t config = 0, resourceEpoch = 0;
+    uint64_t identity = 0; // Assigned once before this producer can enter the worker queue.
     bool colorCaptureNoted[2]{};
 };
 struct Work {
@@ -184,12 +189,22 @@ struct Work {
     FrameGenerationOutputSource source;
     EdvrNativeTemporalFrame temporalPrevious{}, temporalCurrent{};
     uint64_t reflexProof = 0;
+    bool qualificationOnly = false;
 };
 struct Publication {
     FrameGenerationOutputTicket ticket;
     uint64_t sequence, config, history, reflexProof;
     uint32_t multiplier;
     bool recomposedCockpit = false;
+    uint64_t producerIdentity = 0;
+    bool qualifiedRecomposition = false;
+};
+struct QualificationRoute {
+    fg_recomposition::BackendKey backend{};
+    fg_recomposition::Mode mode = fg_recomposition::Mode::Legacy;
+    uint64_t seededHistory = 0;
+    unsigned provenHudEyes = 0;
+    bool started = false;
 };
 enum class TemporalSupport : uint8_t { Awaiting, Supported, Unsupported };
 struct Coordinator {
@@ -220,11 +235,14 @@ struct Coordinator {
     std::condition_variable wake;
     std::deque<Work> queued;
     std::deque<Publication> ready;
+    QualificationRoute qualification; // queueMutex, including render-side eligibility reads.
     uint64_t reportedRecomposedHistory = 0; // queueMutex
     // The thread identity may be checked by a foreign caller. Only the
     // elected render owner reads or changes the capture fields below it.
     std::atomic<DWORD> renderThread{0};
     std::shared_ptr<Producer> producer;
+    uint64_t lastProducerIdentity = 0; // Render owner only.
+    std::atomic<uint64_t> liveProducerIdentity{0}; // Cross-owner check without borrowing the render pointer.
     // At most one displaced ring can remain alive solely for its GPU work.
     fg_interop::Retirement<Producer> retiringProducer;
     Work capture;
@@ -236,8 +254,9 @@ struct Coordinator {
     // permission opens capture for a later source, never an output phase.
     uint64_t metadataHistory = 0, metadataSequence = 0, coverageHistory = 0, lastEligible = 0, lastCoverageLog = 0;
     uint64_t coverageBlocked = 0, coverageUnknown = 0, coverageEligible = 0, captureStarts = 0, guideCaptures = 0;
-    unsigned eligibleStreak = 0, doorMask = 0, coveredMask = 0;
-    bool previousCovered = false, captureAllowed = false, observedAdjacent = false;
+    unsigned eligibleStreak = 0, doorMask = 0, coveredMask = 0, previousHudEyes = 0;
+    unsigned submittedGuideWidth = 0, submittedGuideHeight = 0;
+    bool captureAllowed = false, observedAdjacent = false;
     ID3D11Texture2D* submitted[2]{};
     ID3D11Texture2D* temporalOutput[2]{};
     std::wstring features, data;
@@ -262,7 +281,8 @@ void refuse(Coordinator& c, Failure failure) noexcept {
             (unsigned long long)c.history.load(), (unsigned long long)count);
 }
 bool terminalFor(const Coordinator& c,uint64_t config) noexcept {
-    return config && c.terminalConfig.load(std::memory_order_acquire)==config;
+    return qualificationQuarantined.load(std::memory_order_acquire) ||
+        (config && c.terminalConfig.load(std::memory_order_acquire)==config);
 }
 // queueMutex protects the bounded queues and serializes their invalidation
 // with a ready publication. Queued inputs have not entered any GPU consumer.
@@ -277,6 +297,7 @@ void clearWorkLocked(Coordinator& c, uint32_t state, bool releaseResources = fal
     for (auto& work : c.queued) if (work.input) work.input->cancel();
     c.queued.clear();
     c.ready.clear();
+    if (c.qualification.mode == fg_recomposition::Mode::Pending && !c.qualification.started) c.qualification = {};
     if (releaseResources) ++c.resourceEpoch;
 }
 void clearWork(Coordinator& c, uint32_t state, bool releaseResources = false) noexcept {
@@ -318,6 +339,15 @@ void terminalFault(Coordinator& c,uint64_t config,Failure reason) noexcept {
         c.terminalReason.store(reason,std::memory_order_relaxed);
         c.terminalConfig.store(config,std::memory_order_release);
         clearWorkLocked(c, EDVR_FG_FAILED, true);
+    }
+    ++c.refusedPairs;
+    c.wake.notify_all();
+}
+void quarantineTrial(Coordinator& c) noexcept {
+    {
+        std::lock_guard<std::mutex> lock(c.queueMutex);
+        qualificationQuarantined.store(true, std::memory_order_release);
+        if (!c.closed.load()) clearWorkLocked(c, EDVR_FG_FAILED, true);
     }
     ++c.refusedPairs;
     c.wake.notify_all();
@@ -376,10 +406,47 @@ bool currentAdmission(const Coordinator& c, uint64_t config, uint64_t history, u
 }
 bool currentWork(const Coordinator& c, const Work& work) noexcept {
     return currentAdmission(c, work.source.current.configGeneration, work.source.historyGeneration,
-        work.reflexProof, work.source.multiplier);
+        work.reflexProof, work.source.multiplier) &&
+        (!work.producer || work.producer->identity == c.liveProducerIdentity.load(std::memory_order_acquire));
 }
 bool currentPublication(const Coordinator& c, const Publication& publication) noexcept {
-    return currentAdmission(c, publication.config, publication.history, publication.reflexProof, publication.multiplier);
+    return currentAdmission(c, publication.config, publication.history, publication.reflexProof, publication.multiplier) &&
+        publication.producerIdentity == c.liveProducerIdentity.load(std::memory_order_acquire) &&
+        (!publication.qualifiedRecomposition || (c.qualification.mode == fg_recomposition::Mode::Verified &&
+            c.qualification.backend.producer == publication.producerIdentity &&
+            c.qualification.seededHistory == publication.history));
+}
+
+bool wantsQualification(const Coordinator& c, unsigned multiplier) noexcept {
+    return c.recomposeUi && multiplier == 2;
+}
+fg_recomposition::BackendKey qualificationKey(const Coordinator& c, const Producer& producer, unsigned multiplier) noexcept {
+    return {c.generation, producer.config, producer.resourceEpoch, static_cast<uintptr_t>(producer.identity),
+        reinterpret_cast<uintptr_t>(producer.interop.device12()), producer.width, producer.height,
+        producer.guideWidth, producer.guideHeight, DXGI_FORMAT_R8G8B8A8_UNORM, multiplier};
+}
+bool currentQualification(const Coordinator& c, const fg_recomposition::BackendKey& key) noexcept {
+    return key.valid() && c.qualification.backend == key && key.sessionGeneration == c.generation &&
+        key.configGeneration == configuration.load() && !terminalFor(c,key.configGeneration) &&
+        key.resourceEpoch == c.resourceEpoch.load() && key.producer == c.liveProducerIdentity.load(std::memory_order_acquire) &&
+        wantsQualification(c, requested.load()) && !c.closed.load();
+}
+enum class QualificationWork { Ordinary, Probe, Defer };
+
+// Claim at most one immutable stereo pair for a worker attempt. The pair
+// supplies its producer contract for the probe, never game pixels or cadence.
+QualificationWork claimQualification(Coordinator& c, const fg_recomposition::BackendKey& key) noexcept {
+    if (!key.valid() || !wantsQualification(c, key.multiplier)) return QualificationWork::Ordinary;
+    if (!(c.qualification.backend == key)) {
+        c.qualification = {key, fg_recomposition::Mode::Pending, 0};
+        return QualificationWork::Probe;
+    }
+    return c.qualification.mode == fg_recomposition::Mode::Pending ? QualificationWork::Defer : QualificationWork::Ordinary;
+}
+
+void dropUnstartedQualification(Coordinator& c, const fg_recomposition::BackendKey& key) noexcept {
+    std::lock_guard<std::mutex> lock(c.queueMutex);
+    if (c.qualification.backend == key && c.qualification.mode == fg_recomposition::Mode::Pending) c.qualification = {};
 }
 
 // Under queueMutex. READY certifies an exportable current-epoch GPU result,
@@ -426,8 +493,26 @@ bool serviceProducer(Coordinator& c) noexcept {
     discardCapture(c);
     if (c.producer.use_count() != 1 || !c.producer->interop.retired()) return false;
     if (auto* context = c.producer->context.Get(); context && !uiLayerFgRetireStorage(context)) return false;
+    c.liveProducerIdentity.store(0, std::memory_order_release);
     c.producer.reset();
     return true;
+}
+enum class ProducerInstall { Installed, Replaced, Superseded, Busy };
+
+// Render owner only. Commit identity and revoke the displaced producer's
+// ready images together, including a resize that did not bump resourceEpoch.
+ProducerInstall installProducer(Coordinator& c, std::shared_ptr<Producer> candidate) noexcept {
+    std::lock_guard<std::mutex> lock(c.queueMutex);
+    if (!currentWork(c, c.capture) || candidate->resourceEpoch != c.resourceEpoch.load()) return ProducerInstall::Superseded;
+    if (c.lastProducerIdentity == UINT64_MAX) return ProducerInstall::Busy;
+    const bool replacing = bool(c.producer);
+    candidate->identity = c.lastProducerIdentity + 1;
+    if (!c.retiringProducer.replace(c.producer, std::move(candidate))) return ProducerInstall::Busy;
+    c.liveProducerIdentity.store(++c.lastProducerIdentity, std::memory_order_release);
+    if (!replacing) return ProducerInstall::Installed;
+    clearWorkLocked(c, EDVR_FG_ARMING);
+    c.wake.notify_all();
+    return ProducerInstall::Replaced;
 }
 void temporalUnsupported(Coordinator& c) noexcept {
     if (c.temporalSupport.exchange(TemporalSupport::Unsupported) != TemporalSupport::Unsupported)
@@ -523,13 +608,13 @@ bool requiresNativeOutput(EvaluationRoute route,const FrameGenerationNgxTicket& 
 template<class Backend>
 FrameGenerationNgxTicket evaluateSource(Backend& backend,FrameGenerationNgxInput& input,
     const FrameGenerationOutputSource& source,const FrameGenerationOutputUi (&ui)[2],
-    bool haveHistory,EvaluationRoute& route) {
+    bool haveHistory,EvaluationRoute& route,bool qualifiedTranslation = false) {
     if(!haveHistory||source.previous.sequence==source.current.sequence) {
         route=EvaluationRoute::Seed;
         for(auto& eye:input.eyes)eye.camera.reset=true;
     } else {
         route=EvaluationRoute::Interpolate;
-        const bool recompositionInputs = input.eyes[0].hudless && input.eyes[0].ui &&
+        const bool recompositionInputs = qualifiedTranslation && input.eyes[0].hudless && input.eyes[0].ui &&
             input.eyes[1].hudless && input.eyes[1].ui;
         if (!recompositionInputs && (!ui[0].empty || !ui[1].empty) &&
             !fg_coverage::anyFits(source.previous.views,source.current.views,source.multiplier)) {
@@ -543,18 +628,60 @@ void worker(Coordinator* c) noexcept {
     std::unique_ptr<FrameGenerationNgx> ngx;
     std::unique_ptr<FrameGenerationOutput> output;
     std::shared_ptr<Producer> configured;
+    std::unique_ptr<fg_recomposition::Activation> activation;
+    fg_recomposition::Activation::Attempt activationAttempt;
+    FrameGenerationQualificationResult qualificationProof;
     unsigned multiplier = 0, diagnosticFailures = 0;
     uint64_t releasedEpoch = 0, firstSeed = 0;
     bool notedAdjacent=false;
     uint64_t evaluatedHistory=0,coverageSkipped=0,lastCoverageReportMs=0;
+    unsigned previousHudEyes = 0;
+    const auto resetBackend = [&] {
+        if (activation && configured) {
+            const auto key = qualificationKey(*c, *configured, multiplier);
+            std::lock_guard<std::mutex> lock(c->queueMutex);
+            if (c->qualification.mode == fg_recomposition::Mode::Verified && c->qualification.backend == key)
+                c->qualification = {};
+        }
+        output.reset(); ngx.reset(); configured.reset(); multiplier=0;
+        activation.reset(); activationAttempt = {}; qualificationProof = {}; previousHudEyes = 0;
+    };
     const auto releaseBackend = [&] {
         clearUnexported(*c);
         drainBackend(ngx.get(), output.get());
-        output.reset(); ngx.reset(); configured.reset(); multiplier=0;
+        resetBackend();
     };
     const auto discardBackend = [&](uint64_t config,Failure why) {
         terminalFault(*c,config,why);
         releaseBackend();
+    };
+    const auto quarantineBackend = [&] {
+        if (activation && activationAttempt) activation->quarantine(activationAttempt);
+        ngx->quarantineQualification();
+        quarantineTrial(*c);
+        releaseBackend();
+    };
+    const auto retireTrial = [&](const Work& trial, const fg_recomposition::BackendKey& key, bool unsupported) {
+        if (!drainBackend(ngx.get(), output.get()) ||
+            trial.producer->interop.device12()->GetDeviceRemovedReason() != S_OK) {
+            quarantineBackend(); return;
+        }
+        if (activation && activationAttempt && !activation->retire(activationAttempt,
+            {reinterpret_cast<uintptr_t>(qualificationProof.readbackFence.Get()), qualificationProof.completed})) {
+            discardBackend(key.configGeneration, Ngx); return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(c->queueMutex);
+            if (c->qualification.backend == key && c->qualification.mode == fg_recomposition::Mode::Pending) {
+                const bool routeCurrent = currentQualification(*c, key);
+                if (unsupported && routeCurrent && currentWork(*c, trial))
+                    c->qualification.mode = fg_recomposition::Mode::Legacy;
+                else c->qualification = {};
+                if (routeCurrent) clearWorkLocked(*c, EDVR_FG_ARMING);
+            }
+        }
+        resetBackend();
+        c->wake.notify_all();
     };
     try {
         for (;;) {
@@ -585,15 +712,28 @@ void worker(Coordinator* c) noexcept {
                 if (c->queued.empty()) continue;
                 work = std::move(c->queued.front()); c->queued.pop_front();
             }
+            if (!work.producer || !work.input) continue;
+            const auto key = qualificationKey(*c, *work.producer, work.source.multiplier);
             if (!currentWork(*c, work)) {
+                if (work.qualificationOnly) dropUnstartedQualification(*c, key);
                 work.input->cancel(); continue;
             }
-            if (configured != work.producer || multiplier != work.source.multiplier) {
+            if (work.qualificationOnly) {
+                std::lock_guard<std::mutex> lock(c->queueMutex);
+                if (!currentWork(*c, work) || !currentQualification(*c, key) ||
+                    c->qualification.mode != fg_recomposition::Mode::Pending) {
+                    if (c->qualification.backend == key && c->qualification.mode == fg_recomposition::Mode::Pending)
+                        c->qualification = {};
+                    work.input->cancel(); continue;
+                }
+                c->qualification.started = true;
+            }
+            if (work.qualificationOnly || configured != work.producer || multiplier != work.source.multiplier) {
                 clearUnexported(*c);
                 if (!drainBackend(ngx.get(), output.get())) {
                     work.input->cancel(); discardBackend(work.producer->config,Output); continue;
                 }
-                output.reset(); ngx.reset(); configured = work.producer; multiplier = work.source.multiplier;
+                resetBackend(); configured = work.producer; multiplier = work.source.multiplier;
                 firstSeed=0;notedAdjacent=false;evaluatedHistory=0;
                 ngx = std::make_unique<FrameGenerationNgx>(); output = std::make_unique<FrameGenerationOutput>();
                 FrameGenerationNgxInit init;
@@ -601,7 +741,7 @@ void worker(Coordinator* c) noexcept {
                 init.guideWidth = configured->guideWidth; init.guideHeight = configured->guideHeight; init.multiplier = multiplier;
                 init.creationMode = FrameGenerationNgxCreationMode::OfficialFgHelper;
                 init.suppressionLayout = FrameGenerationNgxSuppressionLayout::SharedNativePair;
-                init.uiRecomposition = c->recomposeUi;
+                init.uiRecomposition = work.qualificationOnly;
                 init.featureDirectory = c->features.c_str(); init.dataDirectory = c->data.c_str();
                 bool initialized = false;
                 {
@@ -623,7 +763,12 @@ void worker(Coordinator* c) noexcept {
                         uint32_t(s.failure),uint32_t(s.initStage),uint32_t(s.failedInitStage),s.failedInitEye,
                         s.lastNgxResult,unsigned(s.lastHresult),unsigned(s.available),s.maximumGenerated,
                         unsigned(init.privateNgxDevice),unsigned(init.ngxAlreadyInitialized));
-                    work.input->cancel(); discardBackend(work.producer->config,Ngx); continue;
+                    work.input->cancel();
+                    if (work.qualificationOnly && (s.quarantined || init.device->GetDeviceRemovedReason() != S_OK))
+                        quarantineBackend();
+                    else if (work.qualificationOnly && s.failure == FrameGenerationNgxFailure::NgxCreate) retireTrial(work, key, true);
+                    else discardBackend(work.producer->config,Ngx);
+                    continue;
                 }
                 if (!output->initialize(true, init.device, init.width, init.height)) {
                     const auto s = output->status();
@@ -635,6 +780,47 @@ void worker(Coordinator* c) noexcept {
                     multiplier, init.width, init.height, init.guideWidth, init.guideHeight, unsigned(init.uiRecomposition),
                     double(work.cameras[0].mvecScale[0]), double(work.cameras[0].mvecScale[1]),
                     double(work.cameras[1].mvecScale[0]), double(work.cameras[1].mvecScale[1]));
+                if (work.qualificationOnly) {
+                    if (!work.input->cancel()) {discardBackend(work.producer->config, Interop);continue;}
+                    if (!currentWork(*c, work)) {retireTrial(work, key, false);continue;}
+                    activation = std::make_unique<fg_recomposition::Activation>();
+                    activationAttempt = activation->start(key);
+                    if (!activationAttempt) {retireTrial(work, key, false);continue;}
+                    qualificationProof = qualifyFrameGeneration(*ngx, init);
+                    const auto status = ngx->status();
+                    Log::get().note("native fg: UI qualification producer=%llu verdict=%u reason=%u matched_midpoints=%u.",
+                        (unsigned long long)key.producer, unsigned(qualificationProof.verdict),
+                        unsigned(qualificationProof.reason), qualificationProof.passingMidpoints);
+                    if (qualificationProof.verdict == FrameGenerationQualificationVerdict::Unsafe || status.quarantined ||
+                        init.device->GetDeviceRemovedReason() != S_OK) {
+                        quarantineBackend();
+                        continue;
+                    }
+                    if (status.failed) {retireTrial(work, key, true);continue;}
+                    const auto fence = reinterpret_cast<uintptr_t>(qualificationProof.readbackFence.Get());
+                    const bool terminal = qualificationProof.hasTerminalProof() && activation->registerProof(activationAttempt,
+                        {fence, qualificationProof.submitted}, qualificationProof.coveredEyes);
+                    const bool verified = terminal && qualificationProof.verdict == FrameGenerationQualificationVerdict::Passed;
+                    if (!verified || !currentWork(*c, work)) {retireTrial(work, key, !verified);continue;}
+                    if (!ngx->resetAfterQualification(qualificationProof.resetReceipt)) {
+                        retireTrial(work, key, true);continue;
+                    }
+                    bool committed = false;
+                    {
+                        std::lock_guard<std::mutex> lock(c->queueMutex);
+                        if (currentWork(*c, work) && currentQualification(*c, key) && activation->finish(activationAttempt,
+                            key, {fence, qualificationProof.completed}, c->history.load(), qualificationProof.pixels) &&
+                            activation->verified(activationAttempt,key)) {
+                            c->qualification.mode = fg_recomposition::Mode::Verified;
+                            c->qualification.provenHudEyes = qualificationProof.coveredEyes;
+                            clearWorkLocked(*c, EDVR_FG_ARMING);
+                            committed = true;
+                        }
+                    }
+                    if (!committed) retireTrial(work, key, false);
+                    else c->wake.notify_all();
+                    continue;
+                }
             }
             if (!currentWork(*c, work)) {work.input->cancel(); continue;}
             FrameGenerationNgxInput input;
@@ -649,7 +835,13 @@ void worker(Coordinator* c) noexcept {
                 value.camera = work.cameras[eye];
             }
             FrameGenerationRecompositionTicket prepared;
-            if (c->recomposeUi) {
+            if (activation) {
+                std::lock_guard<std::mutex> lock(c->queueMutex);
+                if (!currentQualification(*c, key) || c->qualification.mode != fg_recomposition::Mode::Verified) {
+                    work.input->cancel(); continue;
+                }
+            }
+            if (activation) {
                 prepared = output->prepareRecomposition(work.input, work.ui, work.source);
                 if (!prepared.accepted) {
                     work.input->cancel();
@@ -679,7 +871,12 @@ void worker(Coordinator* c) noexcept {
                 }
             }
             EvaluationRoute evaluation{};
-            auto ticket=evaluateSource(*ngx,input,work.source,work.ui,evaluatedHistory==input.historyGeneration,evaluation);
+            const unsigned hudEyes = (work.ui[0].empty ? 0u : 1u) | (work.ui[1].empty ? 0u : 2u);
+            const bool haveHistory = evaluatedHistory == input.historyGeneration;
+            const auto priorHudEyes = haveHistory ? previousHudEyes : 0u;
+            const bool translated = activation && activation->canPublish(activationAttempt,key,input.historyGeneration) &&
+                hudEyes == qualificationProof.coveredEyes && priorHudEyes == hudEyes;
+            auto ticket=evaluateSource(*ngx,input,work.source,work.ui,haveHistory,evaluation,translated);
             input.inputLease.reset();
             prepared.lease.reset();
             const bool nativeBootstrap=evaluation==EvaluationRoute::Seed;
@@ -727,22 +924,35 @@ void worker(Coordinator* c) noexcept {
                 }
                 retireBackendOnly(work, ticket, prepared); refuse(*c, Ngx); continue;
             }
-            if (c->recomposeUi && completion == FrameGenerationNgxCompletion::Ready && !ticket.uiRecomposed) {
+            if (activation && completion == FrameGenerationNgxCompletion::Ready && !ticket.uiRecomposed) {
                 retireBackendOnly(work, ticket, prepared);
                 discardBackend(work.producer->config, Ngx);
                 continue;
             }
             if (nativeBootstrap && evaluatedHistory != input.historyGeneration) {firstSeed=0;notedAdjacent=false;}
-            if(!skipNgx)evaluatedHistory=ticket.evaluationSucceeded?input.historyGeneration:0;
+            if(!skipNgx) {
+                evaluatedHistory=ticket.evaluationSucceeded?input.historyGeneration:0;
+                previousHudEyes=ticket.evaluationSucceeded?hudEyes:0;
+            }
             // A reset after a skipped sequence seeds the current source. Even
             // an unsuppressed SDK result then has no contiguous previous image.
-            const bool nativeOnly=requiresNativeOutput(evaluation,ticket);
+            // An opaque bilateral witness does not certify a transition to or
+            // from one clear eye, even when the optical centers coincide.
+            const bool nativeOnly=requiresNativeOutput(evaluation,ticket) ||
+                (activation && (hudEyes || priorHudEyes) && !translated);
             // While ordinary native owns presentation it has already drawn
             // this endpoint. Seed the actual backend without occupying a
             // fenced output slot the XR consumer cannot yet poll.
             if ((nativeOnly || completion!=FrameGenerationNgxCompletion::Ready) && !c->active.load()) {
                 if (!retireBackendOnly(work,ticket,prepared) || (ticket.evaluationSucceeded && (!ticket.completionFence || !ticket.completionValue))) {
                     discardBackend(work.producer->config,Ngx); continue;
+                }
+                if (activation && nativeOnly && ticket.evaluationSucceeded &&
+                    (completion == FrameGenerationNgxCompletion::Ready || completion == FrameGenerationNgxCompletion::Suppressed)) {
+                    std::lock_guard<std::mutex> lock(c->queueMutex);
+                    if (currentWork(*c,work) && currentQualification(*c,key) &&
+                        activation->noteLiveSeed(activationAttempt,key,input.historyGeneration,ticket.historyResetReasons))
+                        c->qualification.seededHistory = input.historyGeneration;
                 }
                 if (nativeBootstrap && ticket.evaluationSucceeded && !firstSeed) {
                     firstSeed=input.sequence;
@@ -783,13 +993,16 @@ void worker(Coordinator* c) noexcept {
             }
             {
                 std::lock_guard<std::mutex> lock(c->queueMutex);
-                if (!currentWork(*c, work)) continue;
+                const bool qualifiedRecomposition = activation && published.generatedCount;
+                if (!currentWork(*c, work) || (qualifiedRecomposition &&
+                    (!currentQualification(*c,key) || !activation->canPublish(activationAttempt,key,input.historyGeneration)))) continue;
                 if(published.generatedCount)++c->generatedPairs;else ++c->suppressedPairs;
                 if (c->ready.size() >= 3) {++c->busyPairs;}
                 else {
                     c->ready.push_back({std::move(published), work.source.current.sequence,
                         work.source.current.configGeneration, work.source.historyGeneration, work.reflexProof, multiplier,
-                        ticket.uiRecomposed && !work.ui[0].empty && !work.ui[1].empty});
+                        ticket.uiRecomposed && !work.ui[0].empty && !work.ui[1].empty, work.producer->identity,
+                        qualifiedRecomposition});
                 }
             }
             c->wake.notify_all();
@@ -830,7 +1043,8 @@ HRESULT WINAPI status(void* pointer, EdvrFgStatus* out) {
     out->activeMultiplier = qualified && temporal == TemporalSupport::Supported ? c->active.load() : 0;
     out->state = !out->requestedMultiplier ? (automatic.load() ? EDVR_FG_ARMING : EDVR_FG_OFF) : isClosed ? EDVR_FG_CLOSING : fault ? EDVR_FG_FAILED :
         (!qualified || temporal == TemporalSupport::Unsupported) ? EDVR_FG_UNAVAILABLE : c->state.load();
-    out->lastFailure = fault?c->terminalReason.load():c->failure.load();
+    out->lastFailure = qualificationQuarantined.load() ? uint32_t(Ngx) :
+        (fault ? c->terminalReason.load() : c->failure.load());
     out->generation = c->generation; out->historyGeneration = c->history.load();
     if (out->state == EDVR_FG_UNAVAILABLE && qualified && temporal == TemporalSupport::Supported &&
         !out->activeMultiplier && out->historyGeneration == c->coverageCutHistory.load() &&
@@ -943,6 +1157,7 @@ HRESULT WINAPI close(void* pointer) {
         c->quarantined = true;
         Log::get().note("native fg: producer retirement unproven; retaining its ring and disabling further acquisitions this process.");
     } else {
+        c->liveProducerIdentity.store(0, std::memory_order_release);
         c->producer.reset();
     }
     c->retired = true;
@@ -1087,9 +1302,24 @@ void nativeFgServiceProducer(uint64_t generation) noexcept {
     }
 }
 namespace {
-bool captureMayInterpolate(const Coordinator& c, const EdvrFgSource& previous, const EdvrFgSource& currentSource,
-    unsigned multiplier, bool covered) noexcept {
-    return c.recomposeUi || !covered || fg_coverage::anyFits(previous.views, currentSource.views, multiplier);
+bool captureMayInterpolate(Coordinator& c, const EdvrFgSource& previous, const EdvrFgSource& currentSource,
+    unsigned multiplier, unsigned previousHudEyes, unsigned currentHudEyes, bool observing = false) noexcept {
+    if (wantsQualification(c, multiplier)) {
+        std::lock_guard<std::mutex> lock(c.queueMutex);
+        const auto& state = c.qualification;
+        if (!currentQualification(c, state.backend) || state.backend.configGeneration != currentSource.configGeneration ||
+            state.backend.width != currentSource.width || state.backend.height != currentSource.height ||
+            (c.submittedGuideWidth && c.submittedGuideHeight &&
+                (state.backend.guideWidth != c.submittedGuideWidth || state.backend.guideHeight != c.submittedGuideHeight))) return true;
+        // Observing continues while the one private pair is in flight. Cutting
+        // coverage history here would invalidate the very proof being measured.
+        if (state.mode == fg_recomposition::Mode::Pending) return observing;
+        if (state.mode == fg_recomposition::Mode::Verified)
+            return !(previousHudEyes | currentHudEyes) ||
+                (previousHudEyes == state.provenHudEyes && currentHudEyes == state.provenHudEyes);
+        if (state.mode == fg_recomposition::Mode::Unsafe) return false;
+    }
+    return !currentHudEyes || fg_coverage::anyFits(previous.views, currentSource.views, multiplier);
 }
 
 // One generation cut per loss of capture permission. Sealing partial GPU
@@ -1135,13 +1365,15 @@ void observeDoor(Coordinator& c, unsigned eye, bool admitted, bool hasUi) noexce
     if (c.doorMask != 3) return;
     const auto& pair = c.capture.source;
     const bool adjacent = c.observedAdjacent;
-    c.previousCovered = c.coveredMask != 0;
+    const auto previousHudEyes = c.previousHudEyes;
+    c.previousHudEyes = c.coveredMask;
     if (!adjacent) {
         // The first native endpoint across a history cut establishes the new
         // anchor. It cannot qualify A/B or supersede the preceding cut.
         ++c.coverageUnknown;
         c.eligibleStreak = 0; c.lastEligible = 0;
-    } else if (!captureMayInterpolate(c, pair.previous, pair.current, pair.multiplier, c.previousCovered)) {
+    } else if (!captureMayInterpolate(c, pair.previous, pair.current, pair.multiplier,
+        previousHudEyes, c.coveredMask, true)) {
         ++c.coverageBlocked;
         suspendCoverage(c,true);
     } else {
@@ -1166,7 +1398,8 @@ void observeDoor(Coordinator& c, unsigned eye, bool admitted, bool hasUi) noexce
     }
 }
 } // namespace
-void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source) noexcept {
+void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D* source,
+    unsigned guideWidth, unsigned guideHeight) noexcept {
     auto* c = current.load(std::memory_order_acquire); if (!enabled(c) || eye > 1) return;
     try {
         DWORD unclaimed = 0;
@@ -1174,8 +1407,10 @@ void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D*
         if (!owner(*c)) {refuse(*c, TemporalMismatch); return;}
         if (!serviceProducer(*c)) return;
         if (c->captureSequence != sequence || c->captureHistory != c->history.load()) {
+            c->submittedGuideWidth = guideWidth;
+            c->submittedGuideHeight = guideHeight;
             if (c->coverageHistory != c->history.load()) {
-                c->eligibleStreak = 0; c->lastEligible = 0; c->previousCovered = false;
+                c->eligibleStreak = 0; c->lastEligible = 0; c->previousHudEyes = 0;
             } else if (c->doorMask != 3 || sequence != c->captureSequence + 1) {
                 ++c->coverageUnknown;
                 suspendCoverage(*c,false);
@@ -1209,7 +1444,8 @@ void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D*
                 c->metadataSequence = sequence; c->metadataHistory = c->captureHistory;
                 c->captureAllowed = c->observedAdjacent && c->eligibleStreak >= 2 &&
                     c->lastEligible == c->previousSource.sequence &&
-                    captureMayInterpolate(*c, c->previousSource, c->source, c->capture.source.multiplier, c->previousCovered);
+                    captureMayInterpolate(*c, c->previousSource, c->source, c->capture.source.multiplier,
+                        c->previousHudEyes, c->previousHudEyes);
                 if (c->captureAllowed) ++c->captureStarts;
             }
         }
@@ -1261,8 +1497,9 @@ void nativeFgCaptureGuides(ID3D11DeviceContext* context, const NativeFgGuides& g
             // Validate both UI capture caches against the render owner before
             // the new producer starts recording copies on this context.
             if (!uiLayerFgRetireStorage(context)) {abortCapture(*c, Ui); return;}
-            if (!currentWork(*c, c->capture) || resourceEpoch != c->resourceEpoch.load()) {discardCapture(*c); return;}
-            if(!c->retiringProducer.replace(c->producer,std::move(made))) {++c->busyPairs;abortCapture(*c,Busy);return;}
+            const auto installed = installProducer(*c, std::move(made));
+            if (installed == ProducerInstall::Busy) {++c->busyPairs;abortCapture(*c, Busy);return;}
+            if (installed != ProducerInstall::Installed) {discardCapture(*c);return;}
         }
         if (!currentWork(*c, c->capture)) {discardCapture(*c); return;}
         if (!startWorker(*c)) {abortCapture(*c, Interop); return;}
@@ -1400,8 +1637,16 @@ void nativeFgCaptureWorld(uint64_t sequence, unsigned eye, ID3D11Texture2D* sour
             std::lock_guard<std::mutex> lock(c->queueMutex);
             if (!currentWork(*c, c->capture)) {c->capture.input->cancel(); c->capture = {}; return;}
             if (c->queued.size() >= 3) {c->capture.input->cancel(); ++c->busyPairs; c->capture = {}; return;}
-            c->queued.push_back(std::move(c->capture));
-            ++c->sourcePairs; c->latestSource = sequence;
+            const auto key = qualificationKey(*c, *c->producer, c->capture.source.multiplier);
+            const auto qualification = claimQualification(*c, key);
+            if (qualification == QualificationWork::Defer) {c->capture.input->cancel(); c->capture = {}; return;}
+            c->capture.qualificationOnly = qualification == QualificationWork::Probe;
+            try { c->queued.push_back(std::move(c->capture)); }
+            catch (...) {
+                if (qualification == QualificationWork::Probe) c->qualification = {};
+                throw;
+            }
+            if (qualification == QualificationWork::Ordinary) {++c->sourcePairs; c->latestSource = sequence;}
         }
         c->wake.notify_all();
     } catch (...) {abortCapture(*c, Interop);}
@@ -1441,6 +1686,106 @@ public:
 private:
     std::atomic<UINT64> value_{0};
 };
+
+template<class Check>
+void testProducerReplacement(const Coordinator& source, Check check) {
+    Coordinator c(source.device, source.generation);
+    c.temporalSupport = TemporalSupport::Supported;
+    c.capture.source.current.configGeneration = configuration.load();
+    c.capture.source.historyGeneration = c.history.load();
+    c.capture.source.multiplier = requested.load();
+    c.capture.reflexProof = liveReflexProof(c);
+    const auto historyBeforeResize = c.history.load();
+    const auto resourceEpoch = c.resourceEpoch.load();
+    auto first = std::make_shared<Producer>();
+    first->resourceEpoch = resourceEpoch;
+    first->width = 1280;
+    check(installProducer(c, first) == ProducerInstall::Installed && c.history == historyBeforeResize && first->identity != 0);
+
+    Work displaced = c.capture;
+    displaced.producer = first;
+    Publication stale{};
+    stale.config = configuration.load();
+    stale.history = historyBeforeResize;
+    stale.reflexProof = c.capture.reflexProof;
+    stale.multiplier = c.capture.source.multiplier;
+    stale.producerIdentity = first->identity;
+    check(currentWork(c, displaced) && currentPublication(c, stale));
+    c.queued.push_back(displaced);
+    c.ready.push_back(stale);
+    c.active = stale.multiplier;
+    c.state = EDVR_FG_READY;
+
+    auto resized = std::make_shared<Producer>();
+    resized->resourceEpoch = resourceEpoch;
+    resized->width = 1440;
+    check(installProducer(c, resized) == ProducerInstall::Replaced);
+    check(c.resourceEpoch == resourceEpoch && c.history > historyBeforeResize && c.queued.empty() && c.ready.empty());
+    check(c.active == 0 && c.state == EDVR_FG_ARMING && resized->identity != first->identity);
+
+    displaced.source.historyGeneration = stale.history = c.history.load();
+    check(!currentWork(c, displaced) && !currentPublication(c, stale));
+    displaced.producer = resized;
+    stale.producerIdentity = resized->identity;
+    check(currentWork(c, displaced) && currentPublication(c, stale));
+    check(installProducer(c, std::make_shared<Producer>()) == ProducerInstall::Superseded && c.producer == resized);
+}
+
+template<class Check>
+void testPendingQualification(const Coordinator& source, Check check) {
+    Coordinator c(source.device, source.generation, true);
+    c.temporalSupport = TemporalSupport::Supported;
+    const auto config = configuration.load();
+    const fg_recomposition::BackendKey key{c.generation, config, c.resourceEpoch.load(),
+        1, 2, 1280, 720, 960, 540, DXGI_FORMAT_R8G8B8A8_UNORM, 2};
+    c.liveProducerIdentity = key.producer;
+    EdvrFgSource previous{}, next{};
+    previous.configGeneration = next.configGeneration = config;
+    previous.width = next.width = key.width;
+    previous.height = next.height = key.height;
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        previous.views[eye].orientation[3] = next.views[eye].orientation[3] = 1;
+        next.views[eye].position[0] = 1.f;
+    }
+    check(claimQualification(c, key) == QualificationWork::Probe);
+    check(currentQualification(c, key) && claimQualification(c, key) == QualificationWork::Defer);
+    check(captureMayInterpolate(c, previous, next, key.multiplier, 3, 3, true));
+    check(!captureMayInterpolate(c, previous, next, key.multiplier, 3, 3));
+    clearWorkLocked(c, EDVR_FG_ARMING);
+    check(!currentQualification(c, key) && claimQualification(c, key) == QualificationWork::Probe);
+    c.qualification.started = true;
+    clearWorkLocked(c, EDVR_FG_ARMING);
+    check(currentQualification(c, key) && claimQualification(c, key) == QualificationWork::Defer);
+    c.qualification.mode = fg_recomposition::Mode::Legacy;
+    check(!captureMayInterpolate(c, previous, next, key.multiplier, 3, 3) &&
+        claimQualification(c, key) == QualificationWork::Ordinary);
+    c.submittedGuideWidth = key.guideWidth + 1;
+    c.submittedGuideHeight = key.guideHeight;
+    check(captureMayInterpolate(c, previous, next, key.multiplier, 3, 3));
+    c.submittedGuideWidth = key.guideWidth;
+
+    Publication result{};
+    result.qualifiedRecomposition = true;
+    result.config = config;
+    result.history = c.history.load();
+    result.reflexProof = liveReflexProof(c);
+    result.multiplier = key.multiplier;
+    result.producerIdentity = key.producer;
+    c.qualification.mode = fg_recomposition::Mode::Verified;
+    c.qualification.provenHudEyes = 3;
+    check(captureMayInterpolate(c, previous, next, key.multiplier, 3, 3));
+    check(captureMayInterpolate(c, previous, next, key.multiplier, 0, 0));
+    check(!captureMayInterpolate(c, previous, next, key.multiplier, 3, 0, true));
+    check(!captureMayInterpolate(c, previous, next, key.multiplier, 1, 1, true));
+    check(!currentPublication(c, result));
+    c.qualification.seededHistory = result.history;
+    check(currentPublication(c, result));
+    ++c.liveProducerIdentity;
+    check(!currentPublication(c, result));
+    quarantineTrial(c);
+    check(!selected(&c) && c.state == EDVR_FG_FAILED && terminalFor(c, config + 1));
+    qualificationQuarantined.store(false, std::memory_order_release); // CPU fixture only.
+}
 
 template<class Check>
 void testFencedBootstrap(Coordinator& c, const EdvrFgTable& table, Check check) {
@@ -1572,14 +1917,17 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
         check(route==EvaluationRoute::Seed&&recorder.count==4);
         auto* captured = reinterpret_cast<ID3D12Resource*>(static_cast<uintptr_t>(1));
         input.eyes[0].hudless = input.eyes[0].ui = captured;
-        evaluateSource(recorder,input,pair,ui,true,route);
+        evaluateSource(recorder,input,pair,ui,true,route,true);
         check(route==EvaluationRoute::NativeCoverage&&recorder.count==4);
         input.eyes[1].hudless = input.eyes[1].ui = captured;
         evaluateSource(recorder,input,pair,ui,true,route);
+        check(route==EvaluationRoute::NativeCoverage&&recorder.count==4);
+        evaluateSource(recorder,input,pair,ui,true,route,true);
         check(route==EvaluationRoute::Interpolate&&recorder.count==5);
         Coordinator legacyCapture(nullptr, 1), recomposedCapture(nullptr, 1, true);
-        check(!captureMayInterpolate(legacyCapture,pair.previous,pair.current,pair.multiplier,true));
-        check(captureMayInterpolate(recomposedCapture,pair.previous,pair.current,pair.multiplier,true));
+        check(!captureMayInterpolate(legacyCapture,pair.previous,pair.current,pair.multiplier,3,3));
+        check(!captureMayInterpolate(recomposedCapture,pair.previous,pair.current,pair.multiplier,3,3));
+        check(captureMayInterpolate(recomposedCapture,pair.previous,pair.current,2,3,3));
     }
     NativeFgGuides guide;
     guide.width = 2133; guide.height = 1600;
@@ -1686,6 +2034,8 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
             nativeFgBeforeTemporalEye(2,0,exact);
             check(c->capture.source.previous.sequence==1 && c->capture.source.current.sequence==2 && !c->rejected);
 
+            testProducerReplacement(*c,check);
+            testPendingQualification(*c,check);
             testFencedBootstrap(*c,table,check);
             nativeFgBeforeTemporalEye(2,0,exact);
             check(currentWork(*c,c->capture));
