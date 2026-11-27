@@ -18,8 +18,9 @@ inline bool inverse(const float (&m)[4][4],float (&out)[4][4]){
 // The foreground moves in both directions without wrapping at the screen edge.
 // Each eye has a small disparity and a different constant background colour so
 // a swapped eye cannot pass just by placing its bar at the right fraction.
+// Moving by a fixed fraction of the output width preserves the camera travel.
 inline int barLeft(unsigned width,unsigned frame,unsigned eye){
-    const int step=std::clamp(int(width/32),16,48);
+    const int step=(std::max)(int(width/32),16);
     const int tick=int((frame-1)%12);
     return int(width/4)+(eye==0?2:-2)+step*(tick<=6?tick:12-tick);
 }

@@ -7,6 +7,18 @@ namespace edvr::fg_fixture::test {
 inline bool qualificationFixtureSelfTest() {
     static constexpr unsigned width = 1280;
     constexpr unsigned height = 720, frame = 5;
+    constexpr unsigned wideWidth = 3840, wideHeight = 2160;
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        if (barLeft(width, frame, eye) - barLeft(width, frame - 1, eye) != 40 ||
+            hudLeft(width, frame, eye) - hudLeft(width, frame - 1, eye) != -30 ||
+            barLeft(wideWidth, frame, eye) - barLeft(wideWidth, frame - 1, eye) != 120 ||
+            hudLeft(wideWidth, frame, eye) - hudLeft(wideWidth, frame - 1, eye) != -90) return false;
+        const float reference = probeMotion(width, height, 640, frame, eye, HudFixture::Opaque).xDelta;
+        const float wide = probeMotion(wideWidth, wideHeight, 2227, frame, eye, HudFixture::Opaque).xDelta;
+        const float roundoff = 16.f * std::numeric_limits<float>::epsilon() * reference;
+        if (!std::isfinite(reference) || reference <= 0.f || !std::isfinite(wide) ||
+            std::abs(wide - reference) > roundoff) return false;
+    }
     const auto midpoint = [](int a, int b) { return int(std::lround((a + b) * .5)); };
     const auto makeRow = [](unsigned eye, int scene, int hud) {
         std::vector<uint8_t> row(width * 4);
