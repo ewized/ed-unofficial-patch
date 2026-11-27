@@ -90,16 +90,24 @@ inline NativeFgModeSelection nativeFgModeSelection(const NativeFgReadout& r) noe
     if(r.selectedMultiplier)return {NativeFgModeKind::Waiting,r.selectedMultiplier};
     return {NativeFgModeKind::Native};
 }
-inline void formatNativeFgMode(const NativeFgReadout& r,char* text,size_t size) {
+enum class NativeFgModeLabel {Detailed,Compact};
+inline void formatNativeFgMode(const NativeFgReadout& r,char* text,size_t size,
+    NativeFgModeLabel label=NativeFgModeLabel::Detailed) {
     if(!text||!size)return;
     const auto mode=nativeFgModeSelection(r);
-    const char* prefix=r.automatic?"Auto: ":"";
+    const bool compact=label==NativeFgModeLabel::Compact;
+    const char* autoPrefix=compact?"auto: ":"Auto: ";
+    const char* prefix=r.automatic?autoPrefix:"";
+    const char* off=compact?"off":"Off";
     switch(mode.kind){
     case NativeFgModeKind::Failed:std::snprintf(text,size,"%sfailed",prefix);break;
     case NativeFgModeKind::Unavailable:std::snprintf(text,size,"%sunavailable",prefix);break;
-    case NativeFgModeKind::Active:std::snprintf(text,size,"%s%ux",prefix,mode.multiplier);break;
-    case NativeFgModeKind::Waiting:std::snprintf(text,size,"%s%ux waiting",prefix,mode.multiplier);break;
-    case NativeFgModeKind::Native:std::snprintf(text,size,"%s",r.automatic?"Auto: native":"Off");break;
+    case NativeFgModeKind::Active:
+        if(compact)std::snprintf(text,size,"x%u",mode.multiplier);
+        else std::snprintf(text,size,"%s%ux",prefix,mode.multiplier);
+        break;
+    case NativeFgModeKind::Waiting:std::snprintf(text,size,compact?"%sx%u waiting":"%s%ux waiting",prefix,mode.multiplier);break;
+    case NativeFgModeKind::Native:std::snprintf(text,size,"%s%s",prefix,r.automatic?"native":off);break;
     }
 }
 // A tile's large face has room for a short value. Full mode and decision text
@@ -130,22 +138,32 @@ inline void formatNativeFgTotals(const NativeFgReadout& r,char* text,size_t size
         (unsigned long long)r.totals.generatedFrames,(unsigned long long)r.totals.repeatedFrames);
     else std::snprintf(text,size,"%s | counts unavailable",mode);
 }
-// Use the measured total when XR counters are fresh. Older runtimes can still
-// supply the rendered rate, even when there is no submission measurement.
-inline void formatNativeFgCompact(const NativeFgReadout& r,char* text,size_t size,double renderFps=-1.) {
-    if(!text||!size)return;
-    char mode[40];formatNativeFgMode(r,mode,sizeof(mode));
-    const double fps=r.measurement==NativeFgMeasureState::Counting?r.submittedFps:renderFps;
-    if(fps>=0.)std::snprintf(text,size,"%.0f FPS | %s",fps,mode);
-    else std::snprintf(text,size,"FPS %s | %s",nativeFgMeasureWord(r.measurement),mode);
+// Use successful native and generated submissions for the compact rate.
+// Without measured counts, use rendered FPS if available. Return true when
+// the line includes the active multiplier and measured breakdown.
+inline bool formatNativeFgCompact(const NativeFgReadout& r,char* text,size_t size,double renderFps=-1.) {
+    if(!text||!size)return false;
+    const bool counting=r.measurement==NativeFgMeasureState::Counting;
+    const double fps=counting?r.nativeFps+r.generatedFps:renderFps;
+    const auto mode=nativeFgModeSelection(r);
+    if(counting&&mode.kind==NativeFgModeKind::Active){
+        std::snprintf(text,size,"%.0f fps | %.0f native + %.0f gen | x%u",
+            fps,r.nativeFps,r.generatedFps,mode.multiplier);
+        return true;
+    }
+    char label[40];formatNativeFgMode(r,label,sizeof(label),NativeFgModeLabel::Compact);
+    if(fps>=0.)std::snprintf(text,size,"%.0f fps | %s",fps,label);
+    else std::snprintf(text,size,"fps %s | %s",nativeFgMeasureWord(r.measurement),label);
+    return false;
 }
-// Include timings only when the full line fits.
+// Include timings on the fallback line only when all its fields fit.
 constexpr size_t kNativeFgCompactMaxChars=95;
 inline void formatNativeFgOverlay(const NativeFgReadout& r,double renderFps,const char* timings,char* text,size_t size) {
     if(!text||!size)return;
-    char line[kNativeFgCompactMaxChars+1];formatNativeFgCompact(r,line,sizeof(line),renderFps);
-    const bool fits=timings&&std::strlen(line)+std::strlen(timings)<=kNativeFgCompactMaxChars;
-    std::snprintf(text,size,"%s%s",line,fits?timings:"");
+    char line[kNativeFgCompactMaxChars+1];
+    const bool breakdown=formatNativeFgCompact(r,line,sizeof(line),renderFps);
+    const bool includeTimings=!breakdown&&timings&&std::strlen(line)+std::strlen(timings)<=kNativeFgCompactMaxChars;
+    std::snprintf(text,size,"%s%s",line,includeTimings?timings:"");
 }
 
 }
