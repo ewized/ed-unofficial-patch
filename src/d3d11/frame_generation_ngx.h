@@ -44,6 +44,8 @@ struct FrameGenerationNgxInit {
     // may return the adapter's existing device). Borrowed requires the known
     // owner's successful D3D12 Init. Neither mode permits global NGX Shutdown.
     bool privateNgxDevice=false,ngxAlreadyInitialized=false;
+    // Opt in at feature creation. Every later eye must carry both UI inputs.
+    bool uiRecomposition=false;
     uint32_t timeoutMs=2000;
 };
 // ED-UP's measured guide metadata, independent of SDK headers and ABI layout.
@@ -70,6 +72,12 @@ struct FrameGenerationNgxEye {
     // Matrices exclude TAA jitter; jitterOffset is clip-space, mvecScale
     // normalizes the supplied motion encoding. No inferred camera defaults.
     FrameGenerationCamera camera{};
+    // Recomposition requires full native color plus distinct, eye-sized
+    // HUD-less and premultiplied UI textures from that same source.
+    ID3D12Resource* hudless=nullptr;
+    ID3D12Resource* ui=nullptr;
+    D3D12_RESOURCE_STATES hudlessState=D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES uiState=D3D12_RESOURCE_STATE_COMMON;
 };
 struct FrameGenerationNgxInput {
     uint64_t sequence=0,historyGeneration=0;
@@ -97,6 +105,7 @@ struct FrameGenerationNgxTicket {
     uint64_t sequence=0,completionValue=0;
     unsigned generatedCount=0;
     bool evaluationSucceeded=false;
+    bool uiRecomposed=false; // Ready generated eyes already contain their HUD.
     uint32_t historyResetReasons=0;
     ID3D12Fence* completionFence=nullptr;
     ID3D12Resource* generated[2][3]{};
@@ -149,10 +158,15 @@ class FrameGenerationNgx {
     // Actual production feature-preparation path, with link-time CPU NGX
     // substitutes. The fixture owns the parameter object returned by its stub.
     static FrameGenerationNgxStatus testFeaturePreparation(unsigned eye=0,
-        FrameGenerationNgxCreationMode creationMode=FrameGenerationNgxCreationMode::GenericScratchQuery);
+        FrameGenerationNgxCreationMode creationMode=FrameGenerationNgxCreationMode::GenericScratchQuery,
+        bool uiRecomposition=false);
     // Actual slot collector with CPU fence values; no device or NGX calls.
     static bool testCollectInputs(uint64_t completed,const uint64_t (&values)[3],
         unsigned expiredMask,std::shared_ptr<void> (&inputs)[3]);
+    // Drive terminal drain with an independently retained ticket keeping the
+    // input pin visible after the backend releases its own slot reference.
+    static bool testDrainInput(ID3D12Fence*, uint64_t required, bool unsafe, bool expired,
+        std::shared_ptr<void>& input);
 #endif
  private:
     struct Impl;
@@ -166,6 +180,6 @@ unsigned frameGenerationNgxTestContextPaths(const FrameGenerationNgxInit&,NVSDK_
 FrameGenerationNgxTicket frameGenerationNgxTestTimedTicket(ID3D12Fence*);
 bool frameGenerationNgxTestEvaluation(unsigned multiplier,unsigned index,
     NVSDK_NGX_Parameter*,NVSDK_NGX_DLSSG_Opt_Eval_Params* persistent,ID3D12Resource* disableOverride=nullptr,
-    const FrameGenerationCamera* camera=nullptr);
+    const FrameGenerationCamera* camera=nullptr,const FrameGenerationNgxEye* source=nullptr);
 #endif
 } // namespace edvr

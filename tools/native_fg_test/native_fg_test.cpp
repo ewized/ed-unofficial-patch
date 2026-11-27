@@ -113,6 +113,19 @@ void schedule() {
   times.multiplier=3;times.currentPoseDisplayTime=130;
   check(fgschedule::phaseTime(times,1)==110&&fgschedule::phaseTime(times,2)==120&&fgschedule::phaseTime(times,0)==130,
     "3x schedules the first and second generated phases at one-third and two-thirds");
+
+  EdvrFgView previous[2]{}, current[2]{};
+  current[1].position[0] = .006f;
+  current[1].position[1] = .008f;
+  using edvr::fg_coverage::maxOpticalCenterShiftMeters;
+  check(std::fabs(maxOpticalCenterShiftMeters(previous,current,2,1)-.005)<1e-8,
+    "translated 2x submission measures the actual midpoint and checks both eyes");
+  check(std::fabs(maxOpticalCenterShiftMeters(previous,current,4,3)-.0025)<1e-8,
+    "a salvaged late phase reports its own physical displacement from the endpoint");
+  check(maxOpticalCenterShiftMeters(previous,current,2,0)==0. &&
+        maxOpticalCenterShiftMeters(previous,current,2,2)==0. &&
+        maxOpticalCenterShiftMeters(current,current,2,1)==0.,
+    "native, invalid and stationary phases do not contribute translated submissions");
 }
 void credits() {
   OwnerService owner;std::atomic<unsigned> ticks{0};std::atomic<bool> ownerThread{false};

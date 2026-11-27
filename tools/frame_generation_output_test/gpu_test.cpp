@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cwchar>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -176,6 +177,136 @@ EdvrFgSource metadata(uint64_t sequence) {
     }
     return source;
 }
+void checkRecomposition(FrameGenerationOutput& output, ID3D12Device* device, ID3D12CommandQueue* queue,
+    ID3D12Fence* producerGate, const std::shared_ptr<FrameGenerationInteropLease>& captured,
+    const FrameGenerationOutputUi (&ui)[2], const FrameGenerationOutputSource& source,
+    std::vector<ComPtr<IUnknown>>& keepAlive) {
+    const auto initialOwners = captured.use_count();
+    const auto initialStatus = output.status();
+    check(captured->producerFence()->GetCompletedValue() < captured->producerValue(),
+        "the real producer queue is blocked ahead of source publication");
+    FrameGenerationRecompositionTicket tickets[3];
+    for (auto& ticket : tickets) {
+        ticket = output.prepareRecomposition(captured, ui, source);
+        check(ticket.accepted && !ticket.unsafe && ticket.lease && ticket.readyFence && ticket.readyValue,
+            "private recomposition prepares both eyes behind a GPU fence");
+        check(ticket.readyFence->GetCompletedValue() < ticket.readyValue,
+            "private readiness cannot outrun the unsignalled input producer");
+        for (unsigned eye = 0; eye < 2; ++eye) {
+            const auto& surfaces = ticket.eyes[eye];
+            check(surfaces.color && surfaces.ui && surfaces.color != surfaces.ui &&
+                surfaces.color != surfaces.hudless && surfaces.ui != surfaces.hudless &&
+                surfaces.hudless == captured->plane(eye, FrameGenerationPlane::Color)->resource12,
+                "native RGBA and UI are private; HUD-less aliases the immutable source");
+        }
+    }
+    check(captured.use_count() == initialOwners + 3, "each preparation owns its source through downstream reads");
+    auto mismatched = source;
+    ++mismatched.historyGeneration;
+    const auto badHistory = output.prepareRecomposition(captured, ui, mismatched);
+    check(!badHistory.accepted && !badHistory.lease &&
+        output.status().failure == FrameGenerationOutputFailure::InvalidMetadata,
+        "history-mismatched sources cannot enter the private preparation ring");
+    bool wrongOwnerAccepted = true;
+    std::thread foreign([&] { wrongOwnerAccepted = output.prepareRecomposition(captured, ui, source).accepted; });
+    foreign.join();
+    check(!wrongOwnerAccepted && output.status().failure == FrameGenerationOutputFailure::WrongThread,
+        "preparation uses the existing output-worker owner");
+    check(!output.prepareRecomposition(captured, ui, source).accepted &&
+        output.status().failure == FrameGenerationOutputFailure::Busy,
+        "pending or externally held preparations backpressure the bounded ring");
+
+    // Model NGX refusing before queueing anything. Dropping its planned
+    // input must leave the original source pinned until the prep fence.
+    auto* abandonedFence = tickets[2].readyFence;
+    const auto abandonedValue = tickets[2].readyValue;
+    tickets[2] = {};
+    check(output.collect() && captured.use_count() == initialOwners + 3 &&
+        output.status().recompositionSubmitted == initialStatus.recompositionSubmitted + 3 &&
+        output.status().recompositionRetired == initialStatus.recompositionRetired,
+        "an accepted prep without NGX stays outstanding until its GPU fence");
+    hr(producerGate->Signal(1), "release the real source producer queue");
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Fence> consumer;
+    hr(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)), "recomposition reader allocator");
+    hr(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list)),
+        "separate recomposition consumer list");
+    hr(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&consumer)), "recomposition consumer completion");
+    ComPtr<ID3D12Resource> readback;
+    constexpr UINT rowPitch = (width * sizeof(Pixel) + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+        ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    constexpr UINT imageStride = (rowPitch * height + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) &
+        ~(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+    D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC readDesc{};
+    readDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; readDesc.Width = 6 * imageStride;
+    readDesc.Height = readDesc.DepthOrArraySize = readDesc.MipLevels = 1;
+    readDesc.SampleDesc.Count = 1;
+    readDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "private recomposition readback");
+    keepAlive.emplace_back(allocator.Get()); keepAlive.emplace_back(list.Get());
+    keepAlive.emplace_back(consumer.Get()); keepAlive.emplace_back(readback.Get());
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        const auto& surfaces = tickets[0].eyes[eye];
+        ID3D12Resource* planes[] = {surfaces.color, surfaces.hudless, surfaces.ui};
+        for (unsigned p = 0; p < 3; ++p) {
+            auto* plane = planes[p];
+            keepAlive.emplace_back(plane);
+            transition(list.Get(), plane, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource = readback.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint = {UINT64((eye * 3 + p) * imageStride), {DXGI_FORMAT_R8G8B8A8_UNORM, width, height, 1, rowPitch}};
+            D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = plane; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            transition(list.Get(), plane, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        }
+    }
+    hr(list->Close(), "recomposition reader list close");
+    hr(queue->Wait(abandonedFence, abandonedValue), "downstream queue waits every private preparation");
+    ID3D12CommandList* lists[] = {list.Get()}; queue->ExecuteCommandLists(1, lists);
+    hr(queue->Signal(consumer.Get(), 1), "downstream readback fence");
+    const auto started = GetTickCount64();
+    while (consumer->GetCompletedValue() == 0 && GetTickCount64() - started < 3000) Sleep(1);
+    check(consumer->GetCompletedValue() == 1 && output.collect() && captured.use_count() == initialOwners + 2 &&
+        output.status().recompositionRetired == initialStatus.recompositionRetired + 1,
+        "fenced prep without NGX retires while consumer-owned source pins remain");
+    check(!output.drain(0) && output.status().failure == FrameGenerationOutputFailure::OutstandingLease,
+        "completed preparations with downstream owners block terminal drain");
+    void* opaque = nullptr;
+    const D3D12_RANGE reads{0, SIZE_T(readDesc.Width)};
+    hr(readback->Map(0, &reads, &opaque), "map fenced private RGB planes");
+    const auto* data = static_cast<const unsigned char*>(opaque);
+    for (unsigned eye = 0; eye < 2; ++eye) for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const auto* color = data + eye * 3 * imageStride + y * rowPitch + x * sizeof(Pixel);
+        const auto* hudless = color + imageStride;
+        const auto* coverage = hudless + imageStride;
+        const Pixel scene = world(0, eye, x, y);
+        const auto nativeHud = filterHud(x, y, eye == 0, [&](unsigned sx, unsigned sy) {
+            return eye == 0 ? layer(eye, sx, sy, true) : emptyLayer;
+        });
+        const auto mult = filterHud(x, y, eye == 0, [&](unsigned sx, unsigned) {
+            return eye == 0 ? multiplyAt(eye, sx, true) : emptyMultiply;
+        });
+        const bool covered = nativeHud != FilteredPixel{0, 0, 0, 255} || mult != FilteredPixel{255, 255, 255, 255};
+        check(std::memcmp(hudless, scene.data(), sizeof(scene)) == 0, "borrowed HUD-less is the exact stereo world");
+        for (unsigned c = 0; c < 3; ++c) {
+            const float expected = nativeHud[c] + scene[c] * nativeHud[3] * mult[c] / (255.f * 255.f);
+            check(std::abs(int(color[c]) - int(std::lround(expected))) <= 1, "full native color uses the shared supersampled blend");
+            check(coverage[c] == (covered ? color[c] : 0),
+                "opaque coverage preserves exact native blend and translucent backing");
+        }
+        check(color[3] == scene[3] && coverage[3] == (covered ? 255 : 0),
+            "native alpha preserved, opaque on covered texels and exact transparent peer");
+    }
+    const D3D12_RANGE noWrites{}; readback->Unmap(0, &noWrites);
+    for (auto& ticket : tickets) ticket = {};
+    check(output.collect() && captured.use_count() == initialOwners && output.drain(0) &&
+        output.status().recompositionRetired == initialStatus.recompositionRetired + 3 &&
+        output.status().submitted == initialStatus.submitted,
+        "released consumers unpin the original source and allow complete drain");
+}
 void run() {
     Runtime runtime;
     FrameGenerationInterop interop;
@@ -239,13 +370,25 @@ void run() {
     while (syntheticReady->GetCompletedValue() < 1 && GetTickCount64() - syntheticStart < 3000) Sleep(1);
     check(syntheticReady->GetCompletedValue() == 1, "synthetic inputs ready before admission stub");
     uint64_t previousAllocation=0;
-    for (unsigned route = 0; route < 10; ++route) {
+    for (unsigned route = 0; route < 11; ++route) {
         const uint64_t sequence = route + 2;
         admission = route == 1 ? FrameGenerationNgxCompletion::Suppressed :
             route == 2 ? FrameGenerationNgxCompletion::FailedEvaluation :
             route == 9 ? FrameGenerationNgxCompletion::Stale : FrameGenerationNgxCompletion::Ready;
         const unsigned multiplier = route == 5 ? 3 : route >= 6 ? 4 : route >= 3 ? 2 : 4;
         const bool nativeOnly=route==0||route==8;
+        const bool recomposed = route == 10;
+        Gate producerGate;
+        ComPtr<ID3D11Fence> producerGate11;
+        Handle producerGateHandle;
+        if (route == 4) {
+            hr(producer5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&producerGate11)), "real producer gate");
+            hr(producerGate11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &producerGateHandle.value),
+                "producer gate NT handle");
+            hr(device12->OpenSharedHandle(producerGateHandle.value, IID_PPV_ARGS(&producerGate.fence)),
+                "same-adapter producer gate control");
+            hr(producer4->Wait(producerGate11.Get(), 1), "pause immutable source producer before capture");
+        }
         check(interop.begin(runtime.producerContext.Get(), sequence, 1), "begin immutable stereo source");
         std::array<std::array<ComPtr<ID3D11Texture2D>, 5>, 2> sources;
         for (unsigned e = 0; e < 2; ++e) {
@@ -275,6 +418,14 @@ void run() {
         }
         auto captured = interop.publish(runtime.producerContext.Get(), sequence, 1, 31);
         check(bool(captured), "publish exact paired source");
+        FrameGenerationOutputSource source; source.previous = metadata(sequence - 1); source.current = metadata(sequence);
+        source.historyGeneration = 1; source.multiplier = multiplier;
+        if (recomposed)
+            for (auto& eye : source.previous.views) eye.position[0] -= .03f;
+        FrameGenerationOutputUi ui[2]; ui[0].useMult = true;
+        ui[1].empty=route==4;
+        if(route==0)source.previous={}; // First native seed has no publishable generated history.
+        if (route == 4) checkRecomposition(*output, device12, queue.Get(), producerGate.fence.Get(), captured, ui, source, *keepAlive);
         hr(queue->Wait(captured->producerFence(), captured->producerValue()), "synthetic backend completion covers current immutable producer");
         hr(queue->Signal(syntheticReady.Get(), sequence), "synthetic backend source completion signal");
         const auto sourceStart = GetTickCount64();
@@ -282,17 +433,13 @@ void run() {
         check(syntheticReady->GetCompletedValue() == sequence, "synthetic source completion is actually fenced");
         FrameGenerationNgxTicket synthetic;
         synthetic.sequence = sequence; synthetic.generatedCount = multiplier - 1; synthetic.evaluationSucceeded = route != 2;
+        synthetic.uiRecomposed = recomposed;
         synthetic.completionFence = syntheticReady.Get(); synthetic.completionValue = sequence;
         auto syntheticOwner = std::make_shared<SyntheticOwner>(); syntheticOwner->fence = syntheticReady;
         for (unsigned e = 0; e < 2; ++e) for (unsigned p = 0; p < 3; ++p) syntheticOwner->resources[e][p] = generated[e][p].privateResource;
         synthetic.lease = std::shared_ptr<FrameGenerationNgxLease>(syntheticOwner,
             reinterpret_cast<FrameGenerationNgxLease*>(syntheticOwner.get()));
         for (unsigned e = 0; e < 2; ++e) for (unsigned p = 0; p < multiplier - 1; ++p) synthetic.generated[e][p] = generated[e][p].privateResource.Get();
-        FrameGenerationOutputSource source; source.previous = metadata(sequence - 1); source.current = metadata(sequence);
-        source.historyGeneration = 1; source.multiplier = multiplier;
-        FrameGenerationOutputUi ui[2]; ui[0].useMult = true;
-        ui[1].empty=route==4;
-        if(route==0)source.previous={}; // First native seed has no publishable generated history.
         if (route == 4 || route == 5) {
             FrameGenerationOutputUi mismatched[] = {ui[0], ui[1]};
             const unsigned eye = route == 4 ? 0 : 1;
@@ -328,6 +475,7 @@ void run() {
         hr(acquired, "acquire actually fenced output"); check(acquired == S_OK && batch.token, "one retained ABI batch transferred");
         check(ticket.exportStatus() == S_FALSE && ticket.acquireBatch(&batch) == S_FALSE, "transferred batch cannot advertise readiness or a second initial token");
         const bool hasGenerated = !nativeOnly&&(route == 0 || route >= 3);
+        const bool hasSeparateUi = hasGenerated && !recomposed;
         check(ticket.generatedCount==(hasGenerated?multiplier-1:0),"internal ticket counts exactly the phases actually submitted");
         if(batch.version==EDVR_FG_BATCH_VERSION_4) {
             check(batch.allocationId!=0,"v4 exports a nonzero allocation-set incarnation");
@@ -344,7 +492,11 @@ void run() {
             }
             batch.allocationId=0;
         }
-        check(batch.uiFlags==(hasGenerated?EDVR_FG_UI_NATIVE_COVERAGE:0u),"only generated batches carry independent native-pose UI");
+        check(batch.uiFlags == (hasSeparateUi ? EDVR_FG_UI_NATIVE_COVERAGE : 0u),
+            "recomposed generated eyes must not be advertised with a second native-pose HUD");
+        if (recomposed) for (unsigned eye = 0; eye < 2; ++eye)
+            check(!batch.uiTextures[eye] && !batch.nativeWorldTextures[eye],
+                "recomposed submission exports only its final stereo phases");
         check(batch.phaseMask == (hasGenerated ? (1u << multiplier) - 1 : 1u), "suppression/error never invents generated readiness");
         check(batch.generatedCount == (hasGenerated ? multiplier - 1 : 0u), "native-only batches advertise zero available generated frames");
         if (multiplier == 3) check(!batch.textures[3][0] && !batch.textures[3][1],
@@ -363,7 +515,7 @@ void run() {
         std::array<std::array<ComPtr<ID3D11Texture2D>, 2>, 6> staging;
         const unsigned phases = hasGenerated ? multiplier : 1;
         for (unsigned p = 0; p < 6; ++p) for (unsigned e = 0; e < 2; ++e) {
-            if(p>=phases&&!(hasGenerated&&p>=4))continue;
+            if(p>=phases&&!(hasSeparateUi&&p>=4))continue;
             ComPtr<ID3D11Texture2D> imported;
             const HANDLE image=p==5?batch.nativeWorldTextures[e]:p==4?batch.uiTextures[e]:batch.textures[p][e];
             hr(consumer1->OpenSharedResource1(image, IID_PPV_ARGS(&imported)), "same-adapter output texture import");
@@ -388,7 +540,7 @@ void run() {
             static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(retired->GetCompletedValue()));
         const auto readbackStarted = GetTickCount64(); unsigned readbackRetries = 0;
         for (unsigned p = 0; p < 6; ++p) for (unsigned e = 0; e < 2; ++e) {
-            if(p>=phases&&!(hasGenerated&&p>=4))continue;
+            if(p>=phases&&!(hasSeparateUi&&p>=4))continue;
             D3D11_MAPPED_SUBRESOURCE mapped{};
             HRESULT mappedResult = DXGI_ERROR_WAS_STILL_DRAWING;
             do {
@@ -420,7 +572,9 @@ void run() {
                     if((p>0&&p<4)||p==5)result=expectedWorld[c];
                     if (p == 4 && !covered) result = 0;
                     check(std::abs(int(actual[c]) - int(std::lround(result))) <= 1,
-                        p==5?"raw native world supports matching HUD composition":p==4?"native-pose UI coverage retains exact production color":p?"generated world contains no native HUD":"native endpoint preserves original UI blend");
+                        p==5?"raw native world supports matching HUD composition":p==4?"native-pose UI coverage retains exact production color":
+                        p ? (recomposed ? "final recomposed phase retains the backend pixels" : "generated world contains no native HUD")
+                          : "native endpoint preserves original UI blend");
                 }
                 check(actual[3] == (p == 4 ? (covered ? 255 : 0) : expectedWorld[3]),
                     "native UI footprint alpha is opaque or transparent; world alpha is preserved");

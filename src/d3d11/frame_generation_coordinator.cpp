@@ -189,12 +189,15 @@ struct Publication {
     FrameGenerationOutputTicket ticket;
     uint64_t sequence, config, history, reflexProof;
     uint32_t multiplier;
+    bool recomposedCockpit = false;
 };
 enum class TemporalSupport : uint8_t { Awaiting, Supported, Unsupported };
 struct Coordinator {
-    Coordinator(ID3D11Device* gameDevice, uint64_t sessionGeneration) : device(gameDevice), generation(sessionGeneration) {}
+    Coordinator(ID3D11Device* gameDevice, uint64_t sessionGeneration, bool recomposeUi = false)
+        : device(gameDevice), generation(sessionGeneration), recomposeUi(recomposeUi) {}
     ID3D11Device* const device; // Immutable identity; host owns its lifetime through close.
     const uint64_t generation;
+    const bool recomposeUi;
     std::atomic<bool> closed{false}, workerStarted{false};
     // The host retains the game device until close reports completion.
     // acquireMutex serializes these shutdown fields with the next acquisition.
@@ -217,6 +220,7 @@ struct Coordinator {
     std::condition_variable wake;
     std::deque<Work> queued;
     std::deque<Publication> ready;
+    uint64_t reportedRecomposedHistory = 0; // queueMutex
     // The thread identity may be checked by a foreign caller. Only the
     // elected render owner reads or changes the capture fields below it.
     std::atomic<DWORD> renderThread{0};
@@ -388,6 +392,12 @@ void promoteReadyLocked(Coordinator& c) noexcept {
         if (FAILED(result)) {item = c.ready.erase(item); continue;}
         if (result == S_OK && item->ticket.generatedCount) {
             exportable = true;
+            if (item->recomposedCockpit && c.reportedRecomposedHistory != item->history) {
+                c.reportedRecomposedHistory = item->history;
+                Log::get().note("native fg: recomposed stereo ready generation=%llu config=%llu history=%llu sequence=%llu hud_eyes=3.",
+                    (unsigned long long)c.generation, (unsigned long long)item->config,
+                    (unsigned long long)item->history, (unsigned long long)item->sequence);
+            }
             if (item->sequence > c.latestReady.load()) {
                 c.latestReady = item->sequence;
                 c.active = item->multiplier;
@@ -440,12 +450,15 @@ bool paths(Coordinator& c) {
     c.data += L"\\NGX-FG";
     return CreateDirectoryW(c.data.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
-bool retireBackendOnly(Work& work, const FrameGenerationNgxTicket& ticket) noexcept {
+bool retireBackendOnly(Work& work, const FrameGenerationNgxTicket& ticket,
+    const FrameGenerationRecompositionTicket& prepared) noexcept {
     if (ticket.completionFence && ticket.completionValue) return work.input->retire(ticket.completionFence, ticket.completionValue);
-    if (!ticket.lease && !ticket.evaluationSucceeded) {work.input->cancel(); return true;}
-    // A nonempty ticket without a completion proof remains quarantined in the
-    // bounded interop ring. Never convert that uncertainty into a cancellation.
-    return false;
+    if (ticket.lease || ticket.evaluationSucceeded) return false;
+    // Preparation can read the source even when NGX declined it. The
+    // original producer must still wait for the last accepted GPU stage.
+    if (prepared.accepted)
+        return prepared.readyFence && prepared.readyValue && work.input->retire(prepared.readyFence, prepared.readyValue);
+    return work.input->cancel();
 }
 // The GPU finished this source, but its presentation lifetime expired while
 // the worker was off CPU. Retire the actual read, drop that history, and leave
@@ -475,6 +488,11 @@ bool drainOutput(FrameGenerationOutput& output) noexcept {
     } while (GetTickCount64() < deadline);
     return output.drain(0);
 }
+bool drainBackend(FrameGenerationNgx* ngx, FrameGenerationOutput* output) noexcept {
+    // NGX holds preparation leases through its last read. Fencing those
+    // reads first lets output drain both its prep and publication rings.
+    return (!ngx || ngx->drain(2000)) && (!output || drainOutput(*output));
+}
 bool pendingRetirement(const FrameGenerationNgx* ngx, const FrameGenerationOutput* output) noexcept {
     if (ngx) {
         const auto status = ngx->status();
@@ -482,7 +500,7 @@ bool pendingRetirement(const FrameGenerationNgx* ngx, const FrameGenerationOutpu
     }
     if (output) {
         const auto status = output->status();
-        if (status.submitted > status.completed) return true;
+        if (status.submitted > status.completed || status.recompositionSubmitted > status.recompositionRetired) return true;
     }
     return false;
 }
@@ -511,7 +529,9 @@ FrameGenerationNgxTicket evaluateSource(Backend& backend,FrameGenerationNgxInput
         for(auto& eye:input.eyes)eye.camera.reset=true;
     } else {
         route=EvaluationRoute::Interpolate;
-        if ((!ui[0].empty || !ui[1].empty) &&
+        const bool recompositionInputs = input.eyes[0].hudless && input.eyes[0].ui &&
+            input.eyes[1].hudless && input.eyes[1].ui;
+        if (!recompositionInputs && (!ui[0].empty || !ui[1].empty) &&
             !fg_coverage::anyFits(source.previous.views,source.current.views,source.multiplier)) {
             route=EvaluationRoute::NativeCoverage;
             return {}; // No NGX commands or reads were submitted for this pair.
@@ -529,8 +549,7 @@ void worker(Coordinator* c) noexcept {
     uint64_t evaluatedHistory=0,coverageSkipped=0,lastCoverageReportMs=0;
     const auto releaseBackend = [&] {
         clearUnexported(*c);
-        if (output) drainOutput(*output);
-        if (ngx) ngx->drain(2000);
+        drainBackend(ngx.get(), output.get());
         output.reset(); ngx.reset(); configured.reset(); multiplier=0;
     };
     const auto discardBackend = [&](uint64_t config,Failure why) {
@@ -571,7 +590,7 @@ void worker(Coordinator* c) noexcept {
             }
             if (configured != work.producer || multiplier != work.source.multiplier) {
                 clearUnexported(*c);
-                if ((output && !drainOutput(*output)) || (ngx && !ngx->drain(2000))) {
+                if (!drainBackend(ngx.get(), output.get())) {
                     work.input->cancel(); discardBackend(work.producer->config,Output); continue;
                 }
                 output.reset(); ngx.reset(); configured = work.producer; multiplier = work.source.multiplier;
@@ -582,6 +601,7 @@ void worker(Coordinator* c) noexcept {
                 init.guideWidth = configured->guideWidth; init.guideHeight = configured->guideHeight; init.multiplier = multiplier;
                 init.creationMode = FrameGenerationNgxCreationMode::OfficialFgHelper;
                 init.suppressionLayout = FrameGenerationNgxSuppressionLayout::SharedNativePair;
+                init.uiRecomposition = c->recomposeUi;
                 init.featureDirectory = c->features.c_str(); init.dataDirectory = c->data.c_str();
                 bool initialized = false;
                 {
@@ -611,8 +631,8 @@ void worker(Coordinator* c) noexcept {
                         uint32_t(s.failure),unsigned(s.lastHresult),unsigned(s.quarantined));
                     work.input->cancel(); discardBackend(work.producer->config,Output); continue;
                 }
-                Log::get().note("native fg: worker initialized multiplier=%u source=%ux%u guides=%ux%u route=official-helper/shared-native-pair mv_units=input-pixels mv_scale_left=(%.9g,%.9g) mv_scale_right=(%.9g,%.9g) jitter_units=clip-space",
-                    multiplier, init.width, init.height, init.guideWidth, init.guideHeight,
+                Log::get().note("native fg: worker initialized multiplier=%u source=%ux%u guides=%ux%u route=official-helper/shared-native-pair ui_recomposition=%u mv_units=input-pixels mv_scale_left=(%.9g,%.9g) mv_scale_right=(%.9g,%.9g) jitter_units=clip-space",
+                    multiplier, init.width, init.height, init.guideWidth, init.guideHeight, unsigned(init.uiRecomposition),
                     double(work.cameras[0].mvecScale[0]), double(work.cameras[0].mvecScale[1]),
                     double(work.cameras[1].mvecScale[0]), double(work.cameras[1].mvecScale[1]));
             }
@@ -628,8 +648,40 @@ void worker(Coordinator* c) noexcept {
                 value.motion = work.input->plane(eye, FrameGenerationPlane::Motion)->resource12;
                 value.camera = work.cameras[eye];
             }
+            FrameGenerationRecompositionTicket prepared;
+            if (c->recomposeUi) {
+                prepared = output->prepareRecomposition(work.input, work.ui, work.source);
+                if (!prepared.accepted) {
+                    work.input->cancel();
+                    const auto status = output->status();
+                    if (status.failed || status.quarantined) discardBackend(work.producer->config, Output);
+                    else refuseOutput(*c, status);
+                    continue;
+                }
+                if (prepared.unsafe || !prepared.readyFence || !prepared.readyValue) {
+                    prepared.lease.reset();
+                    discardBackend(work.producer->config, Output);
+                    continue;
+                }
+                if (!currentWork(*c, work)) {
+                    const bool retired = retireBackendOnly(work, {}, prepared);
+                    prepared.lease.reset();
+                    if (!retired) discardBackend(work.producer->config, Interop);
+                    continue;
+                }
+                input.producerFence = prepared.readyFence;
+                input.producerValue = prepared.readyValue;
+                input.inputLease = prepared.lease;
+                for (unsigned eye = 0; eye < 2; ++eye) {
+                    input.eyes[eye].color = prepared.eyes[eye].color;
+                    input.eyes[eye].hudless = prepared.eyes[eye].hudless;
+                    input.eyes[eye].ui = prepared.eyes[eye].ui;
+                }
+            }
             EvaluationRoute evaluation{};
             auto ticket=evaluateSource(*ngx,input,work.source,work.ui,evaluatedHistory==input.historyGeneration,evaluation);
+            input.inputLease.reset();
+            prepared.lease.reset();
             const bool nativeBootstrap=evaluation==EvaluationRoute::Seed;
             const bool skipNgx=evaluation==EvaluationRoute::NativeCoverage;
             if(skipNgx) {
@@ -648,13 +700,13 @@ void worker(Coordinator* c) noexcept {
             }
             const auto ngxStatus=ngx->status();
             if (terminalNgx(completion,ngxStatus)) {
-                retireBackendOnly(work,ticket);
+                retireBackendOnly(work,ticket,prepared);
                 Log::get().note("native fg: terminal NGX evaluation fault, completion=%u failure=%u ngx=0x%08x hr=0x%08x; native cadence until reselected.",
                     unsigned(completion),uint32_t(ngxStatus.failure),ngxStatus.lastNgxResult,unsigned(ngxStatus.lastHresult));
                 discardBackend(work.producer->config,Ngx);continue;
             }
             if (!currentWork(*c, work)) {
-                retireBackendOnly(work, ticket); continue;
+                retireBackendOnly(work, ticket, prepared); continue;
             }
             if(completion==FrameGenerationNgxCompletion::Stale) {
                 retireStale(*c,work,ticket);continue;
@@ -673,7 +725,12 @@ void worker(Coordinator* c) noexcept {
                         (unsigned long long)input.sequence,uint32_t(completion),unsigned(bool(ticket.lease)),
                         uint32_t(s.failure),s.lastNgxResult,unsigned(s.lastHresult),unsigned(s.quarantined));
                 }
-                retireBackendOnly(work, ticket); refuse(*c, Ngx); continue;
+                retireBackendOnly(work, ticket, prepared); refuse(*c, Ngx); continue;
+            }
+            if (c->recomposeUi && completion == FrameGenerationNgxCompletion::Ready && !ticket.uiRecomposed) {
+                retireBackendOnly(work, ticket, prepared);
+                discardBackend(work.producer->config, Ngx);
+                continue;
             }
             if (nativeBootstrap && evaluatedHistory != input.historyGeneration) {firstSeed=0;notedAdjacent=false;}
             if(!skipNgx)evaluatedHistory=ticket.evaluationSucceeded?input.historyGeneration:0;
@@ -684,7 +741,7 @@ void worker(Coordinator* c) noexcept {
             // this endpoint. Seed the actual backend without occupying a
             // fenced output slot the XR consumer cannot yet poll.
             if ((nativeOnly || completion!=FrameGenerationNgxCompletion::Ready) && !c->active.load()) {
-                if (!retireBackendOnly(work,ticket) || (ticket.evaluationSucceeded && (!ticket.completionFence || !ticket.completionValue))) {
+                if (!retireBackendOnly(work,ticket,prepared) || (ticket.evaluationSucceeded && (!ticket.completionFence || !ticket.completionValue))) {
                     discardBackend(work.producer->config,Ngx); continue;
                 }
                 if (nativeBootstrap && ticket.evaluationSucceeded && !firstSeed) {
@@ -704,7 +761,7 @@ void worker(Coordinator* c) noexcept {
                         (unsigned long long)input.sequence,uint32_t(outputStatus.failure),unsigned(outputStatus.lastHresult),
                         unsigned(outputStatus.quarantined),uint32_t(completion));
                 }
-                retireBackendOnly(work, ticket);
+                retireBackendOnly(work, ticket, prepared);
                 if (outputStatus.failed || outputStatus.quarantined) discardBackend(work.producer->config,Output);
                 else refuseOutput(*c, outputStatus);
                 continue;
@@ -731,7 +788,8 @@ void worker(Coordinator* c) noexcept {
                 if (c->ready.size() >= 3) {++c->busyPairs;}
                 else {
                     c->ready.push_back({std::move(published), work.source.current.sequence,
-                        work.source.current.configGeneration, work.source.historyGeneration, work.reflexProof, multiplier});
+                        work.source.current.configGeneration, work.source.historyGeneration, work.reflexProof, multiplier,
+                        ticket.uiRecomposed && !work.ui[0].empty && !work.ui[1].empty});
                 }
             }
             c->wake.notify_all();
@@ -976,7 +1034,12 @@ HRESULT nativeFgAcquire(const EdvrFgRequest* request, EdvrFgTable* table) noexce
             if (old->quarantined) return E_NOINTERFACE;
         }
         if (contextCount == contexts.size()) return E_OUTOFMEMORY;
-        auto* c = new Coordinator(request->gameDevice, request->generation);
+        // A process-local switch lets the automated qualification choose
+        // recomposition without modifying saved graphics or FG settings.
+        wchar_t qualification[2]{};
+        const bool recomposeUi = GetEnvironmentVariableW(L"EDUP_TEST_FG_UI_RECOMPOSITION", qualification, 2) == 1 &&
+            qualification[0] == L'1';
+        auto* c = new Coordinator(request->gameDevice, request->generation, recomposeUi);
         contexts[contextCount++].store(c, std::memory_order_release); current.store(c, std::memory_order_release);
         *table = {}; table->size = sizeof(*table); table->version = 1; table->context = c;
         table->getStatus = status; table->beginSource = beginSource; table->poll = poll;
@@ -1024,6 +1087,11 @@ void nativeFgServiceProducer(uint64_t generation) noexcept {
     }
 }
 namespace {
+bool captureMayInterpolate(const Coordinator& c, const EdvrFgSource& previous, const EdvrFgSource& currentSource,
+    unsigned multiplier, bool covered) noexcept {
+    return c.recomposeUi || !covered || fg_coverage::anyFits(previous.views, currentSource.views, multiplier);
+}
+
 // One generation cut per loss of capture permission. Sealing partial GPU
 // commands remains render-owner work even when another thread already reset.
 void suspendCoverage(Coordinator& c, bool protectedMotion) noexcept {
@@ -1073,7 +1141,7 @@ void observeDoor(Coordinator& c, unsigned eye, bool admitted, bool hasUi) noexce
         // anchor. It cannot qualify A/B or supersede the preceding cut.
         ++c.coverageUnknown;
         c.eligibleStreak = 0; c.lastEligible = 0;
-    } else if (c.previousCovered && !fg_coverage::anyFits(pair.previous.views,pair.current.views,pair.multiplier)) {
+    } else if (!captureMayInterpolate(c, pair.previous, pair.current, pair.multiplier, c.previousCovered)) {
         ++c.coverageBlocked;
         suspendCoverage(c,true);
     } else {
@@ -1141,7 +1209,7 @@ void nativeFgBeforeTemporalEye(uint64_t sequence, unsigned eye, ID3D11Texture2D*
                 c->metadataSequence = sequence; c->metadataHistory = c->captureHistory;
                 c->captureAllowed = c->observedAdjacent && c->eligibleStreak >= 2 &&
                     c->lastEligible == c->previousSource.sequence &&
-                    (!c->previousCovered || fg_coverage::anyFits(c->previousSource.views,c->source.views,c->capture.source.multiplier));
+                    captureMayInterpolate(*c, c->previousSource, c->source, c->capture.source.multiplier, c->previousCovered);
                 if (c->captureAllowed) ++c->captureStarts;
             }
         }
@@ -1502,6 +1570,16 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
         pair.current.views[1].position[0]=100.f;
         evaluateSource(recorder,input,pair,ui,false,route);
         check(route==EvaluationRoute::Seed&&recorder.count==4);
+        auto* captured = reinterpret_cast<ID3D12Resource*>(static_cast<uintptr_t>(1));
+        input.eyes[0].hudless = input.eyes[0].ui = captured;
+        evaluateSource(recorder,input,pair,ui,true,route);
+        check(route==EvaluationRoute::NativeCoverage&&recorder.count==4);
+        input.eyes[1].hudless = input.eyes[1].ui = captured;
+        evaluateSource(recorder,input,pair,ui,true,route);
+        check(route==EvaluationRoute::Interpolate&&recorder.count==5);
+        Coordinator legacyCapture(nullptr, 1), recomposedCapture(nullptr, 1, true);
+        check(!captureMayInterpolate(legacyCapture,pair.previous,pair.current,pair.multiplier,true));
+        check(captureMayInterpolate(recomposedCapture,pair.previous,pair.current,pair.multiplier,true));
     }
     NativeFgGuides guide;
     guide.width = 2133; guide.height = 1600;

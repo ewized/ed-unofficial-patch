@@ -292,6 +292,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EyeCapture previousPair;
   NativeFgClient frameGeneration;
   uint64_t fgUiPresented=0;
+  uint64_t fgTranslatedGeneratedPresented=0;
+  double fgLargestGeneratedOpticalCenterShift=0.;
   using FgCreditRequest=NativeFgCreditRequest;
   NativeFgCreditLoan fgCreditLoan;
   std::shared_ptr<FgCreditRequest> fgCredit;

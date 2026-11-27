@@ -20,6 +20,7 @@ namespace {
 constexpr unsigned kSlots = 3, kUiImage = EDVR_FG_MAX_PHASES,
     kNativeWorldImage = EDVR_FG_MAX_PHASES + 1,
     kDescriptors = (EDVR_FG_MAX_PHASES + 2) * 2 * 4;
+constexpr unsigned imageBit(unsigned phase) noexcept { return 1u << phase; }
 enum Consumer : unsigned { Discarded, Unsubmitted, Attaching, Submitted };
 // Shared by every publisher/ring in this process. Exhaustion latches instead
 // of wrapping an allocation incarnation onto a still-cached old identity.
@@ -224,6 +225,8 @@ struct FrameGenerationOutput::Impl {
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
     std::array<std::shared_ptr<FrameGenerationOutputLease>, kSlots> slots;
+    // Preparing NGX inputs must not consume slots held by the XR reader.
+    std::array<std::shared_ptr<FrameGenerationOutputLease>, kSlots> preparations;
     ~Impl() { if (event) CloseHandle(event); }
     bool fail(FrameGenerationOutputFailure reason, HRESULT hr = E_FAIL, bool fatal = true) noexcept {
         status.failure = reason; status.lastHresult = hr;
@@ -233,15 +236,31 @@ struct FrameGenerationOutput::Impl {
     bool owning() noexcept {
         return GetCurrentThreadId() == owner || fail(FrameGenerationOutputFailure::WrongThread, E_UNEXPECTED, false);
     }
+    void releaseInputs(FrameGenerationOutputLease& slot) noexcept {
+        slot.input.reset(); slot.backend = {};
+        for (auto& eye : slot.inputs) for (auto& input : eye) input.Reset();
+    }
     bool collect() noexcept {
         const auto done = fence ? fence->GetCompletedValue() : 0;
         if (done == UINT64_MAX) { status.quarantined = true; return fail(FrameGenerationOutputFailure::DeviceRemoved, DXGI_ERROR_DEVICE_REMOVED); }
         for (auto& slot : slots) if (slot && slot->value) {
             if (complete(done, slot->value)) {
-                slot->input.reset(); slot->backend = {};
-                for (auto& eye : slot->inputs) for (auto& input : eye) input.Reset();
+                releaseInputs(*slot);
                 if (!slot->counted) { slot->counted = true; ++status.completed; }
             } else if (GetTickCount64() - slot->submittedMs >= timeoutMs) {
+                status.quarantined = true; fail(FrameGenerationOutputFailure::Timeout, HRESULT_FROM_WIN32(WAIT_TIMEOUT));
+            }
+        }
+        for (auto& prep : preparations) if (prep && prep->value) {
+            if (complete(done, prep->value)) {
+                // Downstream GPU work borrows the original HUD-less image.
+                // Its preparation lease keeps that producer's pixels immutable.
+                if (!prep->counted && prep.use_count() == 1) {
+                    releaseInputs(*prep);
+                    prep->counted = true;
+                    ++status.recompositionRetired;
+                }
+            } else if (GetTickCount64() - prep->submittedMs >= timeoutMs) {
                 status.quarantined = true; fail(FrameGenerationOutputFailure::Timeout, HRESULT_FROM_WIN32(WAIT_TIMEOUT));
             }
         }
@@ -281,7 +300,7 @@ struct FrameGenerationOutput::Impl {
         hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline));
         return SUCCEEDED(hr) || fail(FrameGenerationOutputFailure::Shader, hr);
     }
-    bool prepare(FrameGenerationOutputLease& slot, unsigned phases,bool separateUi) noexcept {
+    bool prepare(FrameGenerationOutputLease& slot, unsigned imageMask, bool shared) noexcept {
         HRESULT hr = S_OK;
         bool changed=false;
         if (!slot.allocator) {
@@ -293,16 +312,16 @@ struct FrameGenerationOutput::Impl {
             heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(hr = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&slot.descriptors)))) return fail(FrameGenerationOutputFailure::Allocation, hr);
             slot.device = device; slot.ready = fence;
-            if (FAILED(hr = device->CreateSharedHandle(fence.Get(), nullptr, GENERIC_ALL, nullptr, &slot.readyHandle)))
+            if (shared && FAILED(hr = device->CreateSharedHandle(fence.Get(), nullptr, GENERIC_ALL, nullptr, &slot.readyHandle)))
                 return fail(FrameGenerationOutputFailure::Allocation, hr);
         }
         for (unsigned p = 0; p <= kNativeWorldImage; ++p) for (unsigned e = 0; e < 2; ++e) {
-            if(p>=phases&&!(separateUi&&(p==kUiImage||p==kNativeWorldImage)))continue;
+            if (!(imageMask & imageBit(p))) continue;
             auto& image = slot.images[p][e];
-            if (image.resource&&image.handle) continue;
+            if (image.resource && (!shared || image.handle)) continue;
             // Adding generated/UI images changes the whole immutable set even
             // when its already-allocated native endpoint stays the same.
-            if(!changed) {
+            if(shared && !changed) {
                 const auto allocation=nextAllocationId();
                 if(!allocation)return fail(FrameGenerationOutputFailure::Allocation,E_UNEXPECTED);
                 slot.allocationId=allocation;changed=true;
@@ -316,17 +335,40 @@ struct FrameGenerationOutput::Impl {
             // cross-API description must represent those semantics even though
             // our fences prohibit concurrent publication/consumer writes.
             // https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html
-            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
-                D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if (shared) desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
             ComPtr<ID3D12Resource> resource;HANDLE handle=nullptr;
-            if (FAILED(hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
+            if (FAILED(hr = device->CreateCommittedResource(&heap, shared ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE, &desc,
                     D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource))) ||
-                FAILED(hr = device->CreateSharedHandle(resource.Get(), nullptr, GENERIC_ALL, nullptr, &handle)))
+                (shared && FAILED(hr = device->CreateSharedHandle(resource.Get(), nullptr, GENERIC_ALL, nullptr, &handle))))
                 return fail(FrameGenerationOutputFailure::Allocation, hr);
             if(image.handle)CloseHandle(image.handle);
             image.resource=std::move(resource);image.handle=handle;
         }
-        return slot.allocationId!=0||fail(FrameGenerationOutputFailure::Allocation,E_UNEXPECTED);
+        return !shared || slot.allocationId != 0 || fail(FrameGenerationOutputFailure::Allocation, E_UNEXPECTED);
+    }
+    bool bindInputs(FrameGenerationOutputLease& slot, const FrameGenerationInteropLease& input,
+        const FrameGenerationOutputUi (&ui)[2]) noexcept {
+        constexpr FrameGenerationPlane roles[] = {FrameGenerationPlane::Color,
+            FrameGenerationPlane::UiColorTransmittance, FrameGenerationPlane::UiMultiply};
+        for (unsigned e = 0; e < 2; ++e) {
+            const auto* hud = input.plane(e, FrameGenerationPlane::UiColorTransmittance);
+            if (!hud || (!ui[e].empty && !uiLayerFgSupportedSize(width, height, hud->sourceDesc.Width, hud->sourceDesc.Height)))
+                return fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false);
+            for (unsigned i = 0; i < std::size(roles); ++i) {
+                const auto* plane = input.plane(e, roles[i]);
+                // Only the HUD and an active multiply plane share the HUD
+                // extent. Neutral placeholders use the native eye extent.
+                const bool atHudExtent = (i == 1 && !ui[e].empty) || (i == 2 && ui[e].useMult);
+                const unsigned w = atHudExtent ? hud->sourceDesc.Width : width;
+                const unsigned h = atHudExtent ? hud->sourceDesc.Height : height;
+                if (!plane || plane->state != D3D12_RESOURCE_STATE_COMMON ||
+                    !texture(device.Get(), plane->resource12, w, h, i == 0))
+                    return fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false);
+                slot.inputs[e][i] = plane->resource12;
+            }
+        }
+        return true;
     }
     void metadata(FrameGenerationOutputLease& slot, const FrameGenerationOutputSource& source, bool generated) noexcept {
         auto& batch = slot.batch; batch = {};
@@ -481,31 +523,12 @@ FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<
         if (!*selected) *selected = std::make_shared<FrameGenerationOutputLease>();
         auto& slot = **selected;
         const unsigned phases = generated ? source.multiplier : 1;
-        const bool separateUi=generated&&(!ui[0].empty||!ui[1].empty);
-        if (!data.prepare(slot, phases,separateUi)) return ticket;
-        const FrameGenerationPlane roles[3] = {FrameGenerationPlane::Color,
-            FrameGenerationPlane::UiColorTransmittance, FrameGenerationPlane::UiMultiply};
-        for (unsigned e = 0; e < 2; ++e) {
-            const auto* hud = input->plane(e, FrameGenerationPlane::UiColorTransmittance);
-            const unsigned hudWidth = hud ? hud->sourceDesc.Width : 0;
-            const unsigned hudHeight = hud ? hud->sourceDesc.Height : 0;
-            if (!hud || (!ui[e].empty && !uiLayerFgSupportedSize(data.width, data.height, hudWidth, hudHeight))) {
-                data.fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false); return ticket;
-            }
-            for (unsigned i = 0; i < 3; ++i) {
-                const auto* plane = input->plane(e, roles[i]);
-                // Only the HUD and an active multiply plane share the HUD
-                // extent. Neutral placeholders use the native eye extent.
-                const bool atHudExtent = (i == 1 && !ui[e].empty) || (i == 2 && ui[e].useMult);
-                const unsigned expectedWidth = atHudExtent ? hudWidth : data.width;
-                const unsigned expectedHeight = atHudExtent ? hudHeight : data.height;
-                if (!plane || plane->state != D3D12_RESOURCE_STATE_COMMON ||
-                    !texture(data.device.Get(), plane->resource12, expectedWidth, expectedHeight, i == 0)) {
-                    data.fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false); return ticket;
-                }
-                slot.inputs[e][i] = plane->resource12;
-            }
-        }
+        // Recomposition already includes coverage in each generated eye.
+        // The native endpoint still uses the original immutable HUD inputs.
+        const bool separateUi = generated && !backend.uiRecomposed && (!ui[0].empty || !ui[1].empty);
+        const unsigned images = (imageBit(phases) - 1u) |
+            (separateUi ? imageBit(kUiImage) | imageBit(kNativeWorldImage) : 0u);
+        if (!data.prepare(slot, images, true) || !data.bindInputs(slot, *input, ui)) return ticket;
         if (generated) for (unsigned e = 0; e < 2; ++e) for (unsigned i = 0; i < backend.generatedCount; ++i)
             if (!texture(data.device.Get(), backend.generated[e][i], data.width, data.height, true)) {
                 data.fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false); return ticket;
@@ -568,6 +591,83 @@ FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<
         return ticket;
     } catch (...) { data.fail(FrameGenerationOutputFailure::Allocation, E_OUTOFMEMORY); return ticket; }
 }
+FrameGenerationRecompositionTicket FrameGenerationOutput::prepareRecomposition(
+    const std::shared_ptr<FrameGenerationInteropLease>& input, const FrameGenerationOutputUi (&ui)[2],
+    const FrameGenerationOutputSource& source) noexcept {
+    FrameGenerationRecompositionTicket ticket;
+    if (!impl_) return ticket;
+    auto& data = *impl_;
+    std::lock_guard<std::mutex> lock(data.mutex);
+    try {
+        if (!data.owning() || !data.status.initialized || !data.collect()) return ticket;
+        if (!input || input->sequence() != source.current.sequence || input->historyGeneration() != source.historyGeneration ||
+            !pairValid(source, data.width, data.height, false) || !uiValid(ui[0]) || !uiValid(ui[1])) {
+            data.fail(FrameGenerationOutputFailure::InvalidMetadata, E_INVALIDARG, false); return ticket;
+        }
+        auto* producer = input->producerFence();
+        const auto producerValue = input->producerValue();
+        if (!producerValue || producerValue == UINT64_MAX || !belongs(data.device.Get(), producer)) {
+            data.fail(FrameGenerationOutputFailure::InvalidArgument, E_INVALIDARG, false); return ticket;
+        }
+        if (producer->GetCompletedValue() == UINT64_MAX) {
+            data.fail(FrameGenerationOutputFailure::DeviceRemoved, DXGI_ERROR_DEVICE_REMOVED); return ticket;
+        }
+        std::shared_ptr<FrameGenerationOutputLease>* selected = nullptr;
+        for (auto& candidate : data.preparations) if (data.canReuse(candidate)) { selected = &candidate; break; }
+        if (!selected) { data.fail(FrameGenerationOutputFailure::Busy, S_FALSE, false); return ticket; }
+        if (!*selected) *selected = std::make_shared<FrameGenerationOutputLease>();
+        auto& slot = **selected;
+        if (!data.prepare(slot, imageBit(0) | imageBit(kUiImage), false) || !data.bindInputs(slot, *input, ui)) return ticket;
+
+        HRESULT hr = slot.allocator->Reset();
+        if (FAILED(hr) || FAILED(hr = slot.list->Reset(slot.allocator.Get(), data.pipeline.Get()))) {
+            data.fail(FrameGenerationOutputFailure::Queue, hr); return ticket;
+        }
+        auto* list = slot.list.Get();
+        ID3D12DescriptorHeap* heaps[] = {slot.descriptors.Get()};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootSignature(data.root.Get());
+        for (unsigned e = 0; e < 2; ++e) {
+            for (unsigned i = 1; i < 3; ++i)
+                transition(list, slot.inputs[e][i].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            auto* world = slot.inputs[e][0].Get();
+            data.composite(slot, world, 0, e, ui[e], D3D12_RESOURCE_STATE_COMMON);
+            auto coverage = ui[e];
+            coverage.empty = false; // The validated neutral input still renders transparent RGBA in mode 2.
+            data.composite(slot, world, kUiImage, e, coverage, D3D12_RESOURCE_STATE_COMMON, 2);
+            for (unsigned i = 1; i < 3; ++i)
+                transition(list, slot.inputs[e][i].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        }
+        if (FAILED(hr = list->Close())) { data.fail(FrameGenerationOutputFailure::Queue, hr); return ticket; }
+        if (data.serial == UINT64_MAX - 1) { data.fail(FrameGenerationOutputFailure::Queue, E_UNEXPECTED); return ticket; }
+        slot.input = input;
+        data.drained = false;
+        if (FAILED(hr = data.queue->Wait(producer, producerValue))) {
+            data.fail(FrameGenerationOutputFailure::Queue, hr); return ticket;
+        }
+        ID3D12CommandList* lists[] = {list};
+        data.queue->ExecuteCommandLists(1, lists);
+        ticket.accepted = true;
+        ticket.lease = *selected;
+        slot.submittedMs = GetTickCount64();
+        slot.counted = false;
+        slot.value = ++data.serial;
+        if (FAILED(hr = data.queue->Signal(data.fence.Get(), slot.value))) {
+            slot.unsafe = true; data.unsafe = true; data.status.quarantined = true;
+            data.fail(FrameGenerationOutputFailure::Queue, hr); ticket.unsafe = true; return ticket;
+        }
+        data.lastFence = slot.value;
+        ++data.status.recompositionSubmitted;
+        ticket.readyFence = data.fence.Get();
+        ticket.readyValue = slot.value;
+        for (unsigned e = 0; e < 2; ++e)
+            ticket.eyes[e] = {slot.images[0][e].resource.Get(), slot.inputs[e][0].Get(),
+                slot.images[kUiImage][e].resource.Get()};
+        data.status.failure = FrameGenerationOutputFailure::None;
+        data.status.lastHresult = S_OK;
+        return ticket;
+    } catch (...) { data.fail(FrameGenerationOutputFailure::Allocation, E_OUTOFMEMORY); return ticket; }
+}
 bool FrameGenerationOutput::collect() noexcept {
     if (!impl_) return false;
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -584,6 +684,9 @@ bool FrameGenerationOutput::drain(uint32_t timeoutMs) noexcept {
     }
     data.collect();
     for (const auto& slot : data.slots) if (!data.canReuse(slot)) {
+        data.fail(FrameGenerationOutputFailure::OutstandingLease, S_FALSE, false); return false;
+    }
+    for (const auto& prep : data.preparations) if (!data.canReuse(prep)) {
         data.fail(FrameGenerationOutputFailure::OutstandingLease, S_FALSE, false); return false;
     }
     data.drained = true;

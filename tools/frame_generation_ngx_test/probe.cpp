@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 using namespace edvr;
@@ -80,30 +81,60 @@ int barLeft(unsigned width,unsigned frame,unsigned eye){
     return int(width/4)+(eye==0?2:-2)+step*(tick<=6?tick:12-tick);
 }
 
+enum class HudFixture { None, Alpha, Opaque, Neutral, Control };
+const char* hudFixtureName(HudFixture fixture) {
+    switch (fixture) {
+    case HudFixture::Alpha: return "alpha";
+    case HudFixture::Opaque: return "opaque";
+    case HudFixture::Neutral: return "neutral";
+    case HudFixture::Control: return "control";
+    default: return "none";
+    }
+}
+bool hasHud(HudFixture fixture, unsigned eye) {
+    return fixture != HudFixture::None && !(fixture == HudFixture::Neutral && eye == 1);
+}
+int hudLeft(unsigned width, unsigned frame, unsigned eye) {
+    // The panel travels the opposite direction to the world edge. Its
+    // translucent interior always contains at least one world edge.
+    const int travel = barLeft(width, frame, eye) - barLeft(width, 1, eye);
+    return int(width * 5 / 16) + (eye == 0 ? -2 : 2) - travel * 3 / 4;
+}
+
 struct EdgeMeasurement {
     int left=-1,right=-1,spread=0;
     bool eyeMatches=false;
 };
 
-// Read the green foreground silhouette on one scanline. Two contrast levels
-// measure edge spread, distinguishing translation from an endpoint crossfade.
-EdgeMeasurement measureBar(const uint8_t* row,int width,unsigned eye){
+template<class Score>
+EdgeMeasurement measureEdges(int width, Score score, int low, int middle, int high) {
     EdgeMeasurement out;
-    const auto first=[&](int threshold,bool reverse){
-        int run=0;
-        for(int i=0;i<width;++i){
-            const int x=reverse?width-1-i:i;
-            run=row[4*x+1]>=threshold?run+1:0;
-            if(run==3)return reverse?x+3:x-2; // right is exclusive
+    const auto first = [&](int threshold, bool reverse) {
+        int run = 0;
+        for (int i = 0; i < width; ++i) {
+            const int x = reverse ? width - 1 - i : i;
+            run = score(x) >= threshold ? run + 1 : 0;
+            if (run == 3) return reverse ? x + 3 : x - 2; // right is exclusive
         }
         return -1;
     };
-    const int lowLeft=first(64,false),highLeft=first(170,false);
-    const int lowRight=first(64,true),highRight=first(170,true);
-    out.left=first(120,false);out.right=first(120,true);
-    if(lowLeft<0||highLeft<0||lowRight<0||highRight<0)return out;
-    out.spread=(std::max)(highLeft-lowLeft,lowRight-highRight);
-    out.eyeMatches=true;
+    const int lowLeft = first(low, false), highLeft = first(high, false);
+    const int lowRight = first(low, true), highRight = first(high, true);
+    out.left = first(middle, false);
+    out.right = first(middle, true);
+    if (lowLeft < 0 || highLeft < 0 || lowRight < 0 || highRight < 0) {
+        out.left = out.right = -1;
+        return out;
+    }
+    out.spread = (std::max)(highLeft - lowLeft, lowRight - highRight);
+    return out;
+}
+
+// Read the green foreground silhouette on one scanline. Two contrast levels
+// measure edge spread, distinguishing translation from an endpoint crossfade.
+EdgeMeasurement measureBar(const uint8_t* row,int width,unsigned eye){
+    auto out = measureEdges(width, [&](int x) { return row[4*x + 1]; }, 64, 120, 170);
+    out.eyeMatches = out.left >= 0;
     for(int x:{width/16,width-width/16}){
         const auto* sample=row+x*4;
         const int tint=int(sample[eye==0?0:2])-int(sample[eye==0?2:0]);
@@ -112,21 +143,79 @@ EdgeMeasurement measureBar(const uint8_t* row,int width,unsigned eye){
     return out;
 }
 
+int hudScore(const uint8_t* pixel) {
+    return int(pixel[0]) + int(pixel[2]) - 2 * int(pixel[1]);
+}
+EdgeMeasurement measureHud(const uint8_t* row, int width, unsigned eye) {
+    auto out = measureEdges(width, [&](int x) { return hudScore(row + 4*x); }, 90, 125, 150);
+    if (out.left < 0) return out;
+    const auto* center = row + 4 * ((out.left + out.right) / 2);
+    out.eyeMatches = int(center[eye == 0 ? 0 : 2]) - int(center[eye == 0 ? 2 : 0]) >= 18;
+    return out;
+}
+
+bool followsEdge(int edge, int oldEdge, int previous, int current, unsigned index, unsigned multiplier) {
+    const int direction = current > previous ? 1 : -1;
+    const double substep = std::abs(current - previous) / double(multiplier);
+    const double expected = previous + (current - previous) * double(index) / multiplier;
+    const double tolerance = (std::max)(2.0, substep * .5);
+    return (edge - previous) * direction >= 2 && (current - edge) * direction >= 2 &&
+           (edge - oldEdge) * direction >= 2 && std::abs(edge - expected) <= tolerance;
+}
+
 // The fixture measures image motion, independently of NGX's success code.
 // Allow deviations of half an inter-phase step. Also require movement away
 // from both native endpoints and forward progress from the previous phase.
 bool followsMotion(const EdgeMeasurement& measured,const EdgeMeasurement& prior,
                    int previous,int current,int barWidth,unsigned index,unsigned multiplier){
-    const int direction=current>previous?1:-1;
     const double substep=std::abs(current-previous)/double(multiplier);
-    const double expected=previous+(current-previous)*double(index)/multiplier;
-    const double tolerance=(std::max)(2.0,substep*.5);
-    const auto inside=[&](int edge,int oldEdge){
-        return (edge-previous)*direction>=2&&(current-edge)*direction>=2&&
-               (edge-oldEdge)*direction>=2&&std::abs(edge-expected)<=tolerance;
-    };
     return measured.eyeMatches&&measured.spread<=substep*.75+1&&
-        inside(measured.left,prior.left)&&inside(measured.right-barWidth,prior.right-barWidth);
+        followsEdge(measured.left,prior.left,previous,current,index,multiplier)&&
+        followsEdge(measured.right-barWidth,prior.right-barWidth,previous,current,index,multiplier);
+}
+
+struct VisibleWorldEdge {
+    int expected = -1, measured = -1;
+    bool matches = false;
+};
+// The green channel still carries the world edge beneath the magenta panel.
+// Look for a single transition away from the panel's own boundaries.
+VisibleWorldEdge measureWorldThroughHud(const uint8_t* row, const EdgeMeasurement& hud,
+    int previous, int current, int width, unsigned index, unsigned multiplier) {
+    if (!hud.eyeMatches) return {};
+    const int center = int(std::lround(previous + (current - previous) * double(index) / multiplier));
+    const int radius = (std::max)(3, int(std::ceil(std::abs(current - previous) / (2.0 * multiplier))));
+    VisibleWorldEdge observation{};
+    for (int offset : {0, width}) {
+        const int expected = center + offset;
+        if (expected - radius - 3 < hud.left || expected + radius + 3 >= hud.right) continue;
+        const auto bright = [&](int x) { return row[4*x + 1] >= 60; };
+        int crossings = 0, measured = -1;
+        for (int x = expected - radius; x <= expected + radius; ++x) {
+            if (bright(x - 1) == bright(x)) continue;
+            ++crossings;
+            if (bright(x) == (offset == 0) && bright(x - 3) == bright(x - 1) && bright(x + 2) == bright(x))
+                measured = x;
+        }
+        if (crossings == 1 && measured >= 0 &&
+            followsEdge(measured - offset, previous, previous, current, index, multiplier))
+            return {expected, measured, true};
+        observation = {expected, measured, false};
+    }
+    return observation;
+}
+
+using ProbeColor = std::array<float, 4>;
+ProbeColor worldBackground(unsigned eye) {
+    return {eye == 0 ? 66.f/255.f : 10.f/255.f, 20.f/255.f, eye == 0 ? 10.f/255.f : 66.f/255.f, 1.f};
+}
+constexpr ProbeColor worldBar{217.f/255.f, 217.f/255.f, 166.f/255.f, 1.f};
+ProbeColor translucentHud(unsigned eye) {
+    return {eye == 0 ? 125.f/255.f : 63.f/255.f, 0.f, eye == 0 ? 63.f/255.f : 125.f/255.f, 128.f/255.f};
+}
+ProbeColor blendHud(ProbeColor world, const ProbeColor& hud) {
+    for (unsigned c = 0; c < 3; ++c) world[c] = hud[c] + world[c] * (1.f - hud[3]);
+    return world;
 }
 
 // Exercise the image check on the default CPU-only build gate. A valid
@@ -155,19 +244,94 @@ bool edgeCheckSelfTest(){
         !match(blend,native)&&!match(middle,measureBar(middle.data(),width,0));
 }
 
+bool hudFixtureSelfTest() {
+    for (unsigned width : {256u, 1280u, 3560u}) for (unsigned eye = 0; eye < 2; ++eye) {
+        const int worldWidth = int(width / 4), panelWidth = int(width * 2 / 3);
+        const auto paint = [&](int world, int panel, unsigned paintedEye) {
+            std::vector<uint8_t> row(width * 4);
+            for (int x = 0; x < int(width); ++x) {
+                auto pixel = x >= world && x < world + worldWidth ? worldBar : worldBackground(paintedEye);
+                if (x >= panel && x < panel + panelWidth) pixel = blendHud(pixel, translucentHud(paintedEye));
+                for (unsigned c = 0; c < 4; ++c) row[4*x + c] = uint8_t(std::lround(255.f * pixel[c]));
+            }
+            return row;
+        };
+        for (unsigned frame = 2; frame <= 13; ++frame) {
+            const int worldA = barLeft(width, frame - 1, eye), worldB = barLeft(width, frame, eye);
+            const int hudA = hudLeft(width, frame - 1, eye), hudB = hudLeft(width, frame, eye);
+            const int middleWorld = int(std::lround((worldA + worldB) * .5));
+            const int middleHud = int(std::lround((hudA + hudB) * .5));
+            const EdgeMeasurement oldHud{hudA, hudA + panelWidth, 0, true};
+            const auto checkHud = [&](const std::vector<uint8_t>& row) {
+                auto hud = measureHud(row.data(), int(width), eye);
+                return followsMotion(hud, oldHud, hudA, hudB, panelWidth, 1, 2);
+            };
+            const auto good = paint(middleWorld, middleHud, eye);
+            const auto frozenWorld = paint(worldB, middleHud, eye);
+            const auto hudAtEndpoint = paint(middleWorld, hudB, eye);
+            const auto swappedHud = paint(middleWorld, middleHud, 1 - eye);
+            const auto neutral = paint(middleWorld, int(width), eye);
+            const auto hud = measureHud(good.data(), int(width), eye);
+            if (!checkHud(good) || checkHud(hudAtEndpoint) || checkHud(swappedHud) ||
+                measureHud(neutral.data(), int(width), eye).left >= 0 ||
+                !measureWorldThroughHud(good.data(), hud, worldA, worldB, worldWidth, 1, 2).matches ||
+                measureWorldThroughHud(frozenWorld.data(), hud, worldA, worldB, worldWidth, 1, 2).matches)
+                return false;
+        }
+    }
+    return true;
+}
+
+// Composite, HUD-less, and UI all use the same eye-sized SDR grid. In opaque
+// coverage mode, a covered UI texel includes the exact B background, as ED-UP
+// currently does for alpha/multiply. The native color is identical either way.
+void drawColorInputs(ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE handle,
+    unsigned plane, unsigned width, unsigned height, unsigned frame, unsigned eye, HudFixture fixture) {
+    const int left = barLeft(width, frame, eye);
+    const D3D12_RECT world{left, LONG(height / 4), left + LONG(width / 4), LONG(3 * height / 4)};
+    const auto background = worldBackground(eye);
+    constexpr ProbeColor transparent{};
+    const bool ui = plane == 4;
+    const auto& clear = ui ? transparent : background;
+    list->ClearRenderTargetView(handle, clear.data(), 0, nullptr);
+    if (!ui) list->ClearRenderTargetView(handle, worldBar.data(), 1, &world);
+    if (plane == 3 || !hasHud(fixture, eye)) return;
+
+    const int panelLeft = hudLeft(width, frame, eye);
+    const D3D12_RECT panel{panelLeft, LONG(3 * height / 8), panelLeft + LONG(width * 2 / 3), LONG(7 * height / 8)};
+    const auto hud = translucentHud(eye);
+    if (ui && fixture != HudFixture::Opaque) {
+        list->ClearRenderTargetView(handle, hud.data(), 1, &panel);
+        return;
+    }
+    const auto coveredBackground = blendHud(background, hud);
+    const auto coveredWorld = blendHud(worldBar, hud);
+    list->ClearRenderTargetView(handle, coveredBackground.data(), 1, &panel);
+    const D3D12_RECT overlap{
+        (std::max)(panel.left, world.left), (std::max)(panel.top, world.top),
+        (std::min)(panel.right, world.right), (std::min)(panel.bottom, world.bottom),
+    };
+    if (overlap.left < overlap.right && overlap.top < overlap.bottom)
+        list->ClearRenderTargetView(handle, coveredWorld.data(), 1, &overlap);
+}
+
 void drawInputs(ID3D12GraphicsCommandList* list,D3D12_CPU_DESCRIPTOR_HANDLE handle,
                 unsigned plane,unsigned width,unsigned height,unsigned guideWidth,unsigned guideHeight,
-                unsigned frame,unsigned eye){
+                unsigned frame,unsigned eye,HudFixture fixture,float distantMotion){
+    if (plane == 0 || plane >= 3) {
+        drawColorInputs(list, handle, plane, width, height, frame, eye, fixture);
+        return;
+    }
     const int left=barLeft(width,frame,eye);
     const auto scaleX=[&](int x){return LONG(std::lround(x*double(guideWidth)/width));};
     const int previous=barLeft(width,frame>1?frame-1:frame,eye);
-    const float background[3][4]={{eye==0?.26f:.04f,.08f,eye==0?.04f:.26f,1.f},{.02f,0,0,0},{0,0,0,0}};
-    const float foreground[3][4]={{.85f,.85f,.65f,1.f},{.25f,0,0,0},{float(scaleX(previous)-scaleX(left)),0,0,0}};
+    const float background[2][4]={{.02f,0,0,0},{distantMotion,0,0,0}};
+    const float foreground[2][4]={{.25f,0,0,0},{float(scaleX(previous)-scaleX(left)),0,0,0}};
     const int right=left+int(width/4);
-    const LONG h=LONG(plane?guideHeight:height);
-    const D3D12_RECT rect{plane?scaleX(left):LONG(left),h/4,plane?scaleX(right):LONG(right),3*h/4};
-    list->ClearRenderTargetView(handle,background[plane],0,nullptr);
-    list->ClearRenderTargetView(handle,foreground[plane],1,&rect);
+    const LONG h=LONG(guideHeight);
+    const D3D12_RECT rect{scaleX(left),h/4,scaleX(right),3*h/4};
+    list->ClearRenderTargetView(handle,background[plane - 1],0,nullptr);
+    list->ClearRenderTargetView(handle,foreground[plane - 1],1,&rect);
 }
 
 FrameGenerationCamera camera(unsigned w,unsigned h,unsigned eye){
@@ -188,6 +352,41 @@ FrameGenerationCamera camera(unsigned w,unsigned h,unsigned eye){
     c.mvecScale[0]=c.mvecScale[1]=1.f;c.depthInverted=true;
     c.motionVectorsInvalidValue=65504.f;c.cameraMotionIncluded=true;return c;
 }
+
+struct ProbeMotion {
+    FrameGenerationCamera camera;
+    float xDelta = 0.f, distantMotion = 0.f;
+};
+
+// Move two distinct eyes together. The scene guide is current-to-previous
+// with the scene's depth. A HUD draw can still move independently of it.
+ProbeMotion probeMotion(unsigned width, unsigned height, unsigned guideWidth,
+    unsigned frame, unsigned eye, HudFixture fixture) {
+    ProbeMotion out{camera(width, height, eye)};
+    out.camera.reset = frame == 1;
+    if (fixture == HudFixture::None) return out;
+
+    auto& c = out.camera;
+    const float nearDistance = c.cameraViewToClip[3][2] / (.25f + c.cameraViewToClip[2][2]);
+    const float distantDistance = c.cameraViewToClip[3][2] / (.02f + c.cameraViewToClip[2][2]);
+    const float pixelDistance = 2.f * nearDistance / (float(width) * c.cameraViewToClip[0][0]);
+    const auto eyeShift = [&](unsigned at) {
+        return float(barLeft(width, at, eye) - barLeft(width, 1, eye)) * pixelDistance * .125f;
+    };
+    const float shifted = eyeShift(frame);
+    out.xDelta = shifted - eyeShift(frame > 1 ? frame - 1 : frame);
+    c.cameraPos[0] += shifted;
+    // For row vectors, clipToPrevClip = inverse(P) * shiftX(delta) * P.
+    // The inverse uses the opposite translation and the same projection.
+    for (unsigned row = 0; row < 4; ++row) for (unsigned col = 0; col < 4; ++col) {
+        const float delta = c.clipToCameraView[row][3] * out.xDelta * c.cameraViewToClip[0][col];
+        c.clipToPrevClip[row][col] += delta;
+        c.prevClipToClip[row][col] -= delta;
+    }
+    out.distantMotion = out.xDelta * c.cameraViewToClip[0][0] * float(guideWidth) / (2.f * distantDistance);
+    return out;
+}
+
 bool texture(ID3D12Device* device,unsigned w,unsigned h,DXGI_FORMAT format,ComPtr<ID3D12Resource>& out){
     D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;heap.CreationNodeMask=heap.VisibleNodeMask=1;
     D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=w;d.Height=h;d.DepthOrArraySize=d.MipLevels=1;
@@ -197,6 +396,7 @@ bool texture(ID3D12Device* device,unsigned w,unsigned h,DXGI_FORMAT format,ComPt
 }
 int wmain(int argc,wchar_t** argv){
     bool run=false,officialHelper=false,diagnosticSuppressed=false,sharedSuppression=false;
+    HudFixture hudFixture = HudFixture::None;
     unsigned multiplier=2,width=1280,height=720,guideWidth=0,guideHeight=0,nativeFrames=12,warmupFrames=4;std::wstring feature,data;
     for(int i=1;i<argc;++i){
         if(wcscmp(argv[i],L"--run")==0)run=true;
@@ -212,7 +412,15 @@ int wmain(int argc,wchar_t** argv){
         else if(i+1<argc&&wcscmp(argv[i],L"--guide-height")==0)guideHeight=unsigned(_wtoi(argv[++i]));
         else if(i+1<argc&&wcscmp(argv[i],L"--native-frames")==0)nativeFrames=unsigned(_wtoi(argv[++i]));
         else if(i+1<argc&&wcscmp(argv[i],L"--warmup-frames")==0)warmupFrames=unsigned(_wtoi(argv[++i]));
-        else {std::puts("usage: probe [--run --multiplier 2|3|4 --feature-dir ABS --data-dir ABS [--official-fg-helper] [--shared-native-pair-suppression] [--width W --height H --guide-width GW --guide-height GH] [--native-frames N --warmup-frames N] [--diagnostic-suppressed-output]]");return 2;}
+        else if(i+1<argc && wcscmp(argv[i], L"--ui-recomposition") == 0 && hudFixture == HudFixture::None) {
+            const std::wstring mode(argv[++i]);
+            if (mode == L"alpha") hudFixture = HudFixture::Alpha;
+            else if (mode == L"opaque") hudFixture = HudFixture::Opaque;
+            else if (mode == L"neutral") hudFixture = HudFixture::Neutral;
+            else if (mode == L"control") hudFixture = HudFixture::Control;
+            else { std::puts("expected --ui-recomposition alpha|opaque|neutral|control"); return 2; }
+        }
+        else {std::puts("usage: probe [--run --multiplier 2|3|4 --feature-dir ABS --data-dir ABS [--official-fg-helper] [--shared-native-pair-suppression] [--width W --height H --guide-width GW --guide-height GH] [--native-frames N --warmup-frames N] [--diagnostic-suppressed-output] [--ui-recomposition alpha|opaque|neutral|control]]");return 2;}
     }
     if(!guideWidth)guideWidth=width;if(!guideHeight)guideHeight=height;
     if(nativeFrames<2||nativeFrames>64||warmupFrames>=nativeFrames||width<256||height<64||
@@ -220,8 +428,14 @@ int wmain(int argc,wchar_t** argv){
         std::puts("moving-edge probe needs 2..64 native frames, warmup smaller than frame count, output at least 256x64 and guides at least 64x32 (maximum 16384 per dimension)");
         return 2;
     }
-    if(!edgeCheckSelfTest()){std::puts("moving-edge probe image self-test failed");return 10;}
-    if(!run){std::printf("DRY: moving-edge image self-test passed; method=%s layout=%s output=%ux%u guides=%ux%u nativeFrames=%u warmupFrames=%u suppressedReadback=%u no DXGI, device, NGX, GPU, game or XR calls. Explicit --run is required.\n",officialHelper?"official_fg_helper":"generic_scratch_query",sharedSuppression?"shared_native_pair":"private_per_index",width,height,guideWidth,guideHeight,nativeFrames,warmupFrames,diagnosticSuppressed);return 0;}
+    const bool hudFixtureActive = hudFixture != HudFixture::None;
+    const bool uirEnabled = hudFixtureActive && hudFixture != HudFixture::Control;
+    if (hudFixtureActive && multiplier != 2) {
+        std::puts("UI recomposition probe measures one 2x midpoint per pair");
+        return 2;
+    }
+    if (!edgeCheckSelfTest() || !hudFixtureSelfTest()) { std::puts("moving-edge probe image self-test failed"); return 10; }
+    if(!run){std::printf("DRY: moving-edge image self-test passed; method=%s layout=%s output=%ux%u guides=%ux%u nativeFrames=%u warmupFrames=%u suppressedReadback=%u ui_fixture=%s uir_enabled=%u no DXGI, device, NGX, GPU, game or XR calls. Explicit --run is required.\n",officialHelper?"official_fg_helper":"generic_scratch_query",sharedSuppression?"shared_native_pair":"private_per_index",width,height,guideWidth,guideHeight,nativeFrames,warmupFrames,diagnosticSuppressed,hudFixtureName(hudFixture),unsigned(uirEnabled));return 0;}
 #ifndef EDVR_HAVE_NGX
     std::puts("REFUSED: this build has no NGX/DLSS SDK support; no GPU or driver calls were made.");return 3;
 #endif
@@ -237,6 +451,7 @@ int wmain(int argc,wchar_t** argv){
     init.device=device.Get();init.width=width;init.height=height;init.guideWidth=guideWidth;init.guideHeight=guideHeight;init.multiplier=multiplier;
     init.creationMode=officialHelper?FrameGenerationNgxCreationMode::OfficialFgHelper:FrameGenerationNgxCreationMode::GenericScratchQuery;
     init.suppressionLayout=sharedSuppression?FrameGenerationNgxSuppressionLayout::SharedNativePair:FrameGenerationNgxSuppressionLayout::PrivatePerIndex;
+    init.uiRecomposition = uirEnabled;
     init.featureDirectory=feature.c_str();init.dataDirectory=data.c_str();init.privateNgxDevice=true;init.timeoutMs=5000;
     const bool initialized=backend.initialize(init);printInitTrace(backend.status(),initialized);
     if(!initialized){const bool drained=backend.drain(5000);std::printf("init_cleanup drain=%u quarantined=%u\n",drained,backend.status().quarantined);return 4;}
@@ -245,33 +460,65 @@ int wmain(int argc,wchar_t** argv){
     if(FAILED(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)))||FAILED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&producer)))||
        FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&allocator)))||FAILED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list))))return 5;
     list->Close();
-    ComPtr<ID3D12DescriptorHeap> rtvs;D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=6;
+    const unsigned planes = uirEnabled ? 5u : 3u;
+    const unsigned scanlines = hudFixtureActive ? 2u : 1u;
+    ComPtr<ID3D12DescriptorHeap> rtvs;D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2 * planes;
     if(FAILED(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&rtvs))))return 5;
     const auto stride=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    struct Inputs {ComPtr<ID3D12Resource> resources[2][3];};auto resources=std::make_shared<Inputs>();
-    const DXGI_FORMAT formats[]={DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_FLOAT};
-    for(unsigned e=0;e<2;++e)for(unsigned k=0;k<3;++k){if(!texture(device.Get(),k?guideWidth:width,k?guideHeight:height,formats[k],resources->resources[e][k]))return 5;
-        auto h=rtvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(e*3+k)*stride;device->CreateRenderTargetView(resources->resources[e][k].Get(),nullptr,h);}
+    struct Inputs {ComPtr<ID3D12Resource> resources[2][5];};auto resources=std::make_shared<Inputs>();
+    const DXGI_FORMAT formats[]={DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_FLOAT,
+        DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM};
+    for (unsigned e = 0; e < 2; ++e) for (unsigned k = 0; k < planes; ++k) {
+        const bool guide = k == 1 || k == 2;
+        if (!texture(device.Get(), guide ? guideWidth : width, guide ? guideHeight : height,
+                     formats[k], resources->resources[e][k])) return 5;
+        auto handle = rtvs->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += SIZE_T(e * planes + k) * stride;
+        device->CreateRenderTargetView(resources->resources[e][k].Get(), nullptr, handle);
+    }
     ComPtr<ID3D12Resource> outputReadback;
     D3D12_HEAP_PROPERTIES readHeap{};readHeap.Type=D3D12_HEAP_TYPE_READBACK;readHeap.CreationNodeMask=readHeap.VisibleNodeMask=1;
     const UINT rowPitch=(width*4+D3D12_TEXTURE_DATA_PITCH_ALIGNMENT-1u)&~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT-1u);
     const UINT64 rowStride=(rowPitch+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1u)&~(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1u);
-    const SIZE_T readbackBytes=SIZE_T(6*rowStride);
+    const SIZE_T readbackBytes=SIZE_T(6*scanlines*rowStride);
+    const auto rowOffset = [&](unsigned eye, unsigned phase, unsigned scanline) {
+        return ((eye * 3 + phase) * scanlines + scanline) * rowStride;
+    };
     D3D12_RESOURCE_DESC readDesc{};readDesc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;readDesc.Width=readbackBytes;readDesc.Height=1;
     readDesc.DepthOrArraySize=readDesc.MipLevels=1;readDesc.SampleDesc.Count=1;readDesc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if(FAILED(device->CreateCommittedResource(&readHeap,D3D12_HEAP_FLAG_NONE,&readDesc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&outputReadback))))return 5;
     ProducerGuard producerGuard;producerGuard.hold={device,queue,producer,allocator,list,rtvs,outputReadback,resources};
     unsigned readyBatches=0,postWarmupReady=0,suppressedBatches=0,suppressedReadbacks=0,eligiblePhases=0;uint64_t producerValue=0;
+    unsigned hudPhases = 0, throughPhases = 0, neutralPhases = 0, translatedPhases = 0;
     for(uint64_t frame=1;frame<=nativeFrames;++frame){
         if(FAILED(allocator->Reset())||FAILED(list->Reset(allocator.Get(),nullptr)))return 6;
-        for(unsigned e=0;e<2;++e)for(unsigned k=0;k<3;++k){auto* r=resources->resources[e][k].Get();barrier(list.Get(),r,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_RENDER_TARGET);
-            auto h=rtvs->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(e*3+k)*stride;drawInputs(list.Get(),h,k,width,height,guideWidth,guideHeight,unsigned(frame),e);barrier(list.Get(),r,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COMMON);}
+        ProbeMotion views[2] = {
+            probeMotion(width, height, guideWidth, unsigned(frame), 0, hudFixture),
+            probeMotion(width, height, guideWidth, unsigned(frame), 1, hudFixture),
+        };
+        for (unsigned e = 0; e < 2; ++e) for (unsigned k = 0; k < planes; ++k) {
+            auto* resource = resources->resources[e][k].Get();
+            barrier(list.Get(), resource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            auto handle = rtvs->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += SIZE_T(e * planes + k) * stride;
+            drawInputs(list.Get(), handle, k, width, height, guideWidth, guideHeight, unsigned(frame), e,
+                hudFixture, views[e].distantMotion);
+            barrier(list.Get(), resource, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        }
         if(FAILED(list->Close()))return 6;ID3D12CommandList* commands[]={list.Get()};
         producerGuard.submitted=producerGuard.unfenced=true;queue->ExecuteCommandLists(1,commands);
         if(FAILED(queue->Signal(producer.Get(),++producerValue)))return 6;
         producerGuard.value=producerValue;producerGuard.unfenced=false;
         FrameGenerationNgxInput input;input.sequence=frame;input.historyGeneration=1;input.pairedFullEyeGuides=true;input.producerFence=producer.Get();input.producerValue=producerValue;input.inputLease=resources;
-        for(unsigned e=0;e<2;++e){input.eyes[e].color=resources->resources[e][0].Get();input.eyes[e].depth=resources->resources[e][1].Get();input.eyes[e].motion=resources->resources[e][2].Get();input.eyes[e].camera=camera(width,height,e);input.eyes[e].camera.reset=frame==1;}
+        for (unsigned e = 0; e < 2; ++e) {
+            auto& eye = input.eyes[e];
+            eye.color = resources->resources[e][0].Get();
+            eye.depth = resources->resources[e][1].Get();
+            eye.motion = resources->resources[e][2].Get();
+            eye.hudless = resources->resources[e][3].Get();
+            eye.ui = resources->resources[e][4].Get();
+            eye.camera = views[e].camera;
+        }
         auto ticket=backend.submit(input);auto completion=ticket.poll();
         while(completion==FrameGenerationNgxCompletion::Pending){Sleep(1);completion=ticket.poll();}
         const auto s=backend.status();std::printf("native=%llu requested=%ux indexedFrames=%u evalAccepted=%u completion=%u evaluations=%llu failure=%u ngx=0x%08x warmup=%u reset_reasons=0x%02x\n",
@@ -283,11 +530,18 @@ int wmain(int argc,wchar_t** argv){
             if(FAILED(allocator->Reset())||FAILED(list->Reset(allocator.Get(),nullptr)))return 9;
             for(unsigned e=0;e<2;++e)for(unsigned i=0;i<ticket.generatedCount;++i){
                 auto* r=ticket.generated[e][i];barrier(list.Get(),r,ticket.outputState,D3D12_RESOURCE_STATE_COPY_SOURCE);
-                D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=outputReadback.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                dst.PlacedFootprint.Offset=(e*3+i)*rowStride;dst.PlacedFootprint.Footprint={DXGI_FORMAT_R8G8B8A8_UNORM,width,1,1,rowPitch};
                 D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=r;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                const D3D12_BOX box{0,height/2,0,width,height/2+1,1};
-                list->CopyTextureRegion(&dst,0,0,0,&src,&box);barrier(list.Get(),r,D3D12_RESOURCE_STATE_COPY_SOURCE,ticket.outputState);
+                for (unsigned row = 0; row < scanlines; ++row) {
+                    const unsigned y = !hudFixtureActive ? height / 2 : row == 0 ? 5 * height / 16 : 5 * height / 8;
+                    D3D12_TEXTURE_COPY_LOCATION dst{};
+                    dst.pResource = outputReadback.Get();
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    dst.PlacedFootprint.Offset = rowOffset(e, i, row);
+                    dst.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, width, 1, 1, rowPitch};
+                    const D3D12_BOX box{0, y, 0, width, y + 1, 1};
+                    list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+                }
+                barrier(list.Get(),r,D3D12_RESOURCE_STATE_COPY_SOURCE,ticket.outputState);
             }
             if(FAILED(list->Close()))return 9;ID3D12CommandList* copies[]={list.Get()};producerGuard.unfenced=true;
             queue->ExecuteCommandLists(1,copies);if(FAILED(queue->Signal(producer.Get(),++producerValue)))return 9;
@@ -303,8 +557,9 @@ int wmain(int argc,wchar_t** argv){
                 const int current=barLeft(width,unsigned(frame),e);
                 const int barWidth=int(width/4);
                 EdgeMeasurement prior{previous,previous+barWidth,0,true};
+                const auto* samples = static_cast<const uint8_t*>(mapped);
                 for(unsigned i=0;i<ticket.generatedCount;++i){
-                    const auto* row=static_cast<const uint8_t*>(mapped)+(e*3+i)*rowStride;
+                    const auto* row = samples + rowOffset(e, i, 0);
                     const auto measured=measureBar(row,int(width),e);
                     const bool pass=followsMotion(measured,prior,previous,current,barWidth,i+1,multiplier);
                     std::printf("edge frame=%llu eye=%u index=%u nativeLeft=%d,%d expectedLeft=%.2f measured=[%d,%d) spread=%d eyeMatch=%u eligible=%u match=%u\n",
@@ -313,12 +568,49 @@ int wmain(int argc,wchar_t** argv){
                         measured.spread,unsigned(measured.eyeMatches),unsigned(eligible),unsigned(pass));
                     if(eligible){matches=matches&&pass;++eligiblePhases;}
                     prior=measured;
+                    if (!hudFixtureActive) continue;
+
+                    const auto* hudRow = samples + rowOffset(e, i, 1);
+                    const auto hud = measureHud(hudRow, int(width), e);
+                    const bool translated = views[e].xDelta != 0.f;
+                    if (eligible && translated) ++translatedPhases;
+                    if (hasHud(hudFixture, e)) {
+                        const int panelA = hudLeft(width, unsigned(frame > 1 ? frame - 1 : frame), e);
+                        const int panelB = hudLeft(width, unsigned(frame), e);
+                        const int panelWidth = int(width * 2 / 3);
+                        const EdgeMeasurement priorHud{panelA, panelA + panelWidth, 0, true};
+                        const bool hudPass = followsMotion(hud, priorHud, panelA, panelB, panelWidth, i + 1, multiplier);
+                        const auto through = measureWorldThroughHud(hudRow, hud, previous, current, barWidth, i + 1, multiplier);
+                        std::printf("hud_edge frame=%llu eye=%u index=%u x_delta_m=%.8g nativeLeft=%d,%d expectedLeft=%.2f measured=[%d,%d) spread=%d eyeMatch=%u throughExpected=%d throughMeasured=%d throughMatch=%u eligible=%u match=%u\n",
+                            static_cast<unsigned long long>(frame), e, i + 1, double(views[e].xDelta), panelA, panelB,
+                            panelA + (panelB - panelA) * double(i + 1) / multiplier, hud.left, hud.right, hud.spread,
+                            unsigned(hud.eyeMatches), through.expected, through.measured, unsigned(through.matches),
+                            unsigned(eligible), unsigned(hudPass));
+                        if (eligible) {
+                            matches = matches && translated && hudPass && through.matches;
+                            if (hudPass) ++hudPhases;
+                            if (through.matches) ++throughPhases;
+                        }
+                    } else {
+                        bool clear = true;
+                        for (unsigned x = 0; x < width; ++x) clear = clear && hudScore(hudRow + 4*x) < 90;
+                        const EdgeMeasurement start{previous, previous + barWidth, 0, true};
+                        const bool neutral = clear && followsMotion(measureBar(hudRow, int(width), e), start,
+                            previous, current, barWidth, i + 1, multiplier);
+                        std::printf("hud_neutral frame=%llu eye=%u index=%u x_delta_m=%.8g eligible=%u match=%u\n",
+                            static_cast<unsigned long long>(frame), e, i + 1, double(views[e].xDelta),
+                            unsigned(eligible), unsigned(neutral));
+                        if (eligible) {
+                            matches = matches && translated && neutral;
+                            if (neutral) ++neutralPhases;
+                        }
+                    }
                 }
             }
             const D3D12_RANGE noWrites{0,0};outputReadback->Unmap(0,&noWrites);
             if(suppressedInspection)++suppressedReadbacks;
             else {
-                if(!matches){std::puts("moving-edge phase count, stereo identity, shape or ordered motion mismatch");return 10;}
+                if(!matches){std::puts("moving-edge phase count, stereo identity, shape or ordered scene/HUD motion mismatch");return 10;}
                 ++readyBatches;if(eligible)++postWarmupReady;
             }
         }
@@ -329,6 +621,10 @@ int wmain(int argc,wchar_t** argv){
         ticket={};
     }
     const bool drained=backend.drain(5000);
-    std::printf("probe result readyStereoBatches=%u postWarmupReady=%u warmupFrames=%u nativeFrames=%u suppressedNativeOnly=%u suppressedDiagnosticReadbacks=%u eligibleEyePhases=%u drain=%u outputPixels=moving-edge-scanline GPUtiming=not-measured game=0 OpenXR=0 presentation=0; VR qualification remains separate\n",readyBatches,postWarmupReady,warmupFrames,nativeFrames,suppressedBatches,suppressedReadbacks,eligiblePhases,drained);
-    return postWarmupReady&&eligiblePhases&&drained?0:8;
+    std::printf("probe result readyStereoBatches=%u postWarmupReady=%u warmupFrames=%u nativeFrames=%u suppressedNativeOnly=%u suppressedDiagnosticReadbacks=%u eligibleEyePhases=%u drain=%u ui_fixture=%s uir_enabled=%u hudEyePhases=%u hudThroughEyePhases=%u neutralEyePhases=%u translatedEyePhases=%u outputPixels=moving-edge-scanline GPUtiming=not-measured game=0 OpenXR=0 presentation=0; VR qualification remains separate\n",
+        readyBatches,postWarmupReady,warmupFrames,nativeFrames,suppressedBatches,suppressedReadbacks,eligiblePhases,drained,
+        hudFixtureName(hudFixture),unsigned(uirEnabled),hudPhases,throughPhases,neutralPhases,translatedPhases);
+    const bool hudProof = !hudFixtureActive || (hudPhases && hudPhases == throughPhases &&
+        hudPhases + neutralPhases == eligiblePhases && translatedPhases == eligiblePhases);
+    return postWarmupReady && eligiblePhases && drained && hudProof ? 0 : 8;
 }

@@ -131,6 +131,28 @@ void coupledInputRing(){
     check(FrameGenerationNgx::testCollectInputs(13,unfenced,0,ngx)&&ngx[0]&&ngx[1]&&ngx[2],
         "unfenced accepted inputs cannot be released by completed-slot collector");
 }
+void terminalInputRetirement() {
+    using namespace edvr;
+    ObservedFence completion;
+    const auto preparation = std::make_shared<unsigned>(1);
+    std::shared_ptr<void> input = preparation;
+
+    completion.Signal(1);
+    check(!FrameGenerationNgx::testDrainInput(&completion, 2, false, true, input) && input == preparation,
+        "expired NGX input remains pinned while the required terminal fence is pending");
+    completion.Signal(2);
+    check(FrameGenerationNgx::testDrainInput(&completion, 2, false, true, input) && !input,
+        "fenced terminal cleanup releases prep even while an expired output ticket survives");
+
+    input = preparation;
+    check(!FrameGenerationNgx::testDrainInput(nullptr, 2, false, false, input) && input == preparation,
+        "a required but missing completion fence retains preparation inputs");
+    check(!FrameGenerationNgx::testDrainInput(&completion, 2, true, false, input) && input == preparation,
+        "earlier fence completion cannot retire accepted unfenced work");
+    completion.Signal(UINT64_MAX);
+    check(!FrameGenerationNgx::testDrainInput(&completion, 2, false, false, input) && input == preparation,
+        "the device-removal fence sentinel retains preparation inputs");
+}
 struct FlagTrace {unsigned initializations[2]{};uintptr_t pointer[2][3]{};bool allAllowed=true;};
 FlagTrace recordFlags(bool shared,bool reused,int leftWrite,int rightWrite,bool laterTrue=false){
     using namespace edvr;using namespace edvr::fg_ngx;FlagTrace trace;
@@ -192,7 +214,7 @@ int main(){
     FrameGenerationNgx untouched;check(!untouched.status().initialized,"default backend creates no device");
     check(untouched.collect(),"cold OFF collection creates no backend");
 #ifdef EDVR_HAVE_NGX
-    contextPathLifetime();lateObservation();coupledInputRing();
+    contextPathLifetime();lateObservation();coupledInputRing();terminalInputRetirement();
 #endif
     check(generatedCount(2)==1&&generatedCount(3)==2&&generatedCount(4)==3&&
         !generatedCount(0)&&!generatedCount(1)&&!generatedCount(5),"2x to 4x request one to three generated frames");
@@ -228,6 +250,22 @@ int main(){
     check(p.floats[NVSDK_NGX_DLSSG_Parameter_JitterOffsetX]==.125f&&p.floats[NVSDK_NGX_DLSSG_Parameter_MvecScaleX]==-2.f,"jitter and signed motion scale preserved");
     check(p.pointers[NVSDK_NGX_DLSSG_Parameter_Backbuffer]==reinterpret_cast<void*>(1)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_Depth]==reinterpret_cast<void*>(2)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_MVecs]==reinterpret_cast<void*>(3),"paired color depth motion bound");
     check(p.pointers[NVSDK_NGX_DLSSG_Parameter_OutputInterpolated]==reinterpret_cast<void*>(4)&&p.pointers[NVSDK_NGX_DLSSG_Parameter_OutputDisableInterpolation]==reinterpret_cast<void*>(5),"output and suppression buffer both bound");
+    FrameGenerationNgxEye completeEye;
+    completeEye.hudless=reinterpret_cast<ID3D12Resource*>(6);
+    completeEye.ui=reinterpret_cast<ID3D12Resource*>(7);
+    check(frameGenerationNgxTestEvaluation(2,1,&p,&storage,nullptr,nullptr,&completeEye)&&
+        p.pointers[NVSDK_NGX_DLSSG_Parameter_HUDLess]==completeEye.hudless&&
+        p.pointers[NVSDK_NGX_DLSSG_Parameter_UI]==completeEye.ui&&
+        p.pointers[NVSDK_NGX_DLSSG_Parameter_UIAlpha]==nullptr&&
+        p.ui[NVSDK_NGX_DLSSG_Parameter_HUDLessSubrectWidth]==1280&&
+        p.ui[NVSDK_NGX_DLSSG_Parameter_HUDLessSubrectHeight]==720&&
+        p.ui[NVSDK_NGX_DLSSG_Parameter_UISubrectWidth]==1280&&
+        p.ui[NVSDK_NGX_DLSSG_Parameter_UISubrectHeight]==720,
+        "official SDK adapter binds both full-eye UI recomposition planes and their extents");
+    check(frameGenerationNgxTestEvaluation(2,1,&p,&storage)&&
+        p.pointers[NVSDK_NGX_DLSSG_Parameter_HUDLess]==nullptr&&p.pointers[NVSDK_NGX_DLSSG_Parameter_UI]==nullptr&&
+        p.ui[NVSDK_NGX_DLSSG_Parameter_HUDLessSubrectWidth]==0&&p.ui[NVSDK_NGX_DLSSG_Parameter_UISubrectWidth]==0,
+        "world-only evaluation clears optional UI resources and extents");
     for(unsigned index=1;index<=2;++index){
         check(frameGenerationNgxTestEvaluation(3,index,&p,&storage),"3x indexed evaluation succeeds");
         check(p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameCount]==2&&p.ui[NVSDK_NGX_DLSSG_Parameter_MultiFrameIndex]==index,
@@ -260,6 +298,11 @@ int main(){
     createResult=NVSDK_NGX_Result_Success;scratchCalls=createCalls=0;
     trace=FrameGenerationNgx::testFeaturePreparation(0,FrameGenerationNgxCreationMode::OfficialFgHelper);
     check(!trace.failed&&scratchCalls==0&&createCalls==1&&!trace.creation[0].scratchCalled&&trace.creation[0].scratchResult==0&&trace.creation[0].handleReturned,"direct helper success never converts an uncalled scratch query into success");
+    check(p.ui[NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled]==0,
+        "normal feature creation retains world-only defaults");
+    trace=FrameGenerationNgx::testFeaturePreparation(0,FrameGenerationNgxCreationMode::OfficialFgHelper,true);
+    check(!trace.failed&&p.ui[NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled]==1,
+        "feature creation explicitly enables UI recomposition");
     createResult=NVSDK_NGX_Result_FAIL_ScratchBufferTooSmall;scratchCalls=createCalls=0;
     trace=FrameGenerationNgx::testFeaturePreparation(0,FrameGenerationNgxCreationMode::OfficialFgHelper);
     check(trace.failed&&trace.failedInitStage==FrameGenerationNgxInitStage::FeatureCreate&&trace.creation[0].createResult==0xbad00006&&scratchCalls==0&&createCalls==1,"direct helper still refuses a real required-scratch creation error");

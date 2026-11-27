@@ -63,6 +63,12 @@
       fgSubmittedNative={};
       fgBootstrap.displayGenerated(*generatedReceipt);
       fgCommittedSpace=seated.frame().space;
+      if (pixels) {
+        const double shift = edvr::fg_coverage::maxOpticalCenterShiftMeters(
+          generatedReceipt->previousViews, generatedReceipt->currentViews, generatedReceipt->multiplier, fgLastPhase);
+        if (shift > 0.) ++fgTranslatedGeneratedPresented;
+        if (shift > fgLargestGeneratedOpticalCenterShift) fgLargestGeneratedOpticalCenterShift = shift;
+      }
     }
     return result;
   }
@@ -339,6 +345,10 @@
     nativeTracePrintf("native_fg_ui,native_pose_composites=%llu,composition=single_projection_after_fg,ui_rotation_reprojected=1,positional_reprojection=0,content_cadence=native,projection_cadence=runtime,protected_coverage_includes_native_background=1,translated_coverage_native_fallback=%llu,translated_coverage_behind=%llu\n",
       (unsigned long long)fgUiPresented,(unsigned long long)fgImages[unsigned(fghandoff::Images::TranslatedCoverage)],
       (unsigned long long)fgTranslatedBehind);
+    nativeTracePrintf("native_fg_translation,generation=%llu,config=%llu,history=%llu,generated_presented=%llu,translated_generated_presented=%llu,max_optical_center_shift_mm=%.6f\n",
+      (unsigned long long)runtimeGeneration,(unsigned long long)fgConfig,(unsigned long long)fgHistory,
+      (unsigned long long)fgGeneratedPresented,(unsigned long long)fgTranslatedGeneratedPresented,
+      fgLargestGeneratedOpticalCenterShift * 1000.);
     using I=fghandoff::Images;using H=fghandoff::Handoff;
     const auto image=[&](I i){return (unsigned long long)fgImages[unsigned(i)];};
     const auto handoff=[&](H h){return (unsigned long long)fgHandoffs[unsigned(h)];};

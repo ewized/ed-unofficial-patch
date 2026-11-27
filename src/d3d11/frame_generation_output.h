@@ -25,8 +25,27 @@ struct FrameGenerationOutputStatus {
     FrameGenerationOutputFailure failure = FrameGenerationOutputFailure::NotInitialized;
     HRESULT lastHresult = S_OK;
     uint64_t submitted = 0, completed = 0, busy = 0, nativeOnly = 0;
+    // Preparation retires after its own fence and all downstream owners.
+    // These counters let the worker collect pins even if NGX never submits.
+    uint64_t recompositionSubmitted = 0, recompositionRetired = 0;
 };
 struct FrameGenerationOutputLease;
+struct FrameGenerationRecompositionEye {
+    ID3D12Resource* color = nullptr;
+    ID3D12Resource* hudless = nullptr;
+    ID3D12Resource* ui = nullptr;
+};
+struct FrameGenerationRecompositionTicket {
+    // Accepted work may read the original interop lease. Its caller retires
+    // that source exactly once behind preparation and every downstream read.
+    bool accepted = false, unsafe = false;
+    ID3D12Fence* readyFence = nullptr;
+    uint64_t readyValue = 0;
+    // Borrowed COMMON textures. Any consumer waits on the ready fence and
+    // retains this lease until its own completion, including raw HUD-less reads.
+    FrameGenerationRecompositionEye eyes[2];
+    std::shared_ptr<FrameGenerationOutputLease> lease;
+};
 struct FrameGenerationOutputTicket {
     // accepted means this publisher retained the inputs for submitted or
     // unprovably completed GPU work. Never cancel the interop lease then.
@@ -64,6 +83,11 @@ public:
     FrameGenerationOutputTicket submit(const std::shared_ptr<FrameGenerationInteropLease>&,
         const FrameGenerationNgxTicket&, const FrameGenerationOutputUi (&)[2],
         const FrameGenerationOutputSource&, bool nativeOnly = false) noexcept;
+    // Worker-only preparation for UI recomposition, with no XR publication.
+    // A covered UI texel contains the exact native composite with alpha 1.
+    // Uncovered pixels are transparent; HUD-less aliases the immutable source.
+    FrameGenerationRecompositionTicket prepareRecomposition(const std::shared_ptr<FrameGenerationInteropLease>&,
+        const FrameGenerationOutputUi (&)[2], const FrameGenerationOutputSource&) noexcept;
     // Worker loop calls collect even when capture has no free source slot:
     // input/NGX leases release as soon as final GPU work completes, independently
     // of the XR consumer's later output-lease retirement.

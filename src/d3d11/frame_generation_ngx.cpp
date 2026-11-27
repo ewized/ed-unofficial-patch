@@ -91,6 +91,14 @@ NVSDK_NGX_Result recordEvaluation(ID3D12GraphicsCommandList* list,NVSDK_NGX_Hand
     // here, so leave the optional render-frame counter unset.
     return NGX_D3D12_EVALUATE_DLSSG(list,handle,params,&resources,&persistent);
 }
+void sdkRecompositionInputs(const FrameGenerationNgxEye* eye, unsigned width, unsigned height,
+    NVSDK_NGX_D3D12_DLSSG_Eval_Params& resources, NVSDK_NGX_DLSSG_Opt_Eval_Params& options) {
+    resources.pHudless = eye ? eye->hudless : nullptr;
+    resources.pUI = eye ? eye->ui : nullptr;
+    const NVSDK_NGX_Dimensions extent{eye ? width : 0u, eye ? height : 0u};
+    options.hudLessSubrectSize = extent;
+    options.uiSubrectSize = extent;
+}
 // Preserve SDK defaults for resource rectangles, frame indices and options
 // outside ED-UP's measured camera contract. This output lives in the GPU slot.
 NVSDK_NGX_DLSSG_Opt_Eval_Params sdkCamera(const FrameGenerationCamera& camera) {
@@ -139,14 +147,20 @@ NVSDK_NGX_Result initializeDeviceContext(const FrameGenerationNgxInit& in) {
 }
 
 struct FrameGenerationNgxLease {
+    static constexpr unsigned inputCount = 5;
     ComPtr<ID3D12Fence> fence,producer;
-    ComPtr<ID3D12Resource> outputs[2][3],disable[2][3],readback[2][3],inputs[2][3];
+    ComPtr<ID3D12Resource> outputs[2][3],disable[2][3],readback[2][3],inputs[2][inputCount];
     uint8_t* mapped[2][3]{};
     uint32_t evaluationResult[2][3]{};
     std::shared_ptr<void> inputLease;
     uint64_t value=0,submittedMs=0;unsigned count=0;uint32_t timeoutMs=0;
     FrameGenerationNgxSuppressionLayout layout=FrameGenerationNgxSuppressionLayout::PrivatePerIndex;
     mutable std::atomic<bool> expired{false};
+    void releaseInputs() noexcept {
+        inputLease.reset();
+        producer.Reset();
+        for (auto& eye : inputs) for (auto& input : eye) input.Reset();
+    }
     ~FrameGenerationNgxLease(){
         const D3D12_RANGE noWrites{0,0};
         for(unsigned e=0;e<2;++e)for(unsigned i=0;i<3;++i)if(mapped[e][i])readback[e][i]->Unmap(0,&noWrites);
@@ -220,7 +234,7 @@ struct FrameGenerationNgx::Impl {
         params->Set(NVSDK_NGX_DLSSG_Parameter_InternalWidth,config.guideWidth);params->Set(NVSDK_NGX_DLSSG_Parameter_InternalHeight,config.guideHeight);
         params->Set(NVSDK_NGX_DLSSG_Parameter_DynamicResolution,0u);
         params->Set(NVSDK_NGX_DLSSG_Parameter_MultiFrameCount,fg_ngx::generatedCount(config.multiplier));params->Set(NVSDK_NGX_DLSSG_Parameter_MultiFrameIndex,1u);
-        params->Set(NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled,0u);
+        params->Set(NVSDK_NGX_DLSSG_Parameter_UserInterfaceRecompositionEnabled,unsigned(config.uiRecomposition));
         if(config.creationMode==FrameGenerationNgxCreationMode::GenericScratchQuery){
             stage(FrameGenerationNgxInitStage::ScratchQuery,eye);call.scratchCalled=true;
             size_t scratchBytes=0;result=NVSDK_NGX_D3D12_GetScratchBufferSize(NVSDK_NGX_Feature_FrameGeneration,params,&scratchBytes);
@@ -269,10 +283,7 @@ struct FrameGenerationNgx::Impl {
             // The ticket retains generated outputs/readbacks, not completed
             // producer inputs. Output publication owns its own original source
             // lease through the later HUD fence; never borrow these pins there.
-            if(s.lease){
-                s.lease->inputLease.reset();s.lease->producer.Reset();
-                for(auto& eye:s.lease->inputs)for(auto& input:eye)input.Reset();
-            }
+            if (s.lease) s.lease->releaseInputs();
             s.counted=true;++status.completed;
         }
         return !status.failed;
@@ -294,6 +305,21 @@ struct FrameGenerationNgx::Impl {
                !resourceValid(e.depth,config.guideWidth,config.guideHeight,DXGI_FORMAT_R32_FLOAT)||
                (md.Format!=DXGI_FORMAT_R16G16_FLOAT&&md.Format!=DXGI_FORMAT_R32G32_FLOAT)||
                !resourceValid(e.motion,config.guideWidth,config.guideHeight,md.Format))return false;
+            if (config.uiRecomposition) {
+                if (!resourceValid(e.hudless, config.width, config.height, config.colorFormat) ||
+                    !resourceValid(e.ui, config.width, config.height, config.colorFormat)) return false;
+            } else if (e.hudless || e.ui) return false;
+        }
+        if (config.uiRecomposition) {
+            // A native composite, its HUD-less scene, and UI are independent
+            // images, including when one eye has a transparent UI plane.
+            const ID3D12Resource* colorPlanes[] = {
+                in.eyes[0].color, in.eyes[0].hudless, in.eyes[0].ui,
+                in.eyes[1].color, in.eyes[1].hudless, in.eyes[1].ui,
+            };
+            for (unsigned i = 0; i < 6; ++i)
+                for (unsigned j = 0; j < i; ++j)
+                    if (colorPlanes[i] == colorPlanes[j]) return false;
         }
         return true;
     }
@@ -391,15 +417,27 @@ FrameGenerationNgxTicket FrameGenerationNgx::submit(const FrameGenerationNgxInpu
     if(!selected){++s.status.busy;s.fail(FrameGenerationNgxFailure::Busy,NVSDK_NGX_Result_Success,S_OK,false);return ticket;}
     auto& slot=*selected;if(!s.prepareSlot(slot))return ticket;auto& lease=*slot.lease;
     lease.inputLease=in.inputLease;lease.producer=in.producerFence;
-    for(unsigned e=0;e<2;++e){lease.inputs[e][0]=in.eyes[e].color;lease.inputs[e][1]=in.eyes[e].depth;lease.inputs[e][2]=in.eyes[e].motion;}
+    for (unsigned e = 0; e < 2; ++e) {
+        const auto& eye = in.eyes[e];
+        auto& pins = lease.inputs[e];
+        pins[0] = eye.color;
+        pins[1] = eye.depth;
+        pins[2] = eye.motion;
+        pins[3] = eye.hudless;
+        pins[4] = eye.ui;
+    }
     HRESULT hr=slot.allocator->Reset();if(FAILED(hr)||FAILED(hr=slot.list->Reset(slot.allocator.Get(),nullptr))){s.fail(FrameGenerationNgxFailure::Queue,NVSDK_NGX_Result_Success,hr);return ticket;}
     const uint32_t resetReasons=fg_ngx::resetHistoryReasons(s.lastSequence,in.sequence,s.lastGeneration,in.historyGeneration,in.eyes[0].camera.reset||in.eyes[1].camera.reset);
     const bool reset=resetReasons!=0;
     bool evaluated=true;
     for(unsigned e=0;e<2&&evaluated;++e){
-        const auto& eye=in.eyes[e];ID3D12Resource* inputs[]={eye.color,eye.depth,eye.motion};
-        D3D12_RESOURCE_STATES states[]={eye.colorState,eye.depthState,eye.motionState};
-        for(unsigned k=0;k<3;++k){lease.inputs[e][k]=inputs[k];transition(slot.list.Get(),inputs[k],states[k],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
+        const auto& eye = in.eyes[e];
+        const auto& inputs = lease.inputs[e];
+        const D3D12_RESOURCE_STATES states[] = {
+            eye.colorState, eye.depthState, eye.motionState, eye.hudlessState, eye.uiState,
+        };
+        for (unsigned k = 0; k < lease.inputCount; ++k)
+            if (inputs[k]) transition(slot.list.Get(), inputs[k].Get(), states[k], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         for(unsigned i=0;i<lease.count;++i){
             auto& o=slot.options[e][i];o=sdkCamera(eye.camera);o.multiFrameCount=lease.count;o.multiFrameIndex=i+1;o.reset=reset;
             o.backbufferSubrectBase={0,0};o.backbufferSubrectSize={s.config.width,s.config.height};o.outputInterpSubrectBase={0,0};o.outputInterpSubrectSize=o.backbufferSubrectSize;
@@ -410,6 +448,7 @@ FrameGenerationNgxTicket FrameGenerationNgx::submit(const FrameGenerationNgxInpu
                 [&]{slot.list->CopyBufferRegion(lease.disable[e][i].Get(),0,s.sentinel.Get(),0,4);});
             if(s.scratch[e]){slot.params[e][i]->Set(NVSDK_NGX_Parameter_Scratch,s.scratch[e].Get());slot.params[e][i]->Set(NVSDK_NGX_Parameter_Scratch_SizeInBytes,static_cast<unsigned long long>(s.scratch[e]->GetDesc().Width));}
             NVSDK_NGX_D3D12_DLSSG_Eval_Params resources{};resources.pBackbuffer=eye.color;resources.pDepth=eye.depth;resources.pMVecs=eye.motion;
+            sdkRecompositionInputs(s.config.uiRecomposition ? &eye : nullptr, s.config.width, s.config.height, resources, o);
             resources.pOutputInterpFrame=lease.outputs[e][i].Get();resources.pOutputDisableInterpolation=lease.disable[e][i].Get();
             if(s.scratch[e])uavBarrier(slot.list.Get(),s.scratch[e].Get());
             const auto r=recordEvaluation(slot.list.Get(),s.features[e],slot.params[e][i],resources,o);++s.status.evaluations;
@@ -421,12 +460,14 @@ FrameGenerationNgxTicket FrameGenerationNgx::submit(const FrameGenerationNgxInpu
             slot.list->CopyBufferRegion(lease.readback[e][i].Get(),0,lease.disable[e][i].Get(),0,4);
             if(!ok(r)){s.fail(FrameGenerationNgxFailure::NgxEvaluate,r);evaluated=false;break;}
         }
-        for(unsigned k=0;k<3;++k)transition(slot.list.Get(),inputs[k],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,states[k]);
+        for (unsigned k = 0; k < lease.inputCount; ++k)
+            if (inputs[k]) transition(slot.list.Get(), inputs[k].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, states[k]);
     }
     lease.submittedMs=GetTickCount64();slot.counted=false;
     ticket.sequence=in.sequence;ticket.generatedCount=lease.count;ticket.historyResetReasons=resetReasons;ticket.lease=slot.lease;
     if(!s.execute(slot.list.Get(),slot.value,in.producerFence,in.producerValue))return ticket;lease.value=slot.value;
     ticket.completionFence=s.fence.Get();ticket.completionValue=slot.value;ticket.evaluationSucceeded=evaluated;
+    ticket.uiRecomposed = evaluated && s.config.uiRecomposition;
     for(unsigned e=0;e<2;++e)for(unsigned i=0;i<lease.count;++i)ticket.generated[e][i]=lease.outputs[e][i].Get();
     ++s.status.submitted;if(!evaluated)return ticket;
     s.lastSequence=in.sequence;s.lastGeneration=in.historyGeneration;if(reset)++s.status.resets;s.status.failure=FrameGenerationNgxFailure::None;return ticket;
@@ -440,12 +481,16 @@ bool FrameGenerationNgx::collect()noexcept {
 bool FrameGenerationNgx::drain(uint32_t timeoutMs)noexcept {
     if(!impl_)return true;auto& s=*impl_;std::lock_guard<std::mutex> lock(s.mutex);
     if(s.cleaned)return true;if(!s.sameThread())return false;if(s.unsafePending)return false;
-    if(s.lastFence&&s.fence&&!fg_ngx::completed(s.fence->GetCompletedValue(),s.lastFence)){
+    if (s.lastFence && !s.fence) return false;
+    if(s.lastFence&&!fg_ngx::completed(s.fence->GetCompletedValue(),s.lastFence)){
         if(!timeoutMs||timeoutMs>fg_ngx::kMaxTimeoutMs)return false;
         if(FAILED(s.fence->SetEventOnCompletion(s.lastFence,s.event))||WaitForSingleObject(s.event,timeoutMs)!=WAIT_OBJECT_0||!fg_ngx::completed(s.fence->GetCompletedValue(),s.lastFence)){
             s.fail(FrameGenerationNgxFailure::Timeout);s.status.quarantined=true;return false;
         }
     }
+    // The terminal fence covers every submitted read. Release the input pins
+    // even if a failed/expired ticket still owns its generated textures.
+    for (auto& slot : s.slots) if (slot.lease) slot.lease->releaseInputs();
     s.cleanup();return true;
 }
 FrameGenerationNgxStatus FrameGenerationNgx::status()const noexcept {
@@ -467,8 +512,29 @@ bool FrameGenerationNgx::testCollectInputs(uint64_t completed,const uint64_t (&v
     for(unsigned i=0;i<fg_ngx::kSlots;++i)inputs[i]=std::move(local.slots[i].lease->inputLease);
     return result;
 }
-FrameGenerationNgxStatus FrameGenerationNgx::testFeaturePreparation(unsigned eye,FrameGenerationNgxCreationMode creationMode){
+bool FrameGenerationNgx::testDrainInput(ID3D12Fence* completion, uint64_t required,
+    bool unsafe, bool expired, std::shared_ptr<void>& input) {
+    auto local = std::make_unique<Impl>();
+    local->owner = GetCurrentThreadId();
+    local->fence = completion;
+    local->lastFence = required;
+    local->unsafePending = unsafe;
+    auto retained = std::make_shared<FrameGenerationNgxLease>();
+    retained->inputLease = std::move(input);
+    retained->expired.store(expired, std::memory_order_release);
+    local->slots[0].lease = retained;
+    local->slots[0].value = required;
+
+    FrameGenerationNgx backend;
+    backend.impl_ = local.get();
+    const bool drained = backend.drain(0);
+    backend.impl_ = nullptr;
+    input = std::move(retained->inputLease);
+    return drained;
+}
+FrameGenerationNgxStatus FrameGenerationNgx::testFeaturePreparation(unsigned eye,FrameGenerationNgxCreationMode creationMode,bool uiRecomposition){
     Impl local;local.config.width=local.config.guideWidth=1280;local.config.height=local.config.guideHeight=720;local.config.multiplier=2;
+    local.config.uiRecomposition=uiRecomposition;
     local.config.creationMode=creationMode;local.status.creationMode=creationMode;
     if(eye>1){local.fail(FrameGenerationNgxFailure::InvalidConfiguration);return local.status;}
     local.prepareFeature(eye);return local.status;
@@ -488,12 +554,13 @@ FrameGenerationNgxTicket frameGenerationNgxTestTimedTicket(ID3D12Fence* fence) {
     ticket.lease->submittedMs=0;ticket.lease->timeoutMs=0;
     return ticket;
 }
-bool frameGenerationNgxTestEvaluation(unsigned multiplier,unsigned index,NVSDK_NGX_Parameter* params,NVSDK_NGX_DLSSG_Opt_Eval_Params* persistent,ID3D12Resource* disableOverride,const FrameGenerationCamera* camera){
+bool frameGenerationNgxTestEvaluation(unsigned multiplier,unsigned index,NVSDK_NGX_Parameter* params,NVSDK_NGX_DLSSG_Opt_Eval_Params* persistent,ID3D12Resource* disableOverride,const FrameGenerationCamera* camera,const FrameGenerationNgxEye* source){
     const auto count=fg_ngx::generatedCount(multiplier);if(!count||!index||index>count||!params||!persistent)return false;
     if(camera)*persistent=sdkCamera(*camera);
     persistent->multiFrameCount=count;persistent->multiFrameIndex=index;
     NVSDK_NGX_D3D12_DLSSG_Eval_Params resources{};
     resources.pBackbuffer=reinterpret_cast<ID3D12Resource*>(1);resources.pDepth=reinterpret_cast<ID3D12Resource*>(2);resources.pMVecs=reinterpret_cast<ID3D12Resource*>(3);
+    sdkRecompositionInputs(source, 1280, 720, resources, *persistent);
     resources.pOutputInterpFrame=reinterpret_cast<ID3D12Resource*>(4);resources.pOutputDisableInterpolation=disableOverride?disableOverride:reinterpret_cast<ID3D12Resource*>(5);
     return ok(recordEvaluation(nullptr,nullptr,params,resources,*persistent));
 }
