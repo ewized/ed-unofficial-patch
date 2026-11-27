@@ -44,6 +44,7 @@ enum Failure : uint32_t {None, SourceMismatch, TemporalMismatch, Unsupported, Mi
 std::atomic<uint32_t> requested{0};
 std::atomic<uint64_t> configuration{1};
 std::atomic<bool> automatic{false};
+constexpr wchar_t kUiRecompositionOverride[] = L"EDUP_TEST_FG_UI_RECOMPOSITION";
 // Unfenced qualification commands may outlive the selected configuration or
 // coordinator. This process cannot prove safe reuse of that GPU path.
 std::atomic<bool> qualificationQuarantined{false};
@@ -1249,11 +1250,14 @@ HRESULT nativeFgAcquire(const EdvrFgRequest* request, EdvrFgTable* table) noexce
             if (old->quarantined) return E_NOINTERFACE;
         }
         if (contextCount == contexts.size()) return E_OUTOFMEMORY;
-        // A process-local switch lets the automated qualification choose
-        // recomposition without modifying saved graphics or FG settings.
+        // An ordinary launch can qualify recomposition at 2x. The process-local
+        // override keeps legacy available for controls. A present empty or
+        // malformed value cannot enable qualification.
         wchar_t qualification[2]{};
-        const bool recomposeUi = GetEnvironmentVariableW(L"EDUP_TEST_FG_UI_RECOMPOSITION", qualification, 2) == 1 &&
-            qualification[0] == L'1';
+        SetLastError(ERROR_SUCCESS);
+        const DWORD length = GetEnvironmentVariableW(kUiRecompositionOverride, qualification, 2);
+        const bool recomposeUi = (length == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) ||
+            (length == 1 && qualification[0] == L'1');
         auto* c = new Coordinator(request->gameDevice, request->generation, recomposeUi);
         contexts[contextCount++].store(c, std::memory_order_release); current.store(c, std::memory_order_release);
         *table = {}; table->size = sizeof(*table); table->version = 1; table->context = c;
@@ -1878,6 +1882,43 @@ void testFencedBootstrap(Coordinator& c, const EdvrFgTable& table, Check check) 
     clearUnexported(c);
     check(output.drain(0));
 }
+
+// Acquire the real coordinator for each process override without starting
+// the GPU worker. Restore the rig's original environment before returning.
+template<class Check>
+void testUiRecompositionSelection(EdvrFgRequest request, Check check) {
+    wchar_t previous[32768]{};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD length = GetEnvironmentVariableW(kUiRecompositionOverride, previous, _countof(previous));
+    const DWORD error = GetLastError();
+    const bool readable = length < _countof(previous) &&
+        (length != 0 || error == ERROR_SUCCESS || error == ERROR_ENVVAR_NOT_FOUND);
+    check(readable);
+    if (!readable) return;
+    const bool absent = length == 0 && error == ERROR_ENVVAR_NOT_FOUND;
+    const auto setOverride = [](const wchar_t* value) {
+        return SetEnvironmentVariableW(kUiRecompositionOverride, value) ||
+            (!value && GetLastError() == ERROR_ENVVAR_NOT_FOUND);
+    };
+    struct Selection { const wchar_t* value; bool allow; };
+    for (const auto& selection : {Selection{nullptr, true}, Selection{L"1", true}, Selection{L"0", false},
+        Selection{L"", false}, Selection{L"x", false}, Selection{L"10", false}}) {
+        const bool set = setOverride(selection.value);
+        check(set);
+        if (!set) continue;
+        ++request.generation;
+        EdvrFgTable table{sizeof(table), 1};
+        const bool acquired = nativeFgAcquire(&request, &table) == S_OK;
+        check(acquired);
+        if (!acquired) continue;
+        const auto* coordinator = identify(table.context);
+        check(coordinator && wantsQualification(*coordinator, 2) == selection.allow);
+        check(coordinator && !wantsQualification(*coordinator, 0) &&
+            !wantsQualification(*coordinator, 3) && !wantsQualification(*coordinator, 4));
+        check(table.close(table.context) == S_OK);
+    }
+    check(setOverride(absent ? nullptr : previous));
+}
 } // namespace
 
 unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
@@ -2282,6 +2323,7 @@ unsigned nativeFgTestProtocol(unsigned* checksOut) noexcept {
     ++request.generation;
     retry={sizeof(retry),1};
     check(nativeFgAcquire(&request,&retry)==S_OK&&retry.close(retry.context)==S_OK);
+    testUiRecompositionSelection(request, check);
     if (checksOut) *checksOut = checks;
     return failures;
 }
