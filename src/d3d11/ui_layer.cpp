@@ -8063,12 +8063,15 @@ static bool uiLayerFgSource(
         const void* copied = e.copiedSeq == sequence ? e.copiedTo : nullptr;
         facts.eye = frame == e.temporalOut && mine && mine != other &&
             (!facts.hasUi || e.target == mine || copied == mine);
+        // A published HUD must match the native layer target for this door.
+        // Its texel grid may be larger than the full-eye scene.
+        const UiLayerSize hudSize = uiLayerSize(fd.Width, fd.Height, layerTarget());
         facts.size = fd.Width && fd.Height && fd.SampleDesc.Count == 1 &&
             fd.ArraySize == 1 && fd.MipLevels == 1 && uiLayerFrameView(fd.Format) != DXGI_FORMAT_UNKNOWN &&
             region[0] == 0 && region[1] == 0 && region[2] == fd.Width && region[3] == fd.Height &&
             layerUv[0] == 0.f && layerUv[1] == 0.f && layerUv[2] == 1.f && layerUv[3] == 1.f &&
             e.door.fullW == fd.Width && e.door.fullH == fd.Height &&
-            (!facts.hasUi || (e.tex && e.srv && e.w == fd.Width && e.h == fd.Height));
+            (!facts.hasUi || (hudSize.w && hudSize.h && e.tex && e.srv && e.w == hudSize.w && e.h == hudSize.h));
         facts.scope = scopeZoomWanted();
         facts.ripple = g_rippleLive && e.dSeq == sequence && e.dDraws;
         facts.world = g_screenHeld == 1 || e.worldSeq == sequence || e.screenTakenSeq == sequence;
@@ -8079,7 +8082,7 @@ static bool uiLayerFgSource(
             !detail::g_uiLayerCrispPending && !detail::g_uiLayerWorldReissue &&
             (!hdr || (facts.hasUi && e.hdrToneSeq == sequence)) &&
             (!weapons || (facts.hasUi && e.wPubSeq == sequence)) &&
-            (!multiply || (facts.hasUi && e.mTex && e.mSrv && e.mW == fd.Width && e.mH == fd.Height));
+            (!multiply || (facts.hasUi && e.mTex && e.mSrv && e.mW == e.w && e.mH == e.h));
         const auto refusal = uiLayerFgAdmission(facts);
         if (refusal != UiLayerFgRefusal::None) return fail(refusal);
         if (source) {

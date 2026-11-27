@@ -116,17 +116,12 @@ inline void formatNativeFgTileValue(const NativeFgReadout& r,char* text,size_t s
     }
 }
 
-inline void formatNativeFgRates(const NativeFgReadout& r,char* text,size_t size,bool compact=false) {
+inline void formatNativeFgRates(const NativeFgReadout& r,char* text,size_t size) {
     if(!text||!size)return;
     if(r.measurement!=NativeFgMeasureState::Counting){
         std::snprintf(text,size,"FG counts %s",nativeFgMeasureWord(r.measurement));return;
     }
-    if(compact) {
-        char repeats[32]="";
-        if(r.repeatedFps>.05)std::snprintf(repeats,sizeof(repeats)," + %.0f repeat",r.repeatedFps);
-        std::snprintf(text,size,"%.0f submit fps (%.0f native + %.0f gen%s)",r.submittedFps,r.nativeFps,r.generatedFps,repeats);
-    }
-    else std::snprintf(text,size,"native %.1f + gen %.1f + repeat %.1f fps",r.nativeFps,r.generatedFps,r.repeatedFps);
+    std::snprintf(text,size,"native %.1f + gen %.1f + repeat %.1f fps",r.nativeFps,r.generatedFps,r.repeatedFps);
 }
 inline void formatNativeFgTotals(const NativeFgReadout& r,char* text,size_t size) {
     if(!text||!size)return;
@@ -135,25 +130,20 @@ inline void formatNativeFgTotals(const NativeFgReadout& r,char* text,size_t size
         (unsigned long long)r.totals.generatedFrames,(unsigned long long)r.totals.repeatedFrames);
     else std::snprintf(text,size,"%s | counts unavailable",mode);
 }
+// Use the measured total when XR counters are fresh. Older runtimes can still
+// supply the rendered rate, even when there is no submission measurement.
 inline void formatNativeFgCompact(const NativeFgReadout& r,char* text,size_t size,double renderFps=-1.) {
     if(!text||!size)return;
-    char rates[96],mode[40];formatNativeFgRates(r,rates,sizeof(rates),true);formatNativeFgMode(r,mode,sizeof(mode));
-    if(r.measurement!=NativeFgMeasureState::Counting&&renderFps>=0.)
-        std::snprintf(rates,sizeof(rates),"render %.0f fps | gen %s",renderFps,nativeFgMeasureWord(r.measurement));
-    if(r.totals.available)std::snprintf(text,size,"%s | %s | gen total %llu",rates,mode,(unsigned long long)r.totals.generatedFrames);
-    else std::snprintf(text,size,"%s | %s",rates,mode);
+    char mode[40];formatNativeFgMode(r,mode,sizeof(mode));
+    const double fps=r.measurement==NativeFgMeasureState::Counting?r.submittedFps:renderFps;
+    if(fps>=0.)std::snprintf(text,size,"%.0f FPS | %s",fps,mode);
+    else std::snprintf(text,size,"FPS %s | %s",nativeFgMeasureWord(r.measurement),mode);
 }
-// Limit the compact readout to 95 characters for readability. Keep all frame
-// metrics intact; timings remain on the detailed card when the line is full.
+// Include timings only when the full line fits.
 constexpr size_t kNativeFgCompactMaxChars=95;
 inline void formatNativeFgOverlay(const NativeFgReadout& r,double renderFps,const char* timings,char* text,size_t size) {
     if(!text||!size)return;
-    char line[192];formatNativeFgCompact(r,line,sizeof(line),renderFps);
-    if(std::strlen(line)>kNativeFgCompactMaxChars) {
-        char mode[40];formatNativeFgMode(r,mode,sizeof(mode));
-        if(r.totals.available)std::snprintf(line,sizeof(line),"%s | gen total %llu | rates unavailable",mode,(unsigned long long)r.totals.generatedFrames);
-        else std::snprintf(line,sizeof(line),"%s | counts unavailable",mode);
-    }
+    char line[kNativeFgCompactMaxChars+1];formatNativeFgCompact(r,line,sizeof(line),renderFps);
     const bool fits=timings&&std::strlen(line)+std::strlen(timings)<=kNativeFgCompactMaxChars;
     std::snprintf(text,size,"%s%s",line,fits?timings:"");
 }

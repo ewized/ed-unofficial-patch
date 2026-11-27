@@ -390,9 +390,11 @@ and keeps the selected mode. It checks fresh stereo pose and HUD information
 without repeatedly running the generation pipeline. Generation can resume
 after eligible pairs and fresh generation history are available.
 
-With frame generation selected, the Monitor page and FPS readout report the
-native and generated frames submitted to OpenXR. They measure application
-submissions. The headset runtime controls final presentation and reprojection.
+With frame generation selected, the compact readout shows one FPS figure and
+the current mode. The Monitor page and detailed readout break down the rate by
+native, generated and repeated frames. These figures measure OpenXR application
+submissions when available. The headset runtime controls final presentation
+and reprojection.
 
 See the [build guide](building.md) for the required NVIDIA runtime, its
 matching license notice and the explicit install option.

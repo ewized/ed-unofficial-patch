@@ -1,4 +1,5 @@
 #include "frame_generation_interop.h"
+#include "ui_layer_math.h"
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <array>
@@ -257,8 +258,14 @@ bool FrameGenerationInterop::capture(ID3D11DeviceContext* context, std::uint64_t
         return impl_->reject(FrameGenerationInteropFailure::InvalidSequence);
     D3D11_TEXTURE2D_DESC desc{}; source->GetDesc(&desc);
     const bool guide = role == FrameGenerationPlane::Depth || role == FrameGenerationPlane::Motion;
-    if (!fg_interop::descriptor(desc, guide ? impl_->config.guideWidth : impl_->config.colorWidth,
-            guide ? impl_->config.guideHeight : impl_->config.colorHeight))
+    const bool hud = role == FrameGenerationPlane::UiColorTransmittance || role == FrameGenerationPlane::UiMultiply;
+    const auto& config = impl_->config;
+    const bool valid = hud
+        ? uiLayerFgSupportedSize(config.colorWidth, config.colorHeight, desc.Width, desc.Height) &&
+            fg_interop::descriptor(desc, desc.Width, desc.Height)
+        : fg_interop::descriptor(desc, guide ? config.guideWidth : config.colorWidth,
+            guide ? config.guideHeight : config.colorHeight);
+    if (!valid)
         return impl_->reject(FrameGenerationInteropFailure::InvalidDescriptor);
     if (!fg_interop::format(role, desc.Format)) return impl_->reject(FrameGenerationInteropFailure::InvalidFormat);
     ComPtr<ID3D11Device> sourceDevice; source->GetDevice(&sourceDevice);

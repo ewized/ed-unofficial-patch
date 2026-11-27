@@ -1,4 +1,5 @@
 #include "frame_generation_output.h"
+#include "ui_layer_math.h"
 #include "ui_layer_shaders.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -375,7 +376,10 @@ struct FrameGenerationOutput::Impl {
         UiLayerCompositeParams constants{};
         constants.region[2] = int32_t(width); constants.region[3] = int32_t(height);
         std::memcpy(constants.uv, ui.uv, sizeof(constants.uv));
-        constants.layerSize[0] = float(width); constants.layerSize[1] = float(height);
+        // The native HUD shader area-filters the HUD's actual texels into
+        // the eye footprint. Coverage uses the exact same footprint.
+        const auto hud = resources[1]->GetDesc();
+        constants.layerSize[0] = float(hud.Width); constants.layerSize[1] = float(hud.Height);
         constants.outSize[0] = width; constants.outSize[1] = height; constants.useMult = ui.useMult ? 1u : 0u;
         constants.mode=mode;
         list->SetComputeRootDescriptorTable(0, gpu);
@@ -481,13 +485,26 @@ FrameGenerationOutputTicket FrameGenerationOutput::submit(const std::shared_ptr<
         if (!data.prepare(slot, phases,separateUi)) return ticket;
         const FrameGenerationPlane roles[3] = {FrameGenerationPlane::Color,
             FrameGenerationPlane::UiColorTransmittance, FrameGenerationPlane::UiMultiply};
-        for (unsigned e = 0; e < 2; ++e) for (unsigned i = 0; i < 3; ++i) {
-            const auto* plane = input->plane(e, roles[i]);
-            if (!plane || plane->state != D3D12_RESOURCE_STATE_COMMON ||
-                !texture(data.device.Get(), plane->resource12, data.width, data.height, i == 0)) {
+        for (unsigned e = 0; e < 2; ++e) {
+            const auto* hud = input->plane(e, FrameGenerationPlane::UiColorTransmittance);
+            const unsigned hudWidth = hud ? hud->sourceDesc.Width : 0;
+            const unsigned hudHeight = hud ? hud->sourceDesc.Height : 0;
+            if (!hud || (!ui[e].empty && !uiLayerFgSupportedSize(data.width, data.height, hudWidth, hudHeight))) {
                 data.fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false); return ticket;
             }
-            slot.inputs[e][i] = plane->resource12;
+            for (unsigned i = 0; i < 3; ++i) {
+                const auto* plane = input->plane(e, roles[i]);
+                // Only the HUD and an active multiply plane share the HUD
+                // extent. Neutral placeholders use the native eye extent.
+                const bool atHudExtent = (i == 1 && !ui[e].empty) || (i == 2 && ui[e].useMult);
+                const unsigned expectedWidth = atHudExtent ? hudWidth : data.width;
+                const unsigned expectedHeight = atHudExtent ? hudHeight : data.height;
+                if (!plane || plane->state != D3D12_RESOURCE_STATE_COMMON ||
+                    !texture(data.device.Get(), plane->resource12, expectedWidth, expectedHeight, i == 0)) {
+                    data.fail(FrameGenerationOutputFailure::InvalidResource, E_INVALIDARG, false); return ticket;
+                }
+                slot.inputs[e][i] = plane->resource12;
+            }
         }
         if (generated) for (unsigned e = 0; e < 2; ++e) for (unsigned i = 0; i < backend.generatedCount; ++i)
             if (!texture(data.device.Get(), backend.generated[e][i], data.width, data.height, true)) {

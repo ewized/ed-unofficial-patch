@@ -150,6 +150,18 @@ inline UiLayerSize uiLayerSize(uint32_t outW, uint32_t outH, float target) {
     return s;
 }
 
+// Frame generation uses the same full-eye HUD sampling grid as native
+// composition. Check both axes against one supported UI Quality setting.
+inline bool uiLayerFgSupportedSize(uint32_t frameW, uint32_t frameH, uint32_t layerW, uint32_t layerH) noexcept {
+    if (!layerW || !layerH) return false;
+    constexpr float targets[] = {1.0f, 1.25f, 1.5f};
+    for (float target : targets) {
+        const auto size = uiLayerSize(frameW, frameH, target);
+        if (size.w == layerW && size.h == layerH) return true;
+    }
+    return false;
+}
+
 // Bytes of one 8-bit RGBA surface of this size: the layer, and the
 // composite's own output (the door's size, the same 4 bytes a pixel for the
 // 8-bit families the composite accepts). Megabytes are decimal, the unit

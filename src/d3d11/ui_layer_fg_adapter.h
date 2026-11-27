@@ -1,6 +1,7 @@
 #pragma once
 // Private production adapter shared by ui_layer.cpp and its focused WARP rig.
 #include "ui_layer.h"
+#include "ui_layer_math.h"
 #include "ui_layer_smaa.h"
 #include "ui_layer_shaders.h"
 #include <windows.h>
@@ -276,13 +277,16 @@ bool withPlanes(ID3D11DeviceContext* context,
             uiLayerFrameView(fd.Format) == DXGI_FORMAT_UNKNOWN) return fail(UiLayerFgRefusal::SizeMismatch);
         result.width = fd.Width; result.height = fd.Height; result.frameFormat = fd.Format;
         result.sourceDevice = reinterpret_cast<uintptr_t>(device.Get()); result.ownerThread = GetCurrentThreadId();
+        D3D11_TEXTURE2D_DESC hud{};
         if (facts.hasUi) {
             if (!source.layer || !source.layerView) return fail(UiLayerFgRefusal::IncompletePublication);
-            if (!planeMatches(device.Get(), source.layer, source.layerView, fd.Width, fd.Height))
+            source.layer->GetDesc(&hud);
+            if (!uiLayerFgSupportedSize(fd.Width, fd.Height, hud.Width, hud.Height) ||
+                !planeMatches(device.Get(), source.layer, source.layerView, hud.Width, hud.Height))
                 return fail(UiLayerFgRefusal::SizeMismatch);
             if (source.useMult) {
                 if (!source.multiply || !source.multiplyView) return fail(UiLayerFgRefusal::IncompletePublication);
-                if (!planeMatches(device.Get(), source.multiply, source.multiplyView, fd.Width, fd.Height))
+                if (!planeMatches(device.Get(), source.multiply, source.multiplyView, hud.Width, hud.Height))
                     return fail(UiLayerFgRefusal::SizeMismatch);
             }
         } else if (source.useMult) return fail(UiLayerFgRefusal::IncompletePublication);
@@ -294,8 +298,8 @@ bool withPlanes(ID3D11DeviceContext* context,
         Ptr<ID3D11Texture2D> smoothedTexture;
         if (facts.hasUi && (source.smooth || source.fxaa)) {
             UiLayerSmaaFail failure;
-            const bool ready = source.fxaa ? cache.ensureFxaa(fd.Width, fd.Height, &failure)
-                                           : cache.ensure(fd.Width, fd.Height, &failure);
+            const bool ready = source.fxaa ? cache.ensureFxaa(hud.Width, hud.Height, &failure)
+                                           : cache.ensure(hud.Width, hud.Height, &failure);
             if (!ready) return fail(UiLayerFgRefusal::CopyFailed);
             // Restore compute state before giving the final texture to the sink.
             ComputeStateGuard restoreCompute(context);
@@ -304,7 +308,7 @@ bool withPlanes(ID3D11DeviceContext* context,
             Ptr<ID3D11Resource> resource;
             if (layerView) layerView->GetResource(&resource);
             if (!resource || FAILED(resource.As(&smoothedTexture)) ||
-                !planeMatches(device.Get(), smoothedTexture.Get(), layerView, fd.Width, fd.Height))
+                !planeMatches(device.Get(), smoothedTexture.Get(), layerView, hud.Width, hud.Height))
                 return fail(UiLayerFgRefusal::CopyFailed);
             planes.layer = smoothedTexture.Get();
             result.smoothingApplied = true;

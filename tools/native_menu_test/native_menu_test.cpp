@@ -755,8 +755,8 @@ int wmain(int argc, wchar_t** argv) {
         float referenceWidth = 0.f;
         check(edvr::menuPanelBuildOverlayContent(reference, readout, 1.1f, &referenceWidth),
               "overlay production content builder");
-        // Frame-generation counters must fit the actual production compact and
-        // detailed builders, including long session totals and Auto waiting.
+        // The compact builder shows total FPS and mode. The detailed builder
+        // can also fit long session counts.
         edvr::NativeFgReadout fg;fg.visible=fg.automatic=true;fg.selectedMultiplier=2;
         fg.measurement=edvr::NativeFgMeasureState::Counting;
         fg.nativeFps=45;fg.generatedFps=45;fg.submittedFps=90;
@@ -764,8 +764,9 @@ int wmain(int argc, wchar_t** argv) {
         fg.totals.generatedFrames=1234567890123456789ull;
         char fgLine[160];edvr::formatNativeFgOverlay(fg,45,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
         edvr::MenuContent fgContent{};
-        check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
-              "native FG compact readout with Auto mode and a long total fits the production panel");
+        check(std::strcmp(fgLine,"90 FPS | Auto: 2x   gpu 13.3 ms   cpu 1.4 ms")==0 &&
+              edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),
+              "native FG compact readout shows FPS and mode with timings in the production panel");
         fg.measurement=edvr::NativeFgMeasureState::Unavailable;fg.totals.fgEnabled=false;
         edvr::formatNativeFgOverlay(fg,58.4,"   gpu 13.3 ms   cpu 1.4 ms",fgLine,sizeof(fgLine));
         check(edvr::menuPanelBuildOverlayContent(fgContent,fgLine,1.1f,nullptr),

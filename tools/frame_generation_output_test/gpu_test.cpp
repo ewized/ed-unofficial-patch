@@ -20,6 +20,8 @@ namespace {
 FrameGenerationNgxCompletion admission = FrameGenerationNgxCompletion::Ready;
 unsigned checks = 0;
 constexpr unsigned width = 64, height = 32;
+constexpr unsigned supersampledWidth = width * 3 / 2, supersampledHeight = height * 3 / 2;
+constexpr unsigned hudEdge = width / 4, supersampledHudEdge = hudEdge * 3 / 2 + 1;
 void check(bool value, const char* label) {
     ++checks;
     if (!value) throw std::runtime_error(label);
@@ -78,16 +80,44 @@ Pixel world(unsigned phase, unsigned eye, unsigned x, unsigned y) {
         static_cast<unsigned char>(40 + eye * 10 + phase * 7 + x % 8),
         static_cast<unsigned char>(60 + phase * 5 + y % 8), static_cast<unsigned char>(173 + eye * 24)};
 }
-Pixel layer(unsigned eye, unsigned x, unsigned y) {
-    if(x<width/4)return Pixel{0,0,0,255};
+constexpr Pixel emptyLayer{0, 0, 0, 255}, emptyMultiply{255, 255, 255, 255};
+// Cover a supersampled HUD with multiply on the left, an empty right eye,
+// then a supersampled HUD with a scene-sized neutral multiply on the right.
+bool supersampledHud(unsigned route, unsigned eye) {
+    return (route == 4 && eye == 0) || (route == 5 && eye == 1);
+}
+unsigned hudBoundary(bool supersampled) { return supersampled ? supersampledHudEdge : hudEdge; }
+Pixel layer(unsigned eye, unsigned x, unsigned y, bool supersampled) {
+    if (x < hudBoundary(supersampled)) return emptyLayer;
     return Pixel{static_cast<unsigned char>(12 + eye * 8 + x % 8), static_cast<unsigned char>(5 + y % 4),
         static_cast<unsigned char>(3 + eye), static_cast<unsigned char>(128 + eye * 16)};
 }
 Pixel multiply(unsigned eye) { return Pixel{static_cast<unsigned char>(128 + eye * 32), 255, 64, 255}; }
-Pixel multiplyAt(unsigned eye,unsigned x){return x<width/4?Pixel{255,255,255,255}:multiply(eye);}
+Pixel multiplyAt(unsigned eye, unsigned x, bool supersampled) {
+    return x < hudBoundary(supersampled) ? emptyMultiply : multiply(eye);
+}
+using FilteredPixel = std::array<float, 4>;
+// At 150%, each output pixel straddles two source texels per axis. The
+// full and half texel swap weights every pixel, including at the HUD edge.
+template<class Sample>
+FilteredPixel filterHud(unsigned x, unsigned y, bool supersampled, Sample sample) {
+    if (!supersampled) {
+        const auto pixel = sample(x, y);
+        return {float(pixel[0]), float(pixel[1]), float(pixel[2]), float(pixel[3])};
+    }
+    const unsigned firstX = x * 3 / 2, firstY = y * 3 / 2;
+    const unsigned xWeight[] = {2 - x % 2, 1 + x % 2}, yWeight[] = {2 - y % 2, 1 + y % 2};
+    FilteredPixel filtered{};
+    for (unsigned dy = 0; dy < 2; ++dy) for (unsigned dx = 0; dx < 2; ++dx) {
+        const auto pixel = sample(firstX + dx, firstY + dy);
+        for (unsigned c = 0; c < pixel.size(); ++c) filtered[c] += float(pixel[c] * xWeight[dx] * yWeight[dy]);
+    }
+    for (auto& channel : filtered) channel /= 9.f;
+    return filtered;
+}
 ComPtr<ID3D11Texture2D> image(ID3D11Device* device, DXGI_FORMAT format, const void* pixels, UINT pitch,
-                             bool shared = false) {
-    D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
+                             bool shared = false, unsigned imageWidth = width, unsigned imageHeight = height) {
+    D3D11_TEXTURE2D_DESC desc{}; desc.Width = imageWidth; desc.Height = imageHeight;
     desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1; desc.Format = format;
     desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     if (shared) { desc.BindFlags |= D3D11_BIND_RENDER_TARGET; desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED; }
@@ -219,18 +249,27 @@ void run() {
         check(interop.begin(runtime.producerContext.Get(), sequence, 1), "begin immutable stereo source");
         std::array<std::array<ComPtr<ID3D11Texture2D>, 5>, 2> sources;
         for (unsigned e = 0; e < 2; ++e) {
-            std::vector<Pixel> colors(width * height), layers(width * height), mults(width * height, multiply(e));
-            for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
-                colors[y * width + x] = world(0, e, x, y); layers[y * width + x] = layer(e, x, y);
-                mults[y*width+x]=multiplyAt(e,x);
-                if(route==4&&e==1){layers[y*width+x]={0,0,0,255};mults[y*width+x]={255,255,255,255};}
-            }
+            const bool supersampled = supersampledHud(route, e), empty = route == 4 && e == 1;
+            const unsigned hudWidth = supersampled ? supersampledWidth : width;
+            const unsigned hudHeight = supersampled ? supersampledHeight : height;
+            const unsigned multWidth = e == 0 ? hudWidth : width;
+            const unsigned multHeight = e == 0 ? hudHeight : height;
+            std::vector<Pixel> colors(width * height), layers(hudWidth * hudHeight);
+            std::vector<Pixel> mults(multWidth * multHeight, emptyMultiply);
+            for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x)
+                colors[y * width + x] = world(0, e, x, y);
+            for (unsigned y = 0; y < hudHeight; ++y) for (unsigned x = 0; x < hudWidth; ++x)
+                layers[y * hudWidth + x] = empty ? emptyLayer : layer(e, x, y, supersampled);
+            if (e == 0) for (unsigned y = 0; y < multHeight; ++y) for (unsigned x = 0; x < multWidth; ++x)
+                mults[y * multWidth + x] = multiplyAt(e, x, supersampled);
             std::vector<float> depth(width * height, .5f); std::vector<uint32_t> motion(width * height, 0);
             sources[e][0] = image(runtime.producer.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, colors.data(), width * sizeof(Pixel));
             sources[e][1] = image(runtime.producer.Get(), DXGI_FORMAT_R32_FLOAT, depth.data(), width * sizeof(float));
             sources[e][2] = image(runtime.producer.Get(), DXGI_FORMAT_R16G16_FLOAT, motion.data(), width * sizeof(uint32_t));
-            sources[e][3] = image(runtime.producer.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, layers.data(), width * sizeof(Pixel));
-            sources[e][4] = image(runtime.producer.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, mults.data(), width * sizeof(Pixel));
+            sources[e][3] = image(runtime.producer.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, layers.data(),
+                hudWidth * sizeof(Pixel), false, hudWidth, hudHeight);
+            sources[e][4] = image(runtime.producer.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, mults.data(),
+                multWidth * sizeof(Pixel), false, multWidth, multHeight);
             for (unsigned p = 0; p < 5; ++p) check(interop.capture(runtime.producerContext.Get(), sequence, 1, e,
                 FrameGenerationPlane(p), sources[e][p].Get(), sequence * 100 + e * 10 + p + 1), "capture actual immutable plane");
         }
@@ -254,6 +293,14 @@ void run() {
         FrameGenerationOutputUi ui[2]; ui[0].useMult = true;
         ui[1].empty=route==4;
         if(route==0)source.previous={}; // First native seed has no publishable generated history.
+        if (route == 4 || route == 5) {
+            FrameGenerationOutputUi mismatched[] = {ui[0], ui[1]};
+            const unsigned eye = route == 4 ? 0 : 1;
+            mismatched[eye].useMult = !mismatched[eye].useMult;
+            const auto rejected = output->submit(captured, synthetic, mismatched, source, nativeOnly);
+            check(!rejected.accepted && output->status().failure == FrameGenerationOutputFailure::InvalidResource &&
+                !output->status().failed, "multiply extent must match the active HUD or neutral scene contract");
+        }
         auto ticket = output->submit(captured, synthetic, ui, source,nativeOnly);
         if(route==9) {
             check(!ticket.accepted&&!ticket.unsafe&&output->status().failure==FrameGenerationOutputFailure::Stale&&
@@ -355,17 +402,28 @@ void run() {
             hr(mappedResult, "bounded fenced nonblocking pixel readback");
             for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
                 const auto expectedWorld = world(p>=4?0:p, e, x, y);
-                const bool emptyUi=route==4&&e==1;
-                const auto expectedLayer = emptyUi?Pixel{0,0,0,255}:layer(e, x, y); const auto mult = multiplyAt(e,x);
+                const bool supersampled = supersampledHud(route, e), empty = route == 4 && e == 1;
+                const auto expectedLayer = filterHud(x, y, supersampled, [&](unsigned sx, unsigned sy) {
+                    return empty ? emptyLayer : layer(e, sx, sy, supersampled);
+                });
+                const auto mult = filterHud(x, y, supersampled, [&](unsigned sx, unsigned) {
+                    return e == 0 ? multiplyAt(e, sx, supersampled) : emptyMultiply;
+                });
+                const bool covered = expectedLayer != FilteredPixel{0, 0, 0, 255} ||
+                    mult != FilteredPixel{255, 255, 255, 255};
+                if (p == 4 && supersampled && x == hudEdge)
+                    check(expectedLayer[3] > layer(e, supersampledHudEdge, 0, true)[3] && expectedLayer[3] < 255.f,
+                        "native coverage edge crosses only one third of a scene texel");
                 const auto* actual = static_cast<const unsigned char*>(mapped.pData) + y * mapped.RowPitch + x * 4;
                 for (unsigned c = 0; c < 3; ++c) {
-                    float result = expectedLayer[c] + expectedWorld[c] * (expectedLayer[3] / 255.f) * (e == 0 ? mult[c] / 255.f : 1.f);
+                    float result = expectedLayer[c] + expectedWorld[c] * (expectedLayer[3] / 255.f) * (mult[c] / 255.f);
                     if((p>0&&p<4)||p==5)result=expectedWorld[c];
-                    if(p==4&&(x<width/4||emptyUi))result=0;
+                    if (p == 4 && !covered) result = 0;
                     check(std::abs(int(actual[c]) - int(std::lround(result))) <= 1,
                         p==5?"raw native world supports matching HUD composition":p==4?"native-pose UI coverage retains exact production color":p?"generated world contains no native HUD":"native endpoint preserves original UI blend");
                 }
-                check(actual[3] == (p==4?((x<width/4||emptyUi)?0:255):expectedWorld[3]), "native UI footprint alpha is opaque or transparent; world alpha is preserved");
+                check(actual[3] == (p == 4 ? (covered ? 255 : 0) : expectedWorld[3]),
+                    "native UI footprint alpha is opaque or transparent; world alpha is preserved");
             }
             runtime.consumerContext->Unmap(staging[p][e].Get(), 0);
         }

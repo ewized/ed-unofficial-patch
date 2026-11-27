@@ -401,20 +401,21 @@ static void poolCases(ID3D11Device* device, ID3D11DeviceContext* context) {
             "new-device held snapshot survives its own cache retirement");
     }
 }
-static void directCaptureCases(ID3D11Device* device, ID3D11DeviceContext* context) {
+static void directCaptureCases(ID3D11Device* device, ID3D11DeviceContext* context, unsigned layerSize) {
     namespace adapter = edvr::ui_layer_fg;
     const Pixel hud{32, 48, 64, 128}, tint{64, 128, 192, 255}, changed{96, 80, 72, 200};
     const auto paint = [&](ID3D11Texture2D* texture, Pixel pixel) {
-        std::array<Pixel, 64> pixels;
-        pixels.fill(pixel);
-        context->UpdateSubresource(texture, 0, nullptr, pixels.data(), 8 * sizeof(Pixel), 0);
+        write(context, texture, std::vector<Pixel>(static_cast<size_t>(layerSize) * layerSize, pixel));
     };
     for (const auto mode : {edvr::HudAaMode::kOff, edvr::HudAaMode::kSmaa, edvr::HudAaMode::kFxaa}) {
-        auto live = image(device, hud), multiply = image(device, tint), scene = image(device, {});
+        const auto plane = [&](Pixel pixel = {}) {
+            return image(device, pixel, false, layerSize, layerSize);
+        };
+        auto live = plane(hud), multiply = plane(tint), scene = image(device, {});
         auto otherEye = image(device, {});
-        auto firstLayer = image(device, {}), firstMult = image(device, {});
-        auto nextLayer = image(device, {}), nextMult = image(device, {});
-        auto partialLayer = image(device, {}), unusedMult = image(device, {});
+        auto firstLayer = plane(), firstMult = plane();
+        auto nextLayer = plane(), nextMult = plane();
+        auto partialLayer = plane(), unusedMult = plane();
         adapter::Source source;
         source.facts.arguments = source.facts.owner = source.facts.available = source.facts.sequence = true;
         source.facts.eye = source.facts.size = source.facts.complete = source.facts.hasUi = true;
@@ -428,7 +429,7 @@ static void directCaptureCases(ID3D11Device* device, ID3D11DeviceContext* contex
         std::array<std::shared_ptr<const edvr::UiLayerFgSnapshot>, 3> references;
         for (auto& reference : references) {
             reference = adapter::capture(context, scene.tex.Get(), source, cache, nullptr);
-            check(bool(reference), "retained slots have independent reference pixels");
+            check(bool(reference), "retained slots accept supported HUD sizes independently of the scene");
         }
         const uint64_t allocations = cache.textureAllocations;
         const uint64_t reuses = cache.planeReuses, misses = cache.poolMisses;
@@ -469,6 +470,22 @@ static void directCaptureCases(ID3D11Device* device, ID3D11DeviceContext* contex
         check(!adapter::captureTo(context, scene.tex.Get(), wrongView, cache, submit, &first, &info) &&
             info.refusal == edvr::UiLayerFgRefusal::SizeMismatch && !first.calls,
             "wrong multiply view never reaches an interop sink");
+        const unsigned otherSize = layerSize == 8 ? 10 : 8;
+        const auto wrongSize = image(device, tint, false, otherSize, otherSize);
+        auto mismatchedMultiply = source;
+        mismatchedMultiply.multiply = wrongSize.tex.Get();
+        mismatchedMultiply.multiplyView = wrongSize.srv.Get();
+        check(!adapter::captureTo(context, scene.tex.Get(), mismatchedMultiply, cache, submit, &first, &info) &&
+            info.refusal == edvr::UiLayerFgRefusal::SizeMismatch && !first.calls,
+            "multiply must match both dimensions of the HUD");
+        const auto wrongHud = image(device, hud, false, layerSize, otherSize);
+        auto mismatchedHud = source;
+        mismatchedHud.layer = wrongHud.tex.Get();
+        mismatchedHud.layerView = wrongHud.srv.Get();
+        mismatchedHud.useMult = false;
+        check(!adapter::captureTo(context, scene.tex.Get(), mismatchedHud, cache, submit, &first, &info) &&
+            info.refusal == edvr::UiLayerFgRefusal::SizeMismatch && !first.calls,
+            "HUD cannot use different scale factors on each axis");
 
         Sink partial{context, partialLayer.tex.Get(), unusedMult.tex.Get(), preparedLayer, multiply.tex.Get()};
         partial.acceptMultiply = false;
@@ -514,7 +531,8 @@ static void gpu() {
         D3D11_SDK_VERSION, &device, nullptr, &context), "WARP device");
     poolCases(device.Get(), context.Get());
     retirementCases(device.Get(), context.Get());
-    directCaptureCases(device.Get(), context.Get());
+    for (unsigned layerSize : {8u, 10u, 12u})
+        directCaptureCases(device.Get(), context.Get(), layerSize);
     ComPtr<ID3D11ComputeShader> sentinelShader;
     hr(device->CreateComputeShader(edvr::kUiLayerCompositeInPlaceBytecode, sizeof(edvr::kUiLayerCompositeInPlaceBytecode),
         nullptr, &sentinelShader), "distinct sentinel CS");
