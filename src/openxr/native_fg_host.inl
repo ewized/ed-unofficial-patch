@@ -76,7 +76,8 @@
     if(!fgCreditLoan.run(gate,operation,runtimeGeneration,service.isOwner()&&GetCurrentThreadId()==ownerThread,
        [&]{request->run();}))request->finish(false);
   }
-  void fgDisable(uint32_t reason,const RuntimeGate::Lease& operation,bool resumeCredit=false,bool discardDrawn=false) {
+  void fgDisable(uint32_t reason,const RuntimeGate::Lease& operation,bool resumeCredit=false,bool discardDrawn=false,
+      const EdvrFgStatus* cameraWithdrawal=nullptr) {
     fgResumedNative=false;
     const auto source=poses.read();
     const bool retain=resumeCredit&&fgNativeOutstanding&&source.posesAvailable&&source.sequence==activeFrameSequence&&
@@ -84,7 +85,23 @@
     // A prepared draw already ran its plugin pass. Close that slot before
     // acquiring the one in which an outstanding native credit can finish.
     if(state.frameOpen()&&(!retain||discardDrawn)) {
-      const auto ended=fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
+      XrResult ended=XR_SUCCESS;
+      if(cameraWithdrawal) {
+        const auto confirm=[&] {
+          EdvrFgStatus live{};
+          return frameGeneration.status(live)==S_OK&&fgCameraWithdrawal(live);
+        };
+        ended=fgFillCameraWithdrawal(*cameraWithdrawal,confirm,[&](const XrView (&views)[2],XrTime time,
+            const EyeCapture& native,XrCompositionLayerProjection& layer) {
+          return fgRenderCaptured(views,time,native,layer,comfortFade(),nullptr,!discardDrawn);
+        });
+      }
+      // A failed replacement draw still owns this slot. An attempted
+      // xrEndFrame, including a failed one, has already closed it.
+      if(state.frameOpen()) {
+        const auto closed=fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty);
+        if(ended==XR_SUCCESS)ended=closed;
+      }
       if(ended!=XR_SUCCESS){publishFatalFailure(ended,"native_fg_disable");return;}
     }
     if(retain) {
@@ -110,7 +127,7 @@
     fgPendingNativePose={};
     fgEnabled.store(false,std::memory_order_release);service.setContinuousIdle(false);
     fgNativeOutstanding=false;fgAcceptedEyes=0;fgFallbackValid=false;fgDisplayedSequence=0;fgHistory=0;
-    fgSplitFallbackValid=false;
+    fgSplitFallbackValid=false;fgOrdinaryFallback={};
     frameGeneration.invalidate(reason);
     if(fgCredit){auto request=std::move(fgCredit);fgRunCredit(request,operation);}
   }
@@ -154,7 +171,7 @@
       !changes.crosses(fgSubmittedNative.time,frameGeometry.displayTime);
   }
   void fgSeedNativeFallback(const fgbootstrap::Epoch& epoch) {
-    fgFallbackValid=false;fgSplitFallbackValid=false;fgDisplayedSequence=0;
+    fgFallbackValid=false;fgSplitFallbackValid=false;fgDisplayedSequence=0;fgOrdinaryFallback={};
     const auto& receipt=fgSubmittedNative;
     if(!epoch.valid()||!(receipt.epoch==epoch)||!receipt.sequence)return;
     fgDisplayedSequence=receipt.sequence;
@@ -176,6 +193,7 @@
     }
     fgFallbackValid=true;fgFallbackSequence=receipt.sequence;fgFallbackSpace=receipt.space;
     fgFallbackTime=receipt.time;fgFallbackReference=epoch.reference;
+    fgOrdinaryFallback=receipt;
   }
   fgbootstrap::Epoch fgBootstrapEpoch(const EdvrFgStatus& status) const {
     if(status.generation!=runtimeGeneration||status.configGeneration!=fgConfig)return {};
@@ -235,6 +253,7 @@
     for(unsigned eye=0;eye<2;++eye)fgFallbackViews[eye]=source.views[eye];
     fgFallbackSpace=source.space;fgFallbackTime=source.time;fgFallbackSequence=source.sequence;
     fgFallbackReference=source.epoch.reference;fgFallbackValid=true;
+    fgOrdinaryFallback={source.epoch,source.sequence,source.time,source.space};
   }
   uint64_t fgPhaseSalvaged=0,fgPhasesExhausted=0,fgTranslatedBehind=0;
   fghandoff::Images fgPrepareImages(const EdvrFgStatus& status,XrTime displayTime,XrDuration period,bool imported,
@@ -304,7 +323,7 @@
     return &head.pose;
   }
   XrResult fgRenderCaptured(const XrView (&physicalViews)[2],XrTime sourceTime,const EyeCapture& pixels,
-      XrCompositionLayerProjection& layer,float fade,StereoNativeUi* overlay) {
+      XrCompositionLayerProjection& layer,float fade,StereoNativeUi* overlay,bool renderPlugins=true) {
     const auto seat=seated.frame();
     XrView views[2]={physicalViews[0],physicalViews[1]};
     for(unsigned eye=0;eye<2;++eye) {
@@ -313,7 +332,8 @@
     }
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     return stereo.renderCaptured(views,seat.space,pixels,layer,nullptr,nullptr,nullptr,fade,
-      fgLocatePluginHead(seat,sourceTime,head),0.f,nullptr,0.f,false,&seat.origin,nullptr,true,overlay);
+      renderPlugins?fgLocatePluginHead(seat,sourceTime,head):nullptr,
+      0.f,nullptr,0.f,false,&seat.origin,nullptr,renderPlugins,overlay);
   }
   XrResult fgRenderPrepared(unsigned phase,XrCompositionLayerProjection& world,bool& hasUi) {
     auto& images=frameGeneration.images();const auto& batch=images.metadata;
@@ -434,6 +454,90 @@
       status.lastFailure==EDVR_FG_NATIVE_COVERAGE;
   }
 
+  bool fgCameraWithdrawal(const EdvrFgStatus& status) const {
+    return fgEnabled.load(std::memory_order_acquire)&&fgHistory&&status.generation==runtimeGeneration&&
+      status.configGeneration==fgConfig&&status.historyGeneration>fgHistory&&status.historyGeneration-fgHistory==1&&
+      status.requestedMultiplier==fgMultiplier&&edvr::nativeFgFixedMultiplier(fgMultiplier)&&
+      !status.activeMultiplier&&status.state==EDVR_FG_UNAVAILABLE&&status.lastFailure==EDVR_FG_CAMERA_REFUSAL;
+  }
+  bool fgCompatibleScene() const {
+    return separateGraphics()&&edvr::vrProfileActive()&&!loading.visible()&&
+      featureFrameKnown&&featureFrame.sceneReady&&!fgMenuVisible&&!frameWithheld&&
+      !fovTrim.trimmed()&&!fovTrim.pending()&&!zoomAppliedNow&&zoomStripNow<=0.f&&!circleNow.on&&
+      !(featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10&&eyeshare::fromBits(featureFrame.leftEyeShare)>0.f)&&
+      !featureFrame.deferredPacing;
+  }
+  bool fgCameraRecoverySceneReady() const {
+    return state.running()&&!state.terminal()&&state.lifecycle()!=Lifecycle::Stopping&&
+      !pendingFrameEndFinish&&fgCompatibleScene()&&
+      GetTickCount64()-gameFrameCallMs.load(std::memory_order_relaxed)<=500;
+  }
+  XrDuration fgPanelPeriod() const {
+    return instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
+      ? XrDuration(1000000000./instrumentDisplayHz+.5) : 0;
+  }
+
+  // Replace the blank handoff slot with an ordinary stereo capture when the
+  // camera cut has not invalidated its geometry. Never consume FG output
+  // here, even if both imported textures are still present.
+  template<class Confirm,class Render>
+  XrResult fgFillCameraWithdrawal(const EdvrFgStatus& observed,Confirm confirm,Render render) {
+    const auto slot=boundary.frame();
+    if(!state.frameOpen()||!slot.shouldRender||!state.frameShouldRender()||
+       !fgCameraRecoverySceneReady()||!fgCameraWithdrawal(observed)||!confirm())return XR_SUCCESS;
+    const auto panelPeriod=fgPanelPeriod();
+    const XrDuration period=panelPeriod?panelPeriod:slot.predictedDisplayPeriod;
+    if(period<=0||period>50000000)return XR_SUCCESS;
+    // One native interval plus the current display opportunity.
+    const XrDuration maxAge=period*(fgMultiplier+1);
+    const auto valid=[&](const FgNativeEndpoint& source) {
+      if(!source.epoch.valid()||!(source.epoch==fgBootstrap.epoch())||
+         source.epoch.generation!=runtimeGeneration||source.epoch.config!=fgConfig||
+         source.epoch.reference!=poses.read().originGeneration||!source.space||source.space!=seated.frame().space||
+         !source.sequence||source.sequence<fgDisplayedSequence||source.sequence<fgBootstrap.committedSequence()||
+         source.time<=0||source.time>slot.predictedDisplayTime||slot.predictedDisplayTime-source.time>maxAge||
+         changes.crosses(source.time,slot.predictedDisplayTime))return false;
+      // Completing the active source can observe the cut before the XR owner
+      // sees it. Only that fully captured source can cross the old bootstrap
+      // epoch after its generated commitment has been cleared.
+      return source.epoch.history==fgHistory||
+        (source.epoch.history==observed.historyGeneration&&!fgNativeOutstanding&&source.sequence==activeFrameSequence);
+    };
+    const auto bothEyes=[](const EyeCapture& capture) {
+      return capture.texture(vr::Eye_Left)&&capture.texture(vr::Eye_Right);
+    };
+    const auto& pending=fgPendingNativePose;
+    FgNativeEndpoint source{pending.epoch,pending.sequence,pending.time,pending.space};
+    const EyeCapture* capture=&fgPendingNative;
+    const XrView (*views)[2]=&pending.views;
+    if(source.sequence!=fgBootstrap.completedSequence()||!valid(source)||!bothEyes(*capture)) {
+      source=fgOrdinaryFallback;
+      if(!fgFallbackValid||source.sequence!=fgFallbackSequence||!valid(source)||!bothEyes(fgFallback))return XR_SUCCESS;
+      capture=&fgFallback;views=&fgFallbackViews;
+    }
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    const auto drawn=render(*views,source.time,*capture,layer);
+    if(drawn!=XR_SUCCESS)return drawn;
+    const auto current=boundary.frame();
+    if(!state.frameOpen()||!current.shouldRender||!state.frameShouldRender()||
+       current.sequence!=slot.sequence||current.generation!=slot.generation||current.owner!=slot.owner||
+       !fgCameraRecoverySceneReady()||!valid(source)||!confirm())return XR_SUCCESS;
+    const bool repeated=source.sequence==fgDisplayedSequence;
+    const auto ended=fgEndPrepared(&layer,repeated?edvr::NativePresentationKind::Repeated:edvr::NativePresentationKind::Native);
+    if(ended==XR_SUCCESS&&boundary.frame().status==FrameStatus::Ended) {
+      fgLastPhase=0;fgLastSourceTime=source.time;fgLastAge=slot.predictedDisplayTime-source.time;
+      if(repeated)++fgRepeated;
+      else {
+        fgDisplayedSequence=source.sequence;fgSubmittedNative=source;
+        fgBootstrap.displayNative(source.sequence,fgTick);++fgNativePresented;
+      }
+      nativeTracePrintf("native_fg_camera_handoff,history=%llu,native_sequence=%llu,age_ms=%.3f,repeated=%u\n",
+        (unsigned long long)observed.historyGeneration,(unsigned long long)source.sequence,
+        double(fgLastAge)/1000000.,unsigned(repeated));
+    }
+    return ended;
+  }
+
   // Coverage can be withdrawn while an intermediate is drawn. Close that
   // real slot empty. On the next owner tick the normal coverage handoff can
   // settle B from an earlier successful intermediate and resume any credit.
@@ -493,12 +597,7 @@
     if(statusResult==S_OK)fgReleaseOffImages(status);
     const bool providerReady=statusResult==S_OK&&fgadmission::providerReady(status,runtimeGeneration);
     const bool coverageWithdrawal=statusResult==S_OK&&fgEnabled.load(std::memory_order_acquire)&&fgCoverageWithdrawal(status);
-    const bool compatible=(providerReady||coverageWithdrawal)&&separateGraphics()&&edvr::vrProfileActive()&&
-      !loading.visible()&&featureFrameKnown&&featureFrame.sceneReady&&!fgMenuVisible&&!frameWithheld&&
-      !fovTrim.trimmed()&&!fovTrim.pending()&&!zoomAppliedNow&&zoomStripNow<=0.f&&!circleNow.on&&
-      !(featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_10&&eyeshare::fromBits(featureFrame.leftEyeShare)>0.f)&&
-      callerFresh&&
-      !(featureFrameKnown&&featureFrame.deferredPacing);
+    const bool compatible=(providerReady||coverageWithdrawal)&&fgCompatibleScene()&&callerFresh;
     const bool requested=providerReady&&compatible;
     fgLifecycleReport(now,statusResult,status,requested,callerFresh);
     if(!requested) {
@@ -523,7 +622,8 @@
           }
           if(confirm())reason=EDVR_FG_NATIVE_COVERAGE; // producer already cut this epoch; retire local imports once
         }
-        fgDisable(reason,operation,recoverable);return true;
+        const auto* camera=reason==3u&&statusResult==S_OK&&fgCameraWithdrawal(status)?&status:nullptr;
+        fgDisable(reason,operation,recoverable,false,camera);return true;
       }
     }
     if(!fgEnabled.load(std::memory_order_acquire)) {
@@ -545,8 +645,7 @@
     fgBootstrap.sync(fgBootstrapEpoch(status));
     // Only the independently queried refresh rate can classify app-frame
     // intervals against panel cadence. Keep wall-age admission otherwise.
-    const XrDuration panelPeriod=instrumentDisplayHz>=20.&&instrumentDisplayHz<=250.
-      ? XrDuration(1000000000./instrumentDisplayHz+.5) : 0;
+    const XrDuration panelPeriod=fgPanelPeriod();
     fgBootstrap.syncDisplayPeriod(panelPeriod);
     if(!state.frameOpen()) {
       if(!poseSeatReady()){fgCancelCredit();return true;}
@@ -641,6 +740,7 @@
       if(pixels) {
         if(phase)images.next=fgschedule::nextPhase(phase,b.generatedCount);
         else {
+          fgOrdinaryFallback={};
           fgFallbackValid=images.phases[0].exchangeBuffers(fgFallback);
           fgSplitFallbackValid=false;
           if(b.uiFlags){
@@ -673,7 +773,10 @@
     // Sample the current generation again at the generated xrEndFrame edge.
     if(generated&&!fgCanSubmitBatch(images.metadata,&status)) {
       ++fgRefused;
-      if(!fgYieldCoverageSlot(status))fgDisable(3,operation,callerFresh,true);
+      if(!fgYieldCoverageSlot(status)) {
+        const auto* camera=callerFresh&&fgCameraWithdrawal(status)?&status:nullptr;
+        fgDisable(3,operation,callerFresh,true,camera);
+      }
       return true;
     }
     const XrResult ended=fgEndPrepared(pixels?&layer:nullptr,kind,generated?&images.metadata:nullptr);

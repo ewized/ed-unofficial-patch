@@ -301,6 +301,85 @@ template<class Check,class Seed> void runFgCoverageEndpointCases(Check check,See
   }
 }
 
+// Use the real frame boundary and local eye captures. The render callback
+// observes which native pair the owner selects without creating swapchains.
+template<class Check,class Seed> void runFgCameraWithdrawalCases(Check check,Seed seed) {
+  enum class Trial { Pending, CompletedAfterCut, Retained, Stale, MissingRight, OriginChangedDuringDraw, NoRender };
+  for(auto trial:{Trial::Pending,Trial::CompletedAfterCut,Trial::Retained,Trial::Stale,
+                 Trial::MissingRight,Trial::OriginChangedDuringDraw,Trial::NoRender}) {
+    launch_fixture::Fixture fixture;auto& h=fixture.host;
+    const fgbootstrap::Epoch epoch{h.runtimeGeneration,7,h.poses.read().originGeneration,3};
+    h.fgConfig=epoch.config;h.fgHistory=epoch.history;h.fgMultiplier=2;h.fgEnabled=true;
+    h.fgBootstrap.sync(epoch);h.fgBootstrap.displayNative(70);h.fgDisplayedSequence=70;
+    h.startupOptions.separateDevice=true;h.featureFrameKnown=true;h.featureFrame.sceneReady=1;
+    fixture.fake.shouldRender=trial!=Trial::NoRender;
+    const auto space=h.seated.frame().space;
+    const auto sourceTime=fixture.fake.frameTime-(trial==Trial::Stale?31:20); // 2x, 10 ticks per display slot.
+    const bool retained=trial==Trial::Retained;
+    const auto sequence=retained?70u:71u;
+    auto& capture=retained?h.fgFallback:h.fgPendingNative;
+    if(!seed(capture,trial!=Trial::MissingRight)){check(false,"FG camera withdrawal: native texture fixture");return;}
+
+    auto nativeEpoch=epoch;
+    if(trial==Trial::CompletedAfterCut) {
+      ++nativeEpoch.history;
+      h.fgBootstrap.sync(nativeEpoch);h.activeFrameSequence=sequence;
+    }
+    auto& views=retained?h.fgFallbackViews:h.fgPendingNativePose.views;
+    for(unsigned eye=0;eye<2;++eye) {
+      views[eye]=h.frameGeometry.views[eye];
+      views[eye].pose.position.x=eye?.035f:-.029f;
+    }
+    if(retained) {
+      h.fgFallbackValid=true;h.fgFallbackTime=sourceTime;h.fgFallbackSpace=space;
+      h.fgFallbackSequence=sequence;h.fgFallbackReference=epoch.reference;
+      h.fgOrdinaryFallback={nativeEpoch,sequence,sourceTime,space};
+    } else {
+      auto& pending=h.fgPendingNativePose;
+      pending.epoch=nativeEpoch;pending.sequence=sequence;pending.time=sourceTime;pending.space=space;
+      h.fgBootstrap.completeNative(sequence);
+    }
+    EdvrFgStatus cut{sizeof(EdvrFgStatus),EDVR_NATIVE_FRAME_GENERATION_VERSION_1};
+    cut.generation=epoch.generation;cut.configGeneration=epoch.config;cut.historyGeneration=epoch.history+1;
+    cut.requestedMultiplier=2;cut.state=EDVR_FG_UNAVAILABLE;cut.lastFailure=EDVR_FG_CAMERA_REFUSAL;
+    auto confirm=[&]{return h.fgCameraWithdrawal(cut);};
+    XrCompositionLayerProjectionView projectionViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+      {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    unsigned draws=0;
+    const auto render=[&](const XrView (&selected)[2],XrTime time,const EyeCapture& eyes,XrCompositionLayerProjection& layer) {
+      ++draws;
+      check(time==sourceTime&& &eyes==&capture&&eyes.texture(vr::Eye_Left)&&eyes.texture(vr::Eye_Right)&&
+        selected[0].pose.position.x==-.029f&&selected[1].pose.position.x==.035f,
+        "FG camera withdrawal: both eyes still use the selected native pair and its original poses");
+      layer.space=space;layer.viewCount=2;layer.views=projectionViews;
+      if(trial==Trial::OriginChangedDuringDraw)
+        check(h.poses.resetOrigin(h.compositorGeneration),"FG camera withdrawal: invalidate the origin during replacement");
+      return XR_SUCCESS;
+    };
+    h.gameFrameCallMs=GetTickCount64();
+    check(fixture.initialized&&h.boundary.waitAndBegin()==XR_SUCCESS&&confirm(),
+      "FG camera withdrawal: same owner and configuration open one real slot");
+    const auto slot=h.boundary.frame();
+    const auto result=h.fgFillCameraWithdrawal(cut,confirm,render);
+    const bool rescue=trial==Trial::Pending||trial==Trial::CompletedAfterCut||retained;
+    check(result==XR_SUCCESS&&draws==unsigned(rescue||trial==Trial::OriginChangedDuringDraw)&&
+      h.boundary.frame().sequence==slot.sequence&&!h.presentationCounts.generatedFrames,
+      "FG camera withdrawal: replacement reuses the open frame and never submits a generated image");
+    if(rescue) {
+      check(fixture.fake.endCalls==1&&h.boundary.frame().status==FrameStatus::Ended&&
+        h.presentationCounts.nativeFrames==unsigned(!retained)&&h.presentationCounts.repeatedFrames==unsigned(retained)&&
+        !h.presentationCounts.emptyFrames,
+        "FG camera withdrawal: a verified pair presents once with the correct native or repeat receipt");
+    } else {
+      if(h.state.frameOpen())check(h.fgEndPrepared(nullptr,edvr::NativePresentationKind::Empty)==XR_SUCCESS,
+        "FG camera withdrawal: the owner closes the unfilled slot normally");
+      check(fixture.fake.endCalls==1&&h.boundary.frame().status==FrameStatus::NoRender&&
+        !h.presentationCounts.nativeFrames&&!h.presentationCounts.repeatedFrames&&h.presentationCounts.emptyFrames==1,
+        "FG camera withdrawal: stale, incomplete or invalidated eyes yield exactly one empty submission");
+    }
+  }
+}
+
 template<class Check> void runFgBootstrapCases(Check check) {
   runFgLatePhaseCases(check);
   runFgSubmittedEndpointCases(check);
@@ -422,14 +501,16 @@ template<class Check> void runFgBootstrapCases(Check check) {
   ComPtr<ID3D11Texture2D> sources[2];
   check(SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[0]))&&SUCCEEDED(producer->CreateTexture2D(&td,nullptr,&sources[1])),"FG bootstrap: distinct native eyes");
   if(!sources[0]||!sources[1])return;
-  runFgCoverageEndpointCases(check,[&](EyeCapture& capture) {
+  const auto seedNative=[&](EyeCapture& capture,bool right=true) {
     if(FAILED(capture.initialize(producer.Get())))return false;
-    for(unsigned eye=0;eye<2;++eye) {
+    for(unsigned eye=0;eye<(right?2u:1u);++eye) {
       const vr::Texture_t texture{sources[eye].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
       if(capture.capture(vr::EVREye(eye),&texture)!=vr::VRCompositorError_None)return false;
     }
     return true;
-  });
+  };
+  runFgCoverageEndpointCases(check,seedNative);
+  runFgCameraWithdrawalCases(check,seedNative);
   launch_fixture::Fixture fixture;auto& h=fixture.host;
   ExclusiveExecutor executor; // This fixture alone owns both WARP context roles.
   check(fixture.initialized&&SUCCEEDED(h.captured.initializeShared(producer.Get(),device.Get(),&executor))&&SUCCEEDED(h.fgFallback.initialize(device.Get()))&&
@@ -565,18 +646,23 @@ template<class Check> void runFgBootstrapCases(Check check) {
     check(!h.fgCanSubmitBatch(candidate),"FG eligibility: changed configuration invalidates cached images");
     --proof.configGeneration;proof.activeMultiplier=3;
     check(!fgadmission::providerReady(proof,h.runtimeGeneration),"FG eligibility: a different active multiplier cannot arm cadence");
-    proof.activeMultiplier=0;proof.state=EDVR_FG_UNAVAILABLE;
+    proof.activeMultiplier=0;proof.state=EDVR_FG_UNAVAILABLE;proof.lastFailure=EDVR_FG_CAMERA_REFUSAL;
+    proof.historyGeneration=epoch.history+1;h.fgHistory=epoch.history;
     // The left eye of the already-lent credit was accepted while the
     // provider was qualified. The right eye remains a valid native submit.
     auto nativePose=h.poses.read();nativePose.sequence=h.activeFrameSequence;nativePose.posesAvailable=true;
     check(h.poses.publish(nativePose),"FG handoff: authentic live native credit");
     h.fgBootstrap.sync(epoch);h.startupOptions.separateDevice=true;
+    h.featureFrameKnown=true;h.featureFrame.sceneReady=1;
     h.fgEnabled=true;h.fgNativeOutstanding=true;h.fgAcceptedEyes=1;images.ready=true;
     h.gameFrameCallMs=GetTickCount64();
     auto operation=h.gate.tryEnter(h.runtimeGeneration);
-    check(!h.fgCanSubmitBatch(candidate)&&h.fgTickOwner(operation)&&!h.fgEnabled&&!h.fgNativeOutstanding&&
-      !h.fgAcceptedEyes&&!images.ready&&h.fgResumedNative&&h.state.frameOpen(),
-      "FG eligibility: lost proof drops cached images and hands the real partial credit to native cadence");
+    const auto partialSlot=h.boundary.frame().sequence;
+    const auto partialEnds=fixture.fake.endCalls;
+    check(h.fgCameraWithdrawal(proof)&&!h.fgCanSubmitBatch(candidate)&&h.fgTickOwner(operation)&&
+      !h.fgEnabled&&!h.fgNativeOutstanding&&!h.fgAcceptedEyes&&!images.ready&&h.fgResumedNative&&
+      h.state.frameOpen()&&h.boundary.frame().sequence==partialSlot&&fixture.fake.endCalls==partialEnds,
+      "FG camera withdrawal: leave the real partial credit in its open slot and drop cached generated images");
     const vr::Texture_t right{sources[1].Get(),vr::API_DirectX,vr::ColorSpace_Gamma};
     const auto ends=fixture.fake.endCalls;
     check(h.boundary.submit(vr::Eye_Left,&right)==vr::VRCompositorError_InvalidTexture&&

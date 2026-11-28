@@ -184,6 +184,7 @@ public:
       generated_=true;
     }
   }
+  uint64_t committedSequence() const {return committed_;}
   bool needsEndpoint(uint64_t sequence) const {return committed_&&sequence==committed_;}
 };
 } // namespace edvr::openxr::fgbootstrap

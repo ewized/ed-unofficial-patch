@@ -11,6 +11,9 @@
 #define EDVR_FG_BATCH_VERSION_3 3u
 #define EDVR_FG_BATCH_VERSION_4 4u
 #define EDVR_FG_UI_NATIVE_COVERAGE 1u
+// Camera guides failed validation. This wire value is shared by the provider
+// and the XR owner's native-only handoff.
+#define EDVR_FG_CAMERA_REFUSAL 5u
 // Provider already cut this history on admitted, bilateral protected HUD motion.
 // The XR owner may acknowledge that cut after retiring its own import state.
 #define EDVR_FG_NATIVE_COVERAGE 0x10002u

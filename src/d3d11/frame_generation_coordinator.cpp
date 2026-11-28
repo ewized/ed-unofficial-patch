@@ -40,7 +40,7 @@ namespace {
 using Microsoft::WRL::ComPtr;
 using InputLease = std::shared_ptr<FrameGenerationInteropLease>;
 enum Failure : uint32_t {None, SourceMismatch, TemporalMismatch, Unsupported, MissingPrevious,
-    Camera, Guides, Ui, Interop, Busy, Ngx, Output, Device, Closing};
+    Camera=EDVR_FG_CAMERA_REFUSAL, Guides, Ui, Interop, Busy, Ngx, Output, Device, Closing};
 std::atomic<uint32_t> requested{0};
 std::atomic<uint64_t> configuration{1};
 std::atomic<bool> automatic{false};

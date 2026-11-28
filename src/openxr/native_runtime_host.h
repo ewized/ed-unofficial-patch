@@ -321,7 +321,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     uint64_t sequence=0;
     XrTime time=0;
     XrSpace space=XR_NULL_HANDLE;
-  } fgAnnouncedNative,fgSubmittedNative;
+  } fgAnnouncedNative,fgSubmittedNative,fgOrdinaryFallback;
   EyeCapture fgFallback;
   EyeCapture fgPendingNative;
   struct FgPendingNativePose {
